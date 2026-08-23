@@ -41,7 +41,7 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.4";
+    const string APP_VERSION = "0.0.5";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     const string LATEST_API = "https://api.github.com/repos/oadank/win-desktop-helper/releases/latest";
     const string MUTEX_NAME = @"Global\WinDesktopHelper"; // 单实例互斥(跨会话, 防双进程)
@@ -373,6 +373,31 @@ public class ShotService
                            ",\"shots\":" + ShotCount + ",\"uptimeSec\":" + (int)(DateTime.Now - StartTime).TotalSeconds + ",\"version\":\"2.0\",\"appVersion\":\"" + APP_VERSION + "\"}";
                 }
                 else if (path == "/active") { body = ActiveWindowJson(); }
+                else if (path.StartsWith("/img/"))
+                {
+                    // 托管 Screenshots 目录下的图片: /img/<文件名> → PNG 字节
+                    // 用途: DSH 对话里助手消息的 Markdown 图片必须是绝对 http(s) 地址才渲染,
+                    //       截图后用此端点提供 http://127.0.0.1:PORT/img/xxx.png 给 agent 引用
+                    string fname = target.Substring("/img/".Length);
+                    fname = Path.GetFileName(fname); // 防目录穿越
+                    string fp = Path.Combine(ShotDir, fname);
+                    if (File.Exists(fp))
+                    {
+                        byte[] imgBytes = File.ReadAllBytes(fp);
+                        string ext = Path.GetExtension(fp).ToLowerInvariant();
+                        string mime = ext == ".jpg" || ext == ".jpeg" ? "image/jpeg" : ext == ".gif" ? "image/gif" : ext == ".webp" ? "image/webp" : "image/png";
+                        using (var fs = client.GetStream())
+                        {
+                            string imgHead = "HTTP/1.1 200 OK\r\nContent-Type: " + mime + "\r\nContent-Length: " + imgBytes.Length + "\r\nCache-Control: max-age=3600\r\nConnection: close\r\n\r\n";
+                            byte[] imgHb = Encoding.ASCII.GetBytes(imgHead);
+                            fs.Write(imgHb, 0, imgHb.Length);
+                            fs.Write(imgBytes, 0, imgBytes.Length);
+                            fs.Flush();
+                        }
+                        return; // 已手写响应, 不走公共 JSON 响应
+                    }
+                    else { code = 404; body = "{\"ok\":false,\"error\":\"image not found\"}"; }
+                }
                 else if (path == "/guide")
                 {
                     string guide = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SKILL.md");
@@ -434,7 +459,9 @@ public class ShotService
                         string fp = DoShot(r);
                         FileInfo fi = new FileInfo(fp);
                         Interlocked.Increment(ref ShotCount);
-                        body = "{\"ok\":true,\"file\":\"" + JsonEscape(fp) + "\",\"width\":" + r.Width + ",\"height\":" + r.Height +
+                        // url 字段: 供 DSH 助手消息用 Markdown 图片语法渲染 (http 绝对地址才显示)
+                        string imgUrl = "http://127.0.0.1:" + PORT + "/img/" + Uri.EscapeDataString(Path.GetFileName(fp));
+                        body = "{\"ok\":true,\"file\":\"" + JsonEscape(fp) + "\",\"url\":\"" + imgUrl + "\",\"width\":" + r.Width + ",\"height\":" + r.Height +
                                ",\"bytes\":" + fi.Length + ",\"region\":{\"x\":" + r.X + ",\"y\":" + r.Y + ",\"w\":" + r.Width + ",\"h\":" + r.Height + "}}";
                     }
                 }
