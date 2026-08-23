@@ -15,4 +15,5 @@ node_modules/
 .DS_Store
 Thumbs.db
 # Inno 卸载残留
-unins000.*
+unins*.dat
+
