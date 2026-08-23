@@ -19,6 +19,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ShowLanguageDialog=no
 WizardStyle=modern
 CloseApplications=yes
+SetupIconFile=icon.ico
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面图标"; GroupDescription: "附加任务:"

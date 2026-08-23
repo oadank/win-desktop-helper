@@ -41,9 +41,11 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.3";
+    const string APP_VERSION = "0.0.4";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     const string LATEST_API = "https://api.github.com/repos/oadank/win-desktop-helper/releases/latest";
+    const string MUTEX_NAME = @"Global\WinDesktopHelper"; // 单实例互斥(跨会话, 防双进程)
+    static Mutex instanceMutex;
     static readonly string ShotDir = Environment.GetEnvironmentVariable("WDH_SHOT_DIR")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Screenshots");
     static readonly string LogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shot-service.log");
@@ -508,6 +510,15 @@ public class ShotService
     [STAThread]
     public static void Main(string[] args)
     {
+        // 单实例互斥: 已有实例则直接退出 (防 Session 0/1 双进程抢端口)
+        bool createdNew;
+        try
+        {
+            instanceMutex = new Mutex(true, MUTEX_NAME, out createdNew);
+            if (!createdNew) { Log("another instance running, exit"); return; }
+        }
+        catch (Exception ex) { Log("mutex err: " + ex.Message); }
+
         bool allowTray = true, watchMode = false;
         foreach (string a in args)
         {
