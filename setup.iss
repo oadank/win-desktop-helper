@@ -18,6 +18,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ShowLanguageDialog=no
 WizardStyle=modern
+CloseApplications=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面图标"; GroupDescription: "附加任务:"
@@ -41,6 +42,7 @@ Name: "{autodesktop}\Win Desktop Helper"; Filename: "{app}\shot-service.exe"; Ta
 
 [Run]
 Filename: "{cmd}"; Parameters: "/c schtasks /create /tn dsh-shot-helper /tr ""{app}\shot-service.exe"" /sc once /st 00:00 /it /ru {username} /f"; Flags: runhidden; StatusMsg: "创建计划任务(手动拉起入口)..."
+Filename: "{app}\shot-watcher.exe"; Flags: nowait; StatusMsg: "启动自愈守护..."
 Filename: "{app}\shot-service.exe"; Description: "立即启动 Win Desktop Helper"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]

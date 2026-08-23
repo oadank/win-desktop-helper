@@ -41,6 +41,9 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
+    const string APP_VERSION = "0.0.2";
+    const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
+    const string LATEST_API = "https://api.github.com/repos/oadank/win-desktop-helper/releases/latest";
     static readonly string ShotDir = Environment.GetEnvironmentVariable("WDH_SHOT_DIR")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Screenshots");
     static readonly string LogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shot-service.log");
@@ -350,7 +353,7 @@ public class ShotService
                 q[key] = val;
             }
 
-            bool needUserSession = path.StartsWith("/mouse") || path.StartsWith("/keyboard") || path == "/shot" || path.StartsWith("/app");
+            bool needUserSession = path.StartsWith("/mouse") || path.StartsWith("/keyboard") || path == "/shot" || path.StartsWith("/app") || path == "/open-repo";
             bool control = path.StartsWith("/mouse") || path.StartsWith("/keyboard");
             int code = 200;
             string body = "";
@@ -365,7 +368,7 @@ public class ShotService
                 else if (path == "/health")
                 {
                     body = "{\"ok\":true,\"pid\":" + Process.GetCurrentProcess().Id + ",\"session\":" + MySession +
-                           ",\"shots\":" + ShotCount + ",\"uptimeSec\":" + (int)(DateTime.Now - StartTime).TotalSeconds + ",\"version\":\"2.0\"}";
+                           ",\"shots\":" + ShotCount + ",\"uptimeSec\":" + (int)(DateTime.Now - StartTime).TotalSeconds + ",\"version\":\"2.0\",\"appVersion\":\"" + APP_VERSION + "\"}";
                 }
                 else if (path == "/active") { body = ActiveWindowJson(); }
                 else if (path == "/guide")
@@ -373,6 +376,24 @@ public class ShotService
                     string guide = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SKILL.md");
                     if (File.Exists(guide)) body = File.ReadAllText(guide, Encoding.UTF8);
                     else { code = 404; body = "{\"ok\":false,\"error\":\"SKILL.md not found\"}"; }
+                }
+                else if (path == "/check-update")
+                {
+                    string v = LatestVersion();
+                    bool upd = v != null && IsNewerVersion(v);
+                    body = "{\"ok\":true,\"current\":\"" + APP_VERSION + "\",\"latest\":\"" + (v == null ? "unknown" : v) + "\",\"update\":" + (upd ? "true" : "false") + ",\"repo\":\"" + REPO_URL + "\"}";
+                }
+                else if (path == "/update")
+                {
+                    Thread t = new Thread(new ThreadStart(DoUpdateSilent));
+                    t.IsBackground = true;
+                    t.Start();
+                    body = "{\"ok\":true,\"msg\":\"update started (silent)\"}";
+                }
+                else if (path == "/open-repo")
+                {
+                    try { Process.Start(REPO_URL); body = "{\"ok\":true}"; }
+                    catch (Exception ex) { code = 500; body = "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
                 }
                 else if (path == "/window")
                 {
@@ -487,17 +508,34 @@ public class ShotService
     [STAThread]
     public static void Main(string[] args)
     {
-        bool allowTray = true;
-        foreach (string a in args) { if (a != null && a.ToLowerInvariant() == "-notray") allowTray = false; }
+        bool allowTray = true, watchMode = false;
+        foreach (string a in args)
+        {
+            string x = (a ?? "").ToLowerInvariant();
+            if (x == "-notray") allowTray = false;
+            else if (x == "-watch") watchMode = true;
+        }
         try { SetProcessDPIAware(); } catch { }
-        Log("shot-service v2 start session=" + MySession + " pid=" + Process.GetCurrentProcess().Id + (allowTray ? " tray=on" : " tray=off"));
+        // .NET 4.8 默认 TLS1.0, GitHub API 需 TLS1.2 (否则更新检测失败)
+        try { System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12; } catch { }
+        Log("shot-service v3 session=" + MySession + " pid=" + Process.GetCurrentProcess().Id +
+            " mode=" + (watchMode ? "watch" : "service") + (allowTray ? " tray=on" : " tray=off"));
         try { if (!Directory.Exists(ShotDir)) Directory.CreateDirectory(ShotDir); } catch { }
+
+        if (watchMode) { RunWatch(); return; }    // 自愈守护 (替代 shot-watcher.exe)
 
         Thread srv = new Thread(new ThreadStart(ServerLoop));
         srv.IsBackground = true;
         srv.Start();
 
-        if (allowTray) { InitTray(); Application.Run(); }
+        if (allowTray)
+        {
+            InitTray();
+            Thread upChk = new Thread(new ThreadStart(CheckUpdateSilent));
+            upChk.IsBackground = true;
+            upChk.Start();
+            Application.Run();
+        }
         else { while (true) Thread.Sleep(60000); }
     }
 
@@ -524,6 +562,320 @@ public class ShotService
         }
     }
 
+    // ---- 更新检测 / 项目主页 ----
+    static string GetToken()
+    {
+        string tk = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+        if (string.IsNullOrEmpty(tk))
+        {
+            string tf = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".wdh-gh-token");
+            if (File.Exists(tf)) tk = File.ReadAllText(tf).Trim();
+        }
+        return tk;
+    }
+
+    // API 客户端: 带 User-Agent; 有 token 则带认证(访问 private 仓库)
+    static WebClient NewApiClient()
+    {
+        var wc = new WebClient();
+        wc.Headers.Add("User-Agent", "win-desktop-helper/" + APP_VERSION);
+        string tk = GetToken();
+        if (!string.IsNullOrEmpty(tk)) wc.Headers.Add("Authorization", "token " + tk);
+        return wc;
+    }
+
+    // 下载 release asset (GitHub 官方姿势: 先带认证拿 302 Location, 再不带认证跟随下载, 避免 Authorization 泄漏到 CDN)
+    static void DownloadAsset(long assetId, string dest)
+    {
+        string api = "https://api.github.com/repos/oadank/win-desktop-helper/releases/assets/" + assetId;
+        string token = GetToken();
+        var req1 = (HttpWebRequest)WebRequest.Create(api);
+        req1.UserAgent = "win-desktop-helper/" + APP_VERSION;
+        req1.Accept = "application/octet-stream";
+        req1.AllowAutoRedirect = false;
+        if (!string.IsNullOrEmpty(token)) req1.Headers["Authorization"] = "token " + token;
+        req1.Timeout = 60000;
+        string location = null;
+        using (var resp1 = (HttpWebResponse)req1.GetResponse())
+        {
+            int code = (int)resp1.StatusCode;
+            if (code == 302 || code == 301) location = resp1.Headers["Location"];
+            else if (code == 200) { using (var fs = File.Create(dest)) resp1.GetResponseStream().CopyTo(fs); return; } // 直接 200 (罕见)
+        }
+        if (string.IsNullOrEmpty(location)) throw new Exception("asset redirect missing");
+        // 第二步: 用 WebClient 跟随 Location 下载 (实测稳定, 不带任何认证头)
+        using (var wc2 = new WebClient())
+        {
+            wc2.Headers.Add("User-Agent", "win-desktop-helper/" + APP_VERSION);
+            wc2.DownloadFile(location, dest);
+        }
+    }
+
+    static string LatestVersion()
+    {
+        try
+        {
+            using (var wc = NewApiClient())
+            {
+                string json = wc.DownloadString(LATEST_API);
+                int i = json.IndexOf("\"tag_name\":");
+                if (i >= 0)
+                {
+                    int s = json.IndexOf('"', i + 11);
+                    int e = json.IndexOf('"', s + 1);
+                    if (s >= 0 && e > s) return json.Substring(s + 1, e - s - 1);
+                }
+            }
+        }
+        catch (Exception ex) { Log("update check err: " + ex.Message); }
+        return null;
+    }
+
+    static bool IsNewerVersion(string remote)
+    {
+        string r = (remote ?? "").TrimStart('v', 'V');
+        string[] rp = r.Split('.');
+        string[] lp = APP_VERSION.Split('.');
+        for (int i = 0; i < Math.Max(rp.Length, lp.Length); i++)
+        {
+            int rv = 0, lv = 0;
+            if (i < rp.Length) int.TryParse(rp[i], out rv);
+            if (i < lp.Length) int.TryParse(lp[i], out lv);
+            if (rv != lv) return rv > lv;
+        }
+        return false;
+    }
+
+    // 启动时静默检查: 有新版 → 自动静默更新
+    static void CheckUpdateSilent()
+    {
+        string v = LatestVersion();
+        if (v != null && IsNewerVersion(v))
+        {
+            try { TrayIcon.ShowBalloonTip(6000, "发现新版本 v" + v.TrimStart('v', 'V'), "正在自动静默更新，完成后自动恢复...", ToolTipIcon.Info); } catch { }
+            Thread.Sleep(2500);
+            DoUpdateSilent();
+        }
+    }
+
+    // 自动静默更新: 下载最新 setup 并静默安装到当前目录（保持路径不变，装完由 watcher 拉起新版）
+    static int updatingFlag = 0; // 防重入(启动自动检查与手动触发可能并发)
+    static void DoUpdateSilent()
+    {
+        if (Interlocked.Exchange(ref updatingFlag, 1) == 1) return;
+        try
+        {
+            string tmp = Path.Combine(Path.GetTempPath(), "wdh-update-setup.exe");
+            using (var wc = NewApiClient())
+            {
+                string json = wc.DownloadString(LATEST_API);
+                long assetId = 0;
+                int ia = json.IndexOf("\"assets\":[");
+                if (ia >= 0)
+                {
+                    int j = json.IndexOf("\"id\":", ia);
+                    if (j >= 0)
+                    {
+                        int s = j + 5;
+                        while (s < json.Length && !char.IsDigit(json[s])) s++;
+                        int e = s;
+                        while (e < json.Length && char.IsDigit(json[e])) e++;
+                        if (e > s) long.TryParse(json.Substring(s, e - s), out assetId);
+                    }
+                }
+                if (assetId == 0) { Log("update: no asset id found"); return; }
+                DownloadAsset(assetId, tmp);
+            }
+            string dir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\') + "\\";
+            // 停止自愈守护, 避免安装期间 watcher 拉起旧版占用 exe
+            try { foreach (var p in Process.GetProcessesByName("shot-watcher")) { try { p.Kill(); } catch { } } } catch { }
+            Process.Start(tmp, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"" + dir + "\"");
+            Log("update: silent installer launched, target=" + dir);
+            // 本进程退出以释放 exe 占用(CloseApplications 对无窗口 winexe 不可靠);
+            // 装完 iss 的 [Run] 会拉起 watcher -> 新服务恢复
+            Thread.Sleep(2500);
+            Environment.Exit(0);
+        }
+        catch (Exception ex) { Log("update err: " + ex.Message); }
+    }
+
+    // ---- 模式: -watch 自愈守护 (替代独立 shot-watcher.exe) ----
+    static bool ServiceAlive()
+    {
+        try { using (TcpClient c = new TcpClient("127.0.0.1", PORT)) { return true; } }
+        catch { }
+        return false;
+    }
+
+    static void RunWatch()
+    {
+        DateTime last = DateTime.MinValue;
+        while (true)
+        {
+            if (!ServiceAlive() && (DateTime.Now - last).TotalMilliseconds > 15000)
+            {
+                try { Process.Start(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shot-service.exe")); last = DateTime.Now; Log("watch: relaunch shot-service"); }
+                catch (Exception ex) { Log("watch relaunch fail: " + ex.Message); }
+            }
+            Thread.Sleep(30000);
+        }
+    }
+
+    // ---- 模式: -mcp MCP stdio server (与 mcp-bridge.js 等价, 一个 exe 内置, 无需 node) ----
+    // winexe 无控制台, .NET Console 不可用 → 用原生句柄读写 stdin/stdout
+    [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int nStdHandle); // -10=stdin -11=stdout
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadFile(IntPtr h, byte[] buf, uint n, out uint read, IntPtr ov);
+    [DllImport("kernel32.dll")] static extern bool WriteFile(IntPtr h, byte[] buf, uint n, out uint written, IntPtr ov);
+
+    static string McpParam(Dictionary<string, object> a, string key) { object v; return (a != null && a.TryGetValue(key, out v) && v != null) ? v.ToString() : ""; }
+    static int McpParamInt(Dictionary<string, object> a, string key) { int n; int.TryParse(McpParam(a, key), out n); return n; }
+
+    static void RunMcp()
+    {
+        IntPtr hIn = GetStdHandle(-10), hOut = GetStdHandle(-11);
+        byte[] buf = new byte[65536];
+        StringBuilder pending = new StringBuilder();
+        bool skillRead = false;
+        while (true)
+        {
+            uint read;
+            if (!ReadFile(hIn, buf, (uint)buf.Length, out read, IntPtr.Zero) || read == 0) break;
+            pending.Append(Encoding.UTF8.GetString(buf, 0, (int)read));
+            string s = pending.ToString();
+            pending.Clear();
+            int nl;
+            while ((nl = s.IndexOf('\n')) >= 0)
+            {
+                string line = s.Substring(0, nl).TrimEnd('\r');
+                s = s.Substring(nl + 1);
+                if (line.Trim().Length == 0) continue;
+                string resp = McpHandle(line, ref skillRead);
+                if (resp != null)
+                {
+                    byte[] ob = Encoding.UTF8.GetBytes(resp + "\n");
+                    uint w; WriteFile(hOut, ob, (uint)ob.Length, out w, IntPtr.Zero);
+                }
+            }
+            pending.Append(s);
+        }
+    }
+
+    static string McpHandle(string line, ref bool skillRead)
+    {
+        try
+        {
+            var ser = new System.Web.Script.Serialization.JavaScriptSerializer();
+            var msg = ser.Deserialize<Dictionary<string, object>>(line);
+            object idObj; msg.TryGetValue("id", out idObj);
+            string id = idObj == null ? "null" : idObj.ToString();
+            string method = msg.ContainsKey("method") ? msg["method"].ToString() : "";
+            Dictionary<string, object> prms = (msg.ContainsKey("params") && msg["params"] is Dictionary<string, object>)
+                ? (Dictionary<string, object>)msg["params"] : new Dictionary<string, object>();
+
+            if (method == "initialize")
+                return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"win-desktop-helper\",\"version\":\"3.0\"}}";
+            if (method == "ping") return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{}}";
+            if (method == "notifications/initialized" || method == "notifications/cancelled") return null;
+            if (method == "tools/list")
+                return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"tools\":" + McpToolsJson() + "}}";
+            if (method == "tools/call")
+            {
+                string name = prms.ContainsKey("name") ? prms["name"].ToString() : "";
+                Dictionary<string, object> args = (prms.ContainsKey("arguments") && prms["arguments"] is Dictionary<string, object>)
+                    ? (Dictionary<string, object>)prms["arguments"] : new Dictionary<string, object>();
+                return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + McpCall(name, args, ref skillRead) + "}";
+            }
+            return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"error\":{\"code\":-32601,\"message\":\"method not found\"}}";
+        }
+        catch (Exception ex) { Log("mcp parse err: " + ex.Message); return null; }
+    }
+
+    static string McpText(string s, bool isError) { return "{\"content\":[{\"type\":\"text\",\"text\":\"" + JsonEscape(s) + "\"}],\"isError\":" + (isError ? "true" : "false") + "}"; }
+
+    static string McpCall(string name, Dictionary<string, object> a, ref bool skillRead)
+    {
+        if (name == "get_skill")
+        {
+            skillRead = true;
+            string fp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SKILL.md");
+            string txt = File.Exists(fp) ? File.ReadAllText(fp, Encoding.UTF8) : "(SKILL.md 缺失，无法读取操作手册)";
+            return McpText(txt + "\n\n—— 请遵守以上 SKILL 纪律。执行中若踩坑，务必用 update_skill 把经验写回 SKILL.md（全体 agent 共享），不要只写进自己的记忆。", false);
+        }
+        if (name == "update_skill")
+        {
+            try
+            {
+                string fp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SKILL.md");
+                string t = McpParam(a, "title"); if (t == "") t = "经验补充";
+                File.AppendAllText(fp, "\n## " + t + "\n\n" + McpParam(a, "entry") + "\n", Encoding.UTF8);
+                return McpText("已写入共享 SKILL.md: " + fp, false);
+            }
+            catch (Exception ex) { return McpText("写入失败: " + ex.Message, true); }
+        }
+        if (!skillRead) return McpText("⚠️ 本服务强制要求：首次操作前必须先调用 get_skill 获取 SKILL 操作手册与安全纪律。请先调用 get_skill 再重试。踩坑后用 update_skill 写回共享 SKILL.md。", true);
+        try
+        {
+            switch (name)
+            {
+                case "screen_capture":
+                {
+                    Rectangle r = VirtualScreen();
+                    if (McpParam(a, "screen") != "") { int idx = McpParamInt(a, "screen"); if (idx >= 0 && idx < Screen.AllScreens.Length) r = Screen.AllScreens[idx].Bounds; }
+                    else if (McpParam(a, "x") != "" && McpParam(a, "y") != "" && McpParam(a, "w") != "" && McpParam(a, "h") != "") r = new Rectangle(McpParamInt(a, "x"), McpParamInt(a, "y"), McpParamInt(a, "w"), McpParamInt(a, "h"));
+                    else if (McpParam(a, "window") != "")
+                    {
+                        IntPtr h = FindWindowByTitle(McpParam(a, "window"));
+                        if (h == IntPtr.Zero) return McpText("{\"ok\":false,\"error\":\"window not found\"}", true);
+                        RECT rc; GetWindowRect(h, out rc); r = new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top);
+                    }
+                    string fp = DoShot(r);
+                    FileInfo fi = new FileInfo(fp);
+                    return McpText("{\"ok\":true,\"file\":\"" + JsonEscape(fp) + "\",\"width\":" + r.Width + ",\"height\":" + r.Height + ",\"bytes\":" + fi.Length + "}", false);
+                }
+                case "window_info":
+                {
+                    string wj = WindowJsonByTitle(McpParam(a, "title"));
+                    return wj == null ? McpText("{\"ok\":false,\"error\":\"window not found\"}", true) : McpText(wj, false);
+                }
+                case "active_window": return McpText(ActiveWindowJson(), false);
+                case "monitors": return McpText(MonitorsJson(), false);
+                case "mouse_move": { int x = McpParamInt(a, "x"), y = McpParamInt(a, "y"); MouseMove(x, y); return McpText("{\"ok\":true,\"x\":" + x + ",\"y\":" + y + "}", false); }
+                case "mouse_click":
+                {
+                    string button = McpParam(a, "button"); if (button == "") button = "left";
+                    bool dbl = McpParam(a, "double") == "1";
+                    if (McpParam(a, "x") != "" && McpParam(a, "y") != "") MouseMove(McpParamInt(a, "x"), McpParamInt(a, "y"));
+                    MouseClick(button, dbl);
+                    return McpText("{\"ok\":true,\"button\":\"" + button + "\",\"double\":" + (dbl ? "true" : "false") + "}", false);
+                }
+                case "mouse_scroll": { int d = McpParamInt(a, "delta"); MouseScroll(d); return McpText("{\"ok\":true,\"delta\":" + d + "}", false); }
+                case "keyboard_type": { string t = McpParam(a, "text"); TypeText(t); return McpText("{\"ok\":true,\"chars\":" + t.Length + "}", false); }
+                case "keyboard_press": { string k = McpParam(a, "keys"); PressCombo(k); return McpText("{\"ok\":true,\"keys\":\"" + JsonEscape(k) + "\"}", false); }
+                case "app_run": { return McpText(AppRun(McpParam(a, "path"), McpParam(a, "args")), false); }
+                default: return McpText("unknown tool: " + name, true);
+            }
+        }
+        catch (Exception ex) { return McpText("error: " + ex.Message, true); }
+    }
+
+    static string McpToolsJson()
+    {
+        return "[" +
+            "{\"name\":\"screen_capture\",\"description\":\"截取用户桌面指定区域，返回 PNG 文件路径。region=all 全屏(默认)；screen=0 指定显示器；x,y,w,h 任意矩形；window=窗口标题关键词\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"region\":{\"type\":\"string\"},\"screen\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"window\":{\"type\":\"string\"}}}}," +
+            "{\"name\":\"window_info\",\"description\":\"按窗口标题关键词查询窗口信息 {hwnd,title,process,rect}，操作前定位用。查不到返回 ok:false\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"]}}," +
+            "{\"name\":\"active_window\",\"description\":\"获取当前活动窗口信息 {title,process,rect}\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
+            "{\"name\":\"monitors\",\"description\":\"列出显示器元数据（分辨率/主屏/设备名）\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
+            "{\"name\":\"mouse_move\",\"description\":\"移动鼠标到物理像素坐标\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\"]}}," +
+            "{\"name\":\"mouse_click\",\"description\":\"点击（带坐标先移动再点）。button=left|right|middle，double=1 双击\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"}}}}," +
+            "{\"name\":\"mouse_scroll\",\"description\":\"滚轮：正数=向上滚，负数=向下滚（典型 ±120）\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"delta\":{\"type\":\"number\"}},\"required\":[\"delta\"]}}," +
+            "{\"name\":\"keyboard_type\",\"description\":\"向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," +
+            "{\"name\":\"keyboard_press\",\"description\":\"按组合键，如 ctrl+shift+a / enter / alt+f4 / win / ctrl+s\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"}},\"required\":[\"keys\"]}}," +
+            "{\"name\":\"app_run\",\"description\":\"运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"path\"]}}," +
+            "{\"name\":\"get_skill\",\"description\":\"【必须先调用】获取本服务 SKILL 操作手册（铁律/避坑/流程）。所有工具首次调用前强制先读本 SKILL，否则报错。踩坑必须 update_skill 写回，禁止只写记忆。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
+            "{\"name\":\"update_skill\",\"description\":\"【踩坑必写】把新踩坑经验写回共享 SKILL.md（全体 agent 共享，立即生效）。title=小节标题，entry=markdown 正文\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"entry\":{\"type\":\"string\"}},\"required\":[\"title\",\"entry\"]}}" +
+            "]";
+    }
+
     // ---- 托盘（默认显示；右键菜单；隐藏后重启服务恢复） ----
     static void InitTray()
     {
@@ -532,6 +884,7 @@ public class ShotService
         TrayIcon.Text = "Win Desktop Helper\nSession " + MySession + " | :18800";
         TrayIcon.Visible = true;
         ContextMenuStrip menu = new ContextMenuStrip();
+        menu.Items.Add("Win Desktop Helper  v" + APP_VERSION, null, null).Enabled = false; // 只读版本显示
         menu.Items.Add("立即截图(全屏+复制路径)", null, delegate
         {
             try { string fp = DoShot(VirtualScreen()); Log("tray shot: " + fp); Clipboard.SetText(fp); TrayIcon.ShowBalloonTip(1500, "Win Desktop Helper", "已截图: " + fp, ToolTipIcon.Info); }
@@ -557,6 +910,19 @@ public class ShotService
             }
             catch (Exception ex) { Log("tray mcp cfg err: " + ex.Message); }
         });
+        menu.Items.Add("检查更新", null, delegate
+        {
+            try
+            {
+                string v = LatestVersion();
+                if (v == null) MessageBox.Show("无法连接 GitHub，请检查网络", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                else if (IsNewerVersion(v)) { MessageBox.Show("发现新版本 v" + v.TrimStart('v', 'V') + "，正在自动静默更新...", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information); Thread.Sleep(800); DoUpdateSilent(); }
+                else MessageBox.Show("已是最新版本 v" + APP_VERSION, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex) { MessageBox.Show("检查失败: " + ex.Message, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        });
+        menu.Items.Add("下载并安装更新", null, delegate { DoUpdateSilent(); });
+        menu.Items.Add("项目主页 (GitHub)", null, delegate { try { Process.Start(REPO_URL); } catch { } });
         menu.Items.Add("-");
         menu.Items.Add("隐藏托盘图标", null, delegate { TrayIcon.Visible = false; Log("tray hidden (restart service to show again)"); });
         menu.Items.Add("退出服务", null, delegate { Log("tray exit requested (watcher will relaunch)"); Environment.Exit(0); });
