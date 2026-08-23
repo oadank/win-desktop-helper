@@ -539,6 +539,23 @@ public class ShotService
         });
         menu.Items.Add("打开截图目录", null, delegate { try { if (Directory.Exists(ShotDir)) Process.Start("explorer.exe", "\"" + ShotDir + "\""); } catch { } });
         menu.Items.Add("打开日志", null, delegate { try { if (File.Exists(LogPath)) Process.Start("notepad.exe", "\"" + LogPath + "\""); } catch { } });
+        menu.Items.Add("复制 MCP 接入配置", null, delegate
+        {
+            try
+            {
+                string bridge = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mcp-bridge.js").Replace("\\", "/");
+                string txt = "【Win Desktop Helper MCP 接入配置】\n\n" +
+                    "[Claude Desktop] claude_desktop_config.json 的 mcpServers 加:\n" +
+                    "  \"win-desktop-helper\": { \"command\": \"node\", \"args\": [\"" + bridge + "\"] }\n\n" +
+                    "[DSH] ~/.dsh/mcp-servers.json 的 servers 数组加:\n" +
+                    "  { \"id\":\"win-desktop-helper\", \"serverName\":\"win-desktop-helper\", \"transport\":\"stdio\",\n" +
+                    "    \"command\":\"C:\\\\Program Files\\\\nodejs\\\\node.exe\", \"args\":[\"" + bridge + "\"], \"enabled\":true }\n\n" +
+                    "[通用] command=node, args=[" + bridge + "]";
+                Clipboard.SetText(txt);
+                TrayIcon.ShowBalloonTip(2000, "已复制 MCP 配置", "粘贴到 Claude Desktop / DSH mcp-servers.json 即可接入", ToolTipIcon.Info);
+            }
+            catch (Exception ex) { Log("tray mcp cfg err: " + ex.Message); }
+        });
         menu.Items.Add("-");
         menu.Items.Add("隐藏托盘图标", null, delegate { TrayIcon.Visible = false; Log("tray hidden (restart service to show again)"); });
         menu.Items.Add("退出服务", null, delegate { Log("tray exit requested (watcher will relaunch)"); Environment.Exit(0); });

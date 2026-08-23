@@ -10,6 +10,8 @@ const HOST = '127.0.0.1';
 const PORT = 18800;
 const VERSION = '1.0.0';
 
+let guideRead = false; // 强制闸门: 首次操作前必须先读 get_usage_guide
+
 // 工具定义（名称/说明/参数 —— 与 HTTP API 一一对应）
 const TOOLS = [
   {
@@ -104,8 +106,20 @@ const TOOLS = [
   },
   {
     name: 'get_usage_guide',
-    description: '获取本服务的完整操作手册（操作铁律、避坑速查、标准流程模板）。任何涉及操作鼠标/键盘/运行程序/截图的场景，建议先调用本工具读取操作纪律，避免误操作（例如：点前先定位、输入前先确认前台窗口、操作后验证）',
+    description: '获取本服务的完整操作手册（操作铁律、避坑速查、标准流程模板）。【必须最先调用】本服务所有工具在调用前都强制要求先调用本工具读取操作手册，否则工具会返回错误。',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} }
+  },
+  {
+    name: 'update_usage_guide',
+    description: '把新踩坑经验写回共享操作手册 OPERATING_GUIDE.md（全体 agent 共享，立即生效）。【约定：每次执行操作踩坑后必须调用本工具记录】，不要只记在自己的记忆里。参数 title=小节标题，entry=经验正文（markdown）',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        title: { type: 'string', description: '小节标题，如 "2026-08-23 窗口定位坑"' },
+        entry: { type: 'string', description: '经验正文（markdown，含现象/原因/解法）' }
+      },
+      required: ['title', 'entry']
+    }
   }
 ];
 
@@ -164,6 +178,7 @@ function buildUrl(name, args) {
 async function callTool(name, args) {
   // 说明书工具：返回操作手册全文（同目录 OPERATING_GUIDE.md，缺文件时回退内嵌简版）
   if (name === 'get_usage_guide') {
+    guideRead = true;
     let text = '';
     try { text = require('fs').readFileSync(require('path').join(__dirname, 'OPERATING_GUIDE.md'), 'utf8'); }
     catch (e) {
@@ -177,6 +192,20 @@ async function callTool(name, args) {
              '（完整版见仓库 OPERATING_GUIDE.md）';
     }
     return { content: [{ type: 'text', text }] };
+  }
+  // 写回工具：踩坑经验 append 进共享手册（全体 agent 可见）
+  if (name === 'update_usage_guide') {
+    const fs = require('fs'), path = require('path');
+    const file = path.join(__dirname, 'OPERATING_GUIDE.md');
+    try {
+      const entry = '\n## ' + (args.title || '经验补充') + '\n\n' + (args.entry || '') + '\n';
+      fs.appendFileSync(file, entry, 'utf8');
+      return { content: [{ type: 'text', text: '已写入共享手册: ' + file + '（下次任何 agent 调用 get_usage_guide 即可读到新经验）' }] };
+    } catch (e) { return { isError: true, content: [{ type: 'text', text: '写入失败: ' + e.message }] }; }
+  }
+  // 强制闸门：所有工具（含观察类）首次调用前必须先读手册
+  if (!guideRead) {
+    return { isError: true, content: [{ type: 'text', text: '⚠️ 本服务强制要求：首次操作前必须先调用 get_usage_guide 获取操作手册与安全纪律（点前定位 / 输入前确认前台 / 操作后验证 / 敏感操作确认）。请先调用 get_usage_guide，再重试本工具。踩坑后请用 update_usage_guide 把经验写回共享手册。' }] };
   }
   const u = buildUrl(name, args);
   if (!u) return { isError: true, content: [{ type: 'text', text: 'unknown tool: ' + name }] };
