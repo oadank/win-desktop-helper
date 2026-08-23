@@ -101,6 +101,11 @@ const TOOLS = [
       properties: { path: { type: 'string' }, args: { type: 'string' } },
       required: ['path']
     }
+  },
+  {
+    name: 'get_usage_guide',
+    description: '获取本服务的完整操作手册（操作铁律、避坑速查、标准流程模板）。任何涉及操作鼠标/键盘/运行程序/截图的场景，建议先调用本工具读取操作纪律，避免误操作（例如：点前先定位、输入前先确认前台窗口、操作后验证）',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} }
   }
 ];
 
@@ -157,6 +162,22 @@ function buildUrl(name, args) {
 }
 
 async function callTool(name, args) {
+  // 说明书工具：返回操作手册全文（同目录 OPERATING_GUIDE.md，缺文件时回退内嵌简版）
+  if (name === 'get_usage_guide') {
+    let text = '';
+    try { text = require('fs').readFileSync(require('path').join(__dirname, 'OPERATING_GUIDE.md'), 'utf8'); }
+    catch (e) {
+      text = '【Win Desktop Helper 操作手册·简版】\n' +
+             '1. 点任何东西前先 window_info/active_window 定位并确认前台；\n' +
+             '2. keyboard_type 发给当前前台窗口，输入前必须 active_window 确认目标；\n' +
+             '3. 操作后立即文件系统验证（保存对话框默认位置≠你以为的位置）；\n' +
+             '4. 启动程序/弹窗后等 1-3s 再截图确认，关键节点截图验证；\n' +
+             '5. 删除/发送等敏感操作先经用户对话确认；\n' +
+             '6. 点不动/找不到时先 active_window+全屏截图看真实状态，别盲试。\n' +
+             '（完整版见仓库 OPERATING_GUIDE.md）';
+    }
+    return { content: [{ type: 'text', text }] };
+  }
   const u = buildUrl(name, args);
   if (!u) return { isError: true, content: [{ type: 'text', text: 'unknown tool: ' + name }] };
   const url = `http://${HOST}:${PORT}${u.path}?${u.qs.join('&')}`;

@@ -368,6 +368,12 @@ public class ShotService
                            ",\"shots\":" + ShotCount + ",\"uptimeSec\":" + (int)(DateTime.Now - StartTime).TotalSeconds + ",\"version\":\"2.0\"}";
                 }
                 else if (path == "/active") { body = ActiveWindowJson(); }
+                else if (path == "/guide")
+                {
+                    string guide = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "OPERATING_GUIDE.md");
+                    if (File.Exists(guide)) body = File.ReadAllText(guide, Encoding.UTF8);
+                    else { code = 404; body = "{\"ok\":false,\"error\":\"OPERATING_GUIDE.md not found\"}"; }
+                }
                 else if (path == "/window")
                 {
                     if (!q.ContainsKey("title")) { code = 400; body = "{\"ok\":false,\"error\":\"need title\"}"; }
@@ -463,8 +469,9 @@ public class ShotService
             if (code == 200 && body == "") { code = 404; body = "{\"ok\":false,\"error\":\"not found\"}"; }
             string reason = code == 200 ? "OK" : code == 404 ? "Not Found" : code == 400 ? "Bad Request" : code == 500 ? "Internal Server Error" : "Service Unavailable";
             byte[] resp = Encoding.UTF8.GetBytes(body);
+            string contentType = path == "/guide" ? "text/plain; charset=utf-8" : "application/json; charset=utf-8";
             string head = "HTTP/1.1 " + code + " " + reason + "\r\n" +
-                          "Content-Type: application/json; charset=utf-8\r\n" +
+                          "Content-Type: " + contentType + "\r\n" +
                           "Content-Length: " + resp.Length + "\r\n" +
                           "Connection: close\r\n\r\n";
             byte[] hb = Encoding.ASCII.GetBytes(head);
