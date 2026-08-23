@@ -41,7 +41,7 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.5";
+    const string APP_VERSION = "0.0.6";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     const string LATEST_API = "https://api.github.com/repos/oadank/win-desktop-helper/releases/latest";
     const string MUTEX_NAME = @"Global\WinDesktopHelper"; // 单实例互斥(跨会话, 防双进程)
