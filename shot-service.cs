@@ -41,7 +41,7 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.2";
+    const string APP_VERSION = "0.0.3";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     const string LATEST_API = "https://api.github.com/repos/oadank/win-desktop-helper/releases/latest";
     static readonly string ShotDir = Environment.GetEnvironmentVariable("WDH_SHOT_DIR")

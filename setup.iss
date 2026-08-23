@@ -46,4 +46,5 @@ Filename: "{app}\shot-watcher.exe"; Flags: nowait; StatusMsg: "启动自愈守�
 Filename: "{app}\shot-service.exe"; Description: "立即启动 Win Desktop Helper"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
+Filename: "{cmd}"; Parameters: "/c taskkill /IM shot-service.exe /F & taskkill /IM shot-watcher.exe /F"; Flags: runhidden; StatusMsg: "停止服务进程..."
 Filename: "{cmd}"; Parameters: "/c schtasks /delete /tn dsh-shot-helper /f"; Flags: runhidden
