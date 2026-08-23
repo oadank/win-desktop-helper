@@ -1,0 +1,16 @@
+# 编译产物与运行痕迹不入库
+*.exe
+*.log
+
+# 本机私有配置 / 备用方案(含本机绝对路径)
+pixpin-shot.*
+shot.js
+np-launch.vbs
+demo-cmd.vbs
+
+# Node
+node_modules/
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
