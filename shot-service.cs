@@ -370,9 +370,9 @@ public class ShotService
                 else if (path == "/active") { body = ActiveWindowJson(); }
                 else if (path == "/guide")
                 {
-                    string guide = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "OPERATING_GUIDE.md");
+                    string guide = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SKILL.md");
                     if (File.Exists(guide)) body = File.ReadAllText(guide, Encoding.UTF8);
-                    else { code = 404; body = "{\"ok\":false,\"error\":\"OPERATING_GUIDE.md not found\"}"; }
+                    else { code = 404; body = "{\"ok\":false,\"error\":\"SKILL.md not found\"}"; }
                 }
                 else if (path == "/window")
                 {
@@ -549,7 +549,8 @@ public class ShotService
                     "  \"win-desktop-helper\": { \"command\": \"node\", \"args\": [\"" + bridge + "\"] }\n\n" +
                     "[DSH] ~/.dsh/mcp-servers.json 的 servers 数组加:\n" +
                     "  { \"id\":\"win-desktop-helper\", \"serverName\":\"win-desktop-helper\", \"transport\":\"stdio\",\n" +
-                    "    \"command\":\"C:\\\\Program Files\\\\nodejs\\\\node.exe\", \"args\":[\"" + bridge + "\"], \"enabled\":true }\n\n" +
+                    "    \"command\":\"node\", \"args\":[\"" + bridge + "\"], \"enabled\":true }\n" +
+                    "    （若 DSH 要求绝对路径，把 command 改成 node.exe 全路径，如 C:/Program Files/nodejs/node.exe）\n\n" +
                     "[通用] command=node, args=[" + bridge + "]";
                 Clipboard.SetText(txt);
                 TrayIcon.ShowBalloonTip(2000, "已复制 MCP 配置", "粘贴到 Claude Desktop / DSH mcp-servers.json 即可接入", ToolTipIcon.Info);

@@ -10,7 +10,7 @@ const HOST = '127.0.0.1';
 const PORT = 18800;
 const VERSION = '1.0.0';
 
-let guideRead = false; // 强制闸门: 首次操作前必须先读 get_usage_guide
+let guideRead = false; // 强制闸门: 首次操作前必须先读 get_skill
 
 // 工具定义（名称/说明/参数 —— 与 HTTP API 一一对应）
 const TOOLS = [
@@ -105,13 +105,13 @@ const TOOLS = [
     }
   },
   {
-    name: 'get_usage_guide',
-    description: '获取本服务的完整操作手册（操作铁律、避坑速查、标准流程模板）。【必须最先调用】本服务所有工具在调用前都强制要求先调用本工具读取操作手册，否则工具会返回错误。',
+    name: 'get_skill',
+    description: '【必须先调用】获取本服务的 SKILL 操作手册（操作铁律/避坑速查/标准流程模板）。所有工具首次调用前强制要求先读本 SKILL，否则工具返回错误。执行中若踩坑，必须用 update_skill 写回 SKILL.md（全体共享），禁止只记在自己记忆里。',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} }
   },
   {
-    name: 'update_usage_guide',
-    description: '把新踩坑经验写回共享操作手册 OPERATING_GUIDE.md（全体 agent 共享，立即生效）。【约定：每次执行操作踩坑后必须调用本工具记录】，不要只记在自己的记忆里。参数 title=小节标题，entry=经验正文（markdown）',
+    name: 'update_skill',
+    description: '【踩坑必写】把新踩坑经验写回共享 SKILL.md（全体 agent 共享，立即生效）。每次执行操作踩坑后必须调用本工具记录，禁止只记在自己记忆里。title=小节标题，entry=经验正文（markdown，含现象/原因/解法）',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -176,43 +176,44 @@ function buildUrl(name, args) {
 }
 
 async function callTool(name, args) {
-  // 说明书工具：返回操作手册全文（同目录 OPERATING_GUIDE.md，缺文件时回退内嵌简版）
-  if (name === 'get_usage_guide') {
+  // SKILL 工具：返回 SKILL.md 全文（同目录，缺文件时回退内嵌简版）
+  if (name === 'get_skill') {
     guideRead = true;
     let text = '';
-    try { text = require('fs').readFileSync(require('path').join(__dirname, 'OPERATING_GUIDE.md'), 'utf8'); }
+    try { text = require('fs').readFileSync(require('path').join(__dirname, 'SKILL.md'), 'utf8'); }
     catch (e) {
-      text = '【Win Desktop Helper 操作手册·简版】\n' +
+      text = '【Win Desktop Helper SKILL·简版】\n' +
              '1. 点任何东西前先 window_info/active_window 定位并确认前台；\n' +
              '2. keyboard_type 发给当前前台窗口，输入前必须 active_window 确认目标；\n' +
              '3. 操作后立即文件系统验证（保存对话框默认位置≠你以为的位置）；\n' +
              '4. 启动程序/弹窗后等 1-3s 再截图确认，关键节点截图验证；\n' +
              '5. 删除/发送等敏感操作先经用户对话确认；\n' +
              '6. 点不动/找不到时先 active_window+全屏截图看真实状态，别盲试。\n' +
-             '（完整版见仓库 OPERATING_GUIDE.md）';
+             '（完整版见仓库 SKILL.md）';
     }
-    return { content: [{ type: 'text', text }] };
+    return { content: [{ type: 'text', text: text + '\n\n—— 请遵守以上 SKILL 纪律。执行中若踩坑，务必用 update_skill 把经验写回 SKILL.md（全体 agent 共享），不要只写进自己的记忆。' }] };
   }
-  // 写回工具：踩坑经验 append 进共享手册（全体 agent 可见）
-  if (name === 'update_usage_guide') {
+  // 写回工具：踩坑经验 append 进共享 SKILL.md（全体 agent 可见）
+  if (name === 'update_skill') {
     const fs = require('fs'), path = require('path');
-    const file = path.join(__dirname, 'OPERATING_GUIDE.md');
+    const file = path.join(__dirname, 'SKILL.md');
     try {
       const entry = '\n## ' + (args.title || '经验补充') + '\n\n' + (args.entry || '') + '\n';
       fs.appendFileSync(file, entry, 'utf8');
-      return { content: [{ type: 'text', text: '已写入共享手册: ' + file + '（下次任何 agent 调用 get_usage_guide 即可读到新经验）' }] };
+      return { content: [{ type: 'text', text: '已写入共享 SKILL.md: ' + file + '（下次任何 agent 调用 get_skill 即可读到新经验）' }] };
     } catch (e) { return { isError: true, content: [{ type: 'text', text: '写入失败: ' + e.message }] }; }
   }
-  // 强制闸门：所有工具（含观察类）首次调用前必须先读手册
+  // 强制闸门：所有工具（含观察类）首次调用前必须先读 SKILL
   if (!guideRead) {
-    return { isError: true, content: [{ type: 'text', text: '⚠️ 本服务强制要求：首次操作前必须先调用 get_usage_guide 获取操作手册与安全纪律（点前定位 / 输入前确认前台 / 操作后验证 / 敏感操作确认）。请先调用 get_usage_guide，再重试本工具。踩坑后请用 update_usage_guide 把经验写回共享手册。' }] };
+    return { isError: true, content: [{ type: 'text', text: '⚠️ 本服务强制要求：首次操作前必须先调用 get_skill 获取 SKILL 操作手册与安全纪律（点前定位 / 输入前确认前台 / 操作后验证 / 敏感操作确认）。请先调用 get_skill，再重试本工具。踩坑后请用 update_skill 把经验写回共享 SKILL.md。' }] };
   }
   const u = buildUrl(name, args);
   if (!u) return { isError: true, content: [{ type: 'text', text: 'unknown tool: ' + name }] };
   const url = `http://${HOST}:${PORT}${u.path}?${u.qs.join('&')}`;
   try {
     const r = await httpGet(url);
-    return { content: [{ type: 'text', text: JSON.stringify(r) }], isError: !r.ok };
+    const tip = r.ok ? '\n（提示：若本次操作遇到坑，请调用 update_skill 写回共享 SKILL.md，不要只写进自己的记忆）' : '';
+    return { content: [{ type: 'text', text: JSON.stringify(r) + tip }], isError: !r.ok };
   } catch (e) {
     return { isError: true, content: [{ type: 'text', text: 'helper unreachable (' + e.message + ') — 请确认 win-desktop-helper 已运行 (127.0.0.1:18800)' }] };
   }

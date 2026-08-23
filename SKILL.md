@@ -1,7 +1,10 @@
-# Win Desktop Helper — 操作手册（Agent 通用版）
+# Win Desktop Helper — SKILL（Agent 操作手册）
 
-> 本手册给任何获得 **Win Desktop Helper** 能力的 AI（HTTP 或 MCP 接入均可）提供操作纪律与避坑知识。
-> DSH 系 agent：此为 skill（`~/.dsh/skills/win-desktop-helper/`）；MCP 系 agent：把本文粘贴进系统提示词即可。
+> ⚠️ **本文件是本服务的 SKILL（skill）**：任何获得本能力的 AI 都必须——
+> ① 首次操作前先通过 `get_skill` 读取本文件（服务端强制，未读会拒绝工具）；
+> ② **每次踩坑后必须用 `update_skill` 把经验写回本文件**（全体 agent 共享、立即生效），**禁止只记在自己记忆里**；
+> ③ 不要依赖路径：文件位置通过工具读取，安装目录可随部署变化。
+> HTTP 接入者：`GET /guide` 等价读取。
 
 ## 能力边界
 
