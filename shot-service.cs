@@ -41,9 +41,10 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.6";
+    const string APP_VERSION = "0.0.7";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
-    const string LATEST_API = "https://api.github.com/repos/oadank/win-desktop-helper/releases/latest";
+    // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
+    const string LATEST_URL = REPO_URL + "/releases/latest";
     const string MUTEX_NAME = @"Global\WinDesktopHelper"; // 单实例互斥(跨会话, 防双进程)
     static Mutex instanceMutex;
     static readonly string ShotDir = Environment.GetEnvironmentVariable("WDH_SHOT_DIR")
@@ -601,67 +602,23 @@ public class ShotService
     }
 
     // ---- 更新检测 / 项目主页 ----
-    static string GetToken()
-    {
-        string tk = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
-        if (string.IsNullOrEmpty(tk))
-        {
-            string tf = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".wdh-gh-token");
-            if (File.Exists(tf)) tk = File.ReadAllText(tf).Trim();
-        }
-        return tk;
-    }
-
-    // API 客户端: 带 User-Agent; 有 token 则带认证(访问 private 仓库)
-    static WebClient NewApiClient()
-    {
-        var wc = new WebClient();
-        wc.Headers.Add("User-Agent", "win-desktop-helper/" + APP_VERSION);
-        string tk = GetToken();
-        if (!string.IsNullOrEmpty(tk)) wc.Headers.Add("Authorization", "token " + tk);
-        return wc;
-    }
-
-    // 下载 release asset (GitHub 官方姿势: 先带认证拿 302 Location, 再不带认证跟随下载, 避免 Authorization 泄漏到 CDN)
-    static void DownloadAsset(long assetId, string dest)
-    {
-        string api = "https://api.github.com/repos/oadank/win-desktop-helper/releases/assets/" + assetId;
-        string token = GetToken();
-        var req1 = (HttpWebRequest)WebRequest.Create(api);
-        req1.UserAgent = "win-desktop-helper/" + APP_VERSION;
-        req1.Accept = "application/octet-stream";
-        req1.AllowAutoRedirect = false;
-        if (!string.IsNullOrEmpty(token)) req1.Headers["Authorization"] = "token " + token;
-        req1.Timeout = 60000;
-        string location = null;
-        using (var resp1 = (HttpWebResponse)req1.GetResponse())
-        {
-            int code = (int)resp1.StatusCode;
-            if (code == 302 || code == 301) location = resp1.Headers["Location"];
-            else if (code == 200) { using (var fs = File.Create(dest)) resp1.GetResponseStream().CopyTo(fs); return; } // 直接 200 (罕见)
-        }
-        if (string.IsNullOrEmpty(location)) throw new Exception("asset redirect missing");
-        // 第二步: 用 WebClient 跟随 Location 下载 (实测稳定, 不带任何认证头)
-        using (var wc2 = new WebClient())
-        {
-            wc2.Headers.Add("User-Agent", "win-desktop-helper/" + APP_VERSION);
-            wc2.DownloadFile(location, dest);
-        }
-    }
-
+    // 最新版本: 请求 releases/latest 的 302 重定向, 从 Location 尾部取 tag (vX.Y.Z) — 零 API 调用零限流
     static string LatestVersion()
     {
         try
         {
-            using (var wc = NewApiClient())
+            var req = (HttpWebRequest)WebRequest.Create(LATEST_URL);
+            req.UserAgent = "win-desktop-helper/" + APP_VERSION;
+            req.AllowAutoRedirect = false;
+            req.Timeout = 30000;
+            using (var resp = (HttpWebResponse)req.GetResponse())
             {
-                string json = wc.DownloadString(LATEST_API);
-                int i = json.IndexOf("\"tag_name\":");
-                if (i >= 0)
+                string loc = resp.Headers["Location"];
+                if (!string.IsNullOrEmpty(loc))
                 {
-                    int s = json.IndexOf('"', i + 11);
-                    int e = json.IndexOf('"', s + 1);
-                    if (s >= 0 && e > s) return json.Substring(s + 1, e - s - 1);
+                    string tag = loc.TrimEnd('/');
+                    int i = tag.LastIndexOf('/');
+                    if (i >= 0 && i < tag.Length - 1) return tag.Substring(i + 1);
                 }
             }
         }
@@ -696,33 +653,23 @@ public class ShotService
         }
     }
 
-    // 自动静默更新: 下载最新 setup 并静默安装到当前目录（保持路径不变，装完由 watcher 拉起新版）
+    // 自动静默更新: 下载最新 setup 到临时目录并静默安装到当前目录（保持路径不变，装完由 watcher 拉起新版）
     static int updatingFlag = 0; // 防重入(启动自动检查与手动触发可能并发)
     static void DoUpdateSilent()
     {
         if (Interlocked.Exchange(ref updatingFlag, 1) == 1) return;
         try
         {
+            string v = LatestVersion();
+            if (string.IsNullOrEmpty(v)) { Log("update: no latest version (release/latest lookup failed)"); return; }
+            string ver = v.TrimStart('v', 'V');
+            // 直链拼装: 文件名带版本号是发布约定 (setup.iss OutputBaseFilename=win-desktop-helper-setup-X.Y.Z)
+            string url = REPO_URL + "/releases/download/" + v + "/win-desktop-helper-setup-" + ver + ".exe";
             string tmp = Path.Combine(Path.GetTempPath(), "wdh-update-setup.exe");
-            using (var wc = NewApiClient())
+            using (var wc = new WebClient())
             {
-                string json = wc.DownloadString(LATEST_API);
-                long assetId = 0;
-                int ia = json.IndexOf("\"assets\":[");
-                if (ia >= 0)
-                {
-                    int j = json.IndexOf("\"id\":", ia);
-                    if (j >= 0)
-                    {
-                        int s = j + 5;
-                        while (s < json.Length && !char.IsDigit(json[s])) s++;
-                        int e = s;
-                        while (e < json.Length && char.IsDigit(json[e])) e++;
-                        if (e > s) long.TryParse(json.Substring(s, e - s), out assetId);
-                    }
-                }
-                if (assetId == 0) { Log("update: no asset id found"); return; }
-                DownloadAsset(assetId, tmp);
+                wc.Headers.Add("User-Agent", "win-desktop-helper/" + APP_VERSION);
+                wc.DownloadFile(url, tmp); // 直链是普通 HTTPS, 跟随 CDN 302, 无认证, 无 API 限流
             }
             string dir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\') + "\\";
             // 停止自愈守护, 避免安装期间 watcher 拉起旧版占用 exe
