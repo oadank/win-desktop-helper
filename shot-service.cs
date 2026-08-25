@@ -41,7 +41,7 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.8";
+    const string APP_VERSION = "0.0.1";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
@@ -653,7 +653,7 @@ public class ShotService
         }
     }
 
-    // 自动静默更新: 下载最新 setup 到临时目录并静默安装到当前目录（保持路径不变，装完由 watcher 拉起新版）
+    // 自动静默更新: 下载最新 setup 到临时目录并静默安装到当前目录（保持路径不变，装完由 iss [Run] 拉起新服务）
     static int updatingFlag = 0; // 防重入(启动自动检查与手动触发可能并发)
     static void DoUpdateSilent()
     {
@@ -673,14 +673,12 @@ public class ShotService
                 wc.DownloadFile(url, tmp); // 直链是普通 HTTPS, 跟随 CDN 302, 无认证, 无 API 限流
             }
             string dir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\') + "\\";
-            // 停止自愈守护, 避免安装期间 watcher 拉起旧版占用 exe
+            // 停止自愈守护, 避免安装期间 watcher 拉起旧版占用 exe (v0.0.6 起无 watcher, 此行无害保留)
             try { foreach (var p in Process.GetProcessesByName("shot-watcher")) { try { p.Kill(); } catch { } } } catch { }
             Process.Start(tmp, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"" + dir + "\"");
-            Log("update: silent installer launched, target=" + dir);
-            // 本进程退出以释放 exe 占用(CloseApplications 对无窗口 winexe 不可靠);
-            // 装完 iss 的 [Run] 会拉起 watcher -> 新服务恢复
-            Thread.Sleep(2500);
-            Environment.Exit(0);
+            Log("update: silent installer launched, target=" + dir + " (self stays alive; installer's PrepareToInstall will taskkill this process, iss [Run] relaunches new version)");
+            // 保险丝: 不要在这里 Environment.Exit。正常路径由安装器 PrepareToInstall taskkill 接管并等待死透;
+            // 异常路径(安装包被安全软件拦截/安装器没跑起来)则本进程继续存活, 服务不消失, 下次再试。
         }
         catch (Exception ex) { Log("update err: " + ex.Message); }
     }
