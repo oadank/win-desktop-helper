@@ -3,7 +3,7 @@
 [Setup]
 AppId={{FE6F68E9-0CEB-450B-B438-49BFDF5FFB15}
 AppName=Win Desktop Helper
-AppVersion=0.0.7
+AppVersion=0.0.8
 AppPublisher=oadank
 AppPublisherURL=https://github.com/oadank/win-desktop-helper
 DefaultDirName={localappdata}\Programs\win-desktop-helper
@@ -12,7 +12,7 @@ UninstallDisplayIcon={app}\shot-service.exe
 Compression=lzma2
 SolidCompression=yes
 OutputDir=release
-OutputBaseFilename=win-desktop-helper-setup-0.0.7
+OutputBaseFilename=win-desktop-helper-setup-0.0.8
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -41,7 +41,7 @@ Name: "{autodesktop}\Win Desktop Helper"; Filename: "{app}\shot-service.exe"; Ta
 
 [Run]
 Filename: "{cmd}"; Parameters: "/c schtasks /create /tn dsh-shot-helper /tr ""{app}\shot-service.exe"" /sc once /st 00:00 /it /ru {username} /f"; Flags: runhidden; StatusMsg: "创建计划任务(手动拉起入口)..."
-Filename: "{app}\shot-service.exe"; Description: "立即启动 Win Desktop Helper"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\shot-service.exe"; Description: "立即启动 Win Desktop Helper"; Flags: nowait runhidden
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/c taskkill /IM shot-service.exe /F"; Flags: runhidden; StatusMsg: "停止服务进程..."

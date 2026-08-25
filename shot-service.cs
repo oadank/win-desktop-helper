@@ -41,7 +41,7 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.7";
+    const string APP_VERSION = "0.0.8";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
@@ -662,6 +662,7 @@ public class ShotService
         {
             string v = LatestVersion();
             if (string.IsNullOrEmpty(v)) { Log("update: no latest version (release/latest lookup failed)"); return; }
+            if (!IsNewerVersion(v)) { Log("update: already latest (" + APP_VERSION + "), skip"); return; } // 已最新不重装, 避免无意义退出
             string ver = v.TrimStart('v', 'V');
             // 直链拼装: 文件名带版本号是发布约定 (setup.iss OutputBaseFilename=win-desktop-helper-setup-X.Y.Z)
             string url = REPO_URL + "/releases/download/" + v + "/win-desktop-helper-setup-" + ver + ".exe";
@@ -906,7 +907,6 @@ public class ShotService
             }
             catch (Exception ex) { MessageBox.Show("检查失败: " + ex.Message, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         });
-        menu.Items.Add("下载并安装更新", null, delegate { DoUpdateSilent(); });
         menu.Items.Add("项目主页 (GitHub)", null, delegate { try { Process.Start(REPO_URL); } catch { } });
         menu.Items.Add("-");
         menu.Items.Add("隐藏托盘图标", null, delegate { TrayIcon.Visible = false; Log("tray hidden (restart service to show again)"); });
