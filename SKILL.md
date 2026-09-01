@@ -10,12 +10,14 @@
 
 - **看**：截图（全屏/显示器/区域/窗口）、活动窗口、按标题查窗口、显示器元数据
 - **动**：鼠标（移动/点击/滚轮）、键盘（中文输入/组合键）、运行程序
+- **音量（常驻）**：任务栏滚轮=调音量、任务栏中键=静音开关（HTTP `/taskbar-volume` 查状态/开关/步进/反向，MCP 工具 `taskbar_volume`）
+- **剪贴板（常驻）**：自动记录文本历史（最多50条），热键 Ctrl+Alt+V 弹 UI（单击复制/双击粘贴/右键删除），HTTP `/clipboard/history`、MCP 工具 `clipboard_history`
 - **不做**：文件删除/消息发送默认由 agent 自己的工具完成（敏感操作需在对话里向用户确认后方可执行）
 
 ## 入口与健康检查
 
 - HTTP: `127.0.0.1:18800`，先 `GET /health` 确认 `session:1` 且存活
-- MCP 10 工具名：screen_capture / window_info / active_window / monitors / mouse_move / mouse_click / mouse_scroll / keyboard_type / keyboard_press / app_run
+- MCP 工具：screen_capture / window_info / active_window / monitors / mouse_move / mouse_click / mouse_scroll / keyboard_type / keyboard_press / app_run / get_skill / update_skill / taskbar_volume / clipboard_history
 
 ## 铁律（违反必踩坑）
 

@@ -120,6 +120,26 @@ const TOOLS = [
       },
       required: ['title', 'entry']
     }
+  },
+  {
+    name: 'taskbar_volume',
+    description: '任务栏滚轮调音量（常驻功能，win-desktop-helper 自带，无需外部软件）。enabled=0/1 开关（1=开启 0=关闭），step=每次滚轮音量变化百分比(1-20,默认2)，reverse=1 反向(滚轮上=减小)。带参会修改，不带参返回当前状态。任务栏上滚轮=调音量，中键=静音开关',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        enabled: { type: 'number', description: '0|1 开关' },
+        step: { type: 'number', description: '音量步进百分比' },
+        reverse: { type: 'number', description: '0|1 反向' }
+      }
+    }
+  },
+  {
+    name: 'clipboard_history',
+    description: '读取剪贴板历史（常驻监听，最多50条，最新在前，Ctrl+Alt+V 可弹 UI 选择）。limit=返回条数(可选)。给 AI 读取用户刚复制的内容、或复用粘贴',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { limit: { type: 'number', description: '返回条数' } }
+    }
   }
 ];
 
@@ -170,6 +190,18 @@ function buildUrl(name, args) {
       let qs = ['path=' + encodeURIComponent(a.path)];
       if (a.args) qs.push('args=' + encodeURIComponent(a.args));
       return { path: '/app/run', qs };
+    }
+    case 'taskbar_volume': {
+      let qs = [];
+      if (a.enabled !== undefined) qs.push('enabled=' + a.enabled);
+      if (a.step !== undefined) qs.push('step=' + a.step);
+      if (a.reverse !== undefined) qs.push('reverse=' + a.reverse);
+      return { path: '/taskbar-volume', qs };
+    }
+    case 'clipboard_history': {
+      let qs = [];
+      if (a.limit !== undefined) qs.push('limit=' + a.limit);
+      return { path: '/clipboard/history', qs };
     }
     default: return null;
   }

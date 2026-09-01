@@ -2,6 +2,13 @@
 *.exe
 *.log
 
+# 剪贴板历史(用户数据, 含隐私, 绝不入库)
+clipboard-history.json
+
+# 备份文件
+*.bak-*
+*.bak
+
 # 本机私有配置 / 备用方案(含本机绝对路径)
 pixpin-shot.*
 shot.js

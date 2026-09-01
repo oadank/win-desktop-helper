@@ -22,6 +22,7 @@
 //   GET /mouse/scroll?delta=120      滚轮(正上负下, 典型±120)
 //   GET /keyboard/type?text=...      键盘输入(URL编码, 支持中文/emoji/换行)
 //   GET /keyboard/press?keys=ctrl+shift+a   组合键(修饰符: ctrl/shift/alt/win)
+//   GET /taskbar-volume[?enabled=0|1&step=N&reverse=1]   任务栏滚轮调音量(常驻, 查状态/开关/步进/反向)
 // 保存: <用户图片目录>\Screenshots\shot_yyyy-MM-dd_HH-mm-ss-fff.png (可用环境变量 WDH_SHOT_DIR 覆盖)
 // 自启: HKCU\...\Run\shot-service + shot-watcher(崩溃自愈) + 计划任务 dsh-shot-helper(手动拉起)
 using System;
@@ -41,7 +42,7 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.1";
+    const string APP_VERSION = "0.0.11";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
@@ -58,12 +59,19 @@ public class ShotService
     // ---- Win32 ----
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+    [DllImport("user32.dll", SetLastError = true)] static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowW(string cls, string title);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     static extern int GetWindowTextW(IntPtr h, StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern bool EnumWindows(Callback cb, IntPtr lp);
     delegate bool Callback(IntPtr h, IntPtr lp);
+    delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
@@ -230,6 +238,526 @@ public class ShotService
         return "{\"ok\":true,\"pid\":" + p.Id + ",\"name\":\"" + JsonEscape(p.ProcessName) + "\",\"session\":" + Process.GetCurrentProcess().SessionId + "}";
     }
 
+    // ---- 任务栏滚轮调音量 (Taskbar Wheel Volume, 常驻) ----
+    // 机制: WH_MOUSE_LL 低级鼠标钩子 + 光标在任务栏(Shell_TrayWnd/Shell_SecondaryTrayWnd)矩形内
+    //       + 拦截 WM_MOUSEWHEEL + 模拟系统音量键 (VK_VOLUME_UP/DOWN, 弹原生音量 OSD)
+    // 与 Windhawk taskbar-volume-control 同款体验, 免注入免 COM, Win10/11 通用
+    const int WH_MOUSE_LL = 14;
+    const int WM_MOUSEWHEEL = 0x020A;
+    const int WM_MBUTTONDOWN = 0x0207;
+    const int HC_ACTION = 0;
+    const ushort VK_VOLUME_UP = 0xAF, VK_VOLUME_DOWN = 0xAE, VK_VOLUME_MUTE = 0xAD;
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT { public int x, y; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct MSLLHOOKSTRUCT { public POINT pt; public uint mouseData; public uint flags; public uint time; public IntPtr dwExtraInfo; }
+    static IntPtr volHook;
+    static LowLevelMouseProc volHookProc;
+    static volatile int volEnabled = 1;   // 1=启用
+    static volatile int volReverse = 0;   // 1=滚轮上=减小音量
+    static volatile int volStep = 2;      // 每次滚轮一格音量变化 (%)
+    static volatile IntPtr[] taskbarWnds = new IntPtr[0]; // 原子数组快照: 刷新线程整体替换, 回调无锁读
+    static DateTime lastTaskbarScan = DateTime.MinValue;
+    static DateTime lastHookDiag = DateTime.MinValue;
+    static long volTriggers = 0;   // 钩子触发计数(离屏验证用)
+    static long volCalls = 0;      // 钩子回调总次数(诊断: 回调是否进入)
+    static long volLastWheelPtX = -9999, volLastWheelPtY = -9999;  // 最近一次滚轮事件坐标(内存探针, 零I/O)
+    static long volLastWheelHit = -1;   // 最近一次任务栏判定结果
+    static long volLastWheelTicks = 0;  // 最近滚轮事件时间戳
+    static Form hkForm;            // 热键窗引用: heal 线程经它 Invoke 回消息循环线程重装钩子
+
+    static IntPtr VolumeHookProc(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        // ⚠️ LowLevelHooksTimeout 本机=1ms: 回调内禁止任何 I/O/枚举/日志, 否则超时被静默拔钩
+        Interlocked.Increment(ref volCalls); // 纯内存计数, 1ms 内必完成 — 诊断: 回调是否被调用
+        try
+        {
+            if (nCode != HC_ACTION) return CallNextHookEx(volHook, nCode, wParam, lParam);
+            MSLLHOOKSTRUCT ms = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+            if (volEnabled != 1) return CallNextHookEx(volHook, nCode, wParam, lParam);
+            if ((int)wParam == WM_MBUTTONDOWN && IsPointOnTaskbar(ms.pt))
+            {
+                KeyEvent(VK_VOLUME_MUTE, 0, 0);
+                KeyEvent(VK_VOLUME_MUTE, 0, KEYEVENTF_KEYUP);
+                Interlocked.Increment(ref volTriggers);
+                return (IntPtr)1; // 拦截, 不让任务栏处理中键
+            }
+            if ((int)wParam == WM_MOUSEWHEEL)
+            {
+                // 探针: 记录滚轮事件坐标与判定(纯内存, 允许在 1ms 回调内)
+                volLastWheelPtX = ms.pt.x; volLastWheelPtY = ms.pt.y;
+                volLastWheelTicks = Environment.TickCount;
+                if (IsPointOnTaskbar(ms.pt)) volLastWheelHit = 1;
+                else volLastWheelHit = 0;
+            }
+            if ((int)wParam == WM_MOUSEWHEEL && IsPointOnTaskbar(ms.pt))
+            {
+                int delta = (short)((ms.mouseData >> 16) & 0xFFFF); // 高16位=滚轮刻度(正=上)
+                if (delta != 0)
+                {
+                    bool up = delta > 0;
+                    if (volReverse == 1) up = !up;
+                    int clicks = volStep / 2;
+                    if (clicks < 1) clicks = 1;
+                    for (int i = 0; i < clicks; i++)
+                    {
+                        KeyEvent(up ? VK_VOLUME_UP : VK_VOLUME_DOWN, 0, 0);
+                        KeyEvent(up ? VK_VOLUME_UP : VK_VOLUME_DOWN, 0, KEYEVENTF_KEYUP);
+                    }
+                    Interlocked.Increment(ref volTriggers);
+                    return (IntPtr)1; // 拦截: 阻止任务栏默认滚动行为
+                }
+            }
+        }
+        catch { } // 静默: 回调里绝对不能抛/写日志
+        return CallNextHookEx(volHook, nCode, wParam, lParam);
+    }
+
+    static bool IsPointOnTaskbar(POINT pt)
+    {
+        // 注意: 本函数在低级钩子回调中被高频调用, 必须轻量(回调超时会静默拔钩!)
+        // 窗口列表是原子数组快照(刷新线程整体替换), 回调里只做 GetWindowRect 判位
+        IntPtr[] wnds = taskbarWnds;
+        for (int i = 0; i < wnds.Length; i++)
+        {
+            IntPtr h = wnds[i];
+            if (h == IntPtr.Zero) continue;
+            RECT r;
+            if (GetWindowRect(h, out r) && pt.x >= r.Left && pt.x <= r.Right && pt.y >= r.Top && pt.y <= r.Bottom) return true;
+        }
+        return false;
+    }
+
+    // 任务栏窗口列表维护: 只在这里枚举(安装/定时线程调用, 不在钩子回调里!)
+    static void RefreshTaskbarWindows()
+    {
+        List<IntPtr> fresh = new List<IntPtr>();
+        IntPtr main = FindWindowW("Shell_TrayWnd", null);
+        if (main != IntPtr.Zero) fresh.Add(main);
+        try
+        {
+            EnumWindows(delegate(IntPtr wh, IntPtr lp)
+            {
+                StringBuilder sb = new StringBuilder(64);
+                if (GetClassNameW(wh, sb, 64) > 0 && sb.ToString() == "Shell_SecondaryTrayWnd") fresh.Add(wh);
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch { }
+        taskbarWnds = fresh.ToArray(); // 原子替换快照
+    }
+
+    // 任务栏窗口列表定期刷新线程: 排除任务栏重启/分辨率变化导致句柄失效 (WM_DISPLAYCHANGE 之外的兜底)
+    static void TaskbarRefreshLoop()
+    {
+        while (true)
+        {
+            Thread.Sleep(5000);
+            try { RefreshTaskbarWindows(); } catch { }
+        }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    const int WM_NCLBUTTONDOWN = 0xA1;
+
+    // ---- 剪贴板历史 (Ctrl+Win+V, 常驻) ----
+    // 后台 STA 线程轮询剪贴板文本 → 去重入历史(最新在前, 上限 50);
+    // 热键窗口接收 WM_HOTKEY 弹历史列表, 双击/回车粘贴(设剪贴板+激活原窗口+模拟 Ctrl+V)
+    const int MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_SHIFT = 0x4, MOD_WIN = 0x8;
+    const int WM_HOTKEY = 0x0312;
+    const int HOTKEY_ID = 0x5712; // 'W'+'V' 记号
+    const int CLIP_MAX = 50;
+    static readonly List<string> clipHist = new List<string>();
+    static readonly object clipLock = new object();
+    static string lastClipText = "";
+    static string clipHotkeyName = "";   // 实际注册成功的组合(候选自动降级)
+    static Form clipHistWin;             // 当前打开的剪贴板历史窗(单例: 再按热键=关闭, 不叠窗)
+    static readonly string ClipStorePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "clipboard-history.json");
+
+    // ---- 剪贴板历史持久化: 每行一条 JSON 字符串(完整转义), UTF-8 ----
+    static string ClipStoreEscape(string s)
+    {
+        return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n");
+    }
+    static string ClipStoreUnescape(string s)
+    {
+        StringBuilder sb = new StringBuilder(s.Length);
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c == '\\' && i + 1 < s.Length)
+            {
+                char n = s[++i];
+                if (n == 'r') sb.Append('\r');
+                else if (n == 'n') sb.Append('\n');
+                else if (n == '\\') sb.Append('\\');
+                else if (n == '"') sb.Append('"');
+                else { sb.Append('\\'); sb.Append(n); }
+            }
+            else sb.Append(c);
+        }
+        return sb.ToString();
+    }
+    static void SaveClipHistory()
+    {
+        try
+        {
+            List<string> snap;
+            lock (clipLock) { snap = new List<string>(clipHist); }
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < snap.Count; i++)
+                sb.Append("\"").Append(ClipStoreEscape(snap[i])).Append("\"\r\n");
+            File.WriteAllText(ClipStorePath, sb.ToString(), Encoding.UTF8);
+        }
+        catch (Exception ex) { Log("clip save err: " + ex.Message); }
+    }
+    static void LoadClipHistory()
+    {
+        try
+        {
+            if (!File.Exists(ClipStorePath)) return;
+            string[] lines = File.ReadAllLines(ClipStorePath, Encoding.UTF8);
+            lock (clipLock)
+            {
+                clipHist.Clear();
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string l = lines[i].Trim();
+                    if (l.Length >= 2 && l[0] == '"' && l[l.Length - 1] == '"')
+                    {
+                        string v = ClipStoreUnescape(l.Substring(1, l.Length - 2));
+                        if (!string.IsNullOrEmpty(v) && !clipHist.Contains(v)) clipHist.Add(v);
+                    }
+                }
+                if (clipHist.Count > CLIP_MAX) clipHist.RemoveRange(CLIP_MAX, clipHist.Count - CLIP_MAX);
+            }
+            Log("clip history loaded: " + clipHist.Count + " items");
+        }
+        catch (Exception ex) { Log("clip load err: " + ex.Message); }
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+    [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    static void ClipWatcherLoop()
+    {
+        while (true)
+        {
+            try
+            {
+                if (Clipboard.ContainsText())
+                {
+                    string t = Clipboard.GetText();
+                    if (!string.IsNullOrEmpty(t) && t != lastClipText)
+                    {
+                        lastClipText = t;
+                        lock (clipLock)
+                        {
+                            clipHist.Remove(t);
+                            clipHist.Insert(0, t);
+                            while (clipHist.Count > CLIP_MAX) clipHist.RemoveAt(clipHist.Count - 1);
+                        }
+                        SaveClipHistory(); // 新记录落盘持久化
+                    }
+                }
+            }
+            catch (Exception ex) { Log("clip watcher err: " + ex.Message); }
+            Thread.Sleep(400);
+        }
+    }
+
+    static string ClipDisplay(string s)
+    {
+        s = s.Replace("\r", " ").Replace("\n", " ");
+        return s.Length > 80 ? s.Substring(0, 77) + "..." : s;
+    }
+
+    // 弹历史窗口: 在钩子线程调用(同 STA 消息循环), 单击=复制 双击=粘贴 右键=菜单, Enter/Esc 键盘
+    // 单例: 已开窗口再按热键 = 关闭(普通人的开关习惯), 绝不叠多个窗口
+    static void ShowClipHistory()
+    {
+        try
+        {
+            Form existing = clipHistWin;
+            if (existing != null && !existing.IsDisposed)
+            {
+                try { existing.Close(); } catch { }
+                clipHistWin = null;
+                return;
+            }
+            List<string> snaps;
+            lock (clipLock) { snaps = new List<string>(clipHist); }
+            if (snaps.Count == 0) { TrayNotify("剪贴板历史", "还没有记录，复制点东西再按 " + (clipHotkeyName == "" ? "热键" : clipHotkeyName)); return; }
+            IntPtr prevFg = GetForegroundWindow();
+
+            Form f = new Form();
+            clipHistWin = f; // 登记单例, 防热键连按竞态叠窗
+            f.Text = "剪贴板历史";
+            f.FormBorderStyle = FormBorderStyle.None;      // 无系统边框 → 没有巨大最小化/最大化/关闭按钮
+            f.BackColor = Color.FromArgb(35, 36, 40);
+            f.StartPosition = FormStartPosition.CenterScreen;
+            f.TopMost = true;
+            f.ShowInTaskbar = false;
+            f.Size = new Size(600, 430);
+
+            // ---- 自绘标题栏: 小标题 + 小关闭 ×, 按住可拖动窗口 ----
+            Panel title = new Panel();
+            title.Dock = DockStyle.Top;
+            title.Height = 36;
+            title.BackColor = Color.FromArgb(22, 23, 26);
+            Label tl = new Label();
+            tl.Text = "剪贴板历史 (" + snaps.Count + ")   ·   单击复制  双击粘贴  右键菜单  Esc 关闭";
+            tl.ForeColor = Color.FromArgb(190, 195, 200);
+            tl.Font = new Font("Microsoft YaHei UI", 9f);
+            tl.AutoSize = false;
+            tl.Dock = DockStyle.Fill;
+            tl.TextAlign = ContentAlignment.MiddleLeft;
+            tl.Padding = new Padding(12, 0, 0, 0);
+            Button bx = new Button();
+            bx.Text = "×";
+            bx.FlatStyle = FlatStyle.Flat;
+            bx.FlatAppearance.BorderSize = 0;
+            bx.FlatAppearance.MouseOverBackColor = Color.FromArgb(200, 60, 60);
+            bx.BackColor = Color.Transparent;
+            bx.ForeColor = Color.FromArgb(210, 215, 220);
+            bx.Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
+            bx.Size = new Size(34, 36);
+            bx.Dock = DockStyle.Right;
+            bx.Click += delegate { f.Close(); };
+            title.Controls.Add(tl);
+            title.Controls.Add(bx);
+            // 标题栏拖拽移动窗口 (WM_NCLBUTTONDOWN + HTCAPTION)
+            title.MouseDown += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    ReleaseCapture();
+                    SendMessage(f.Handle, (uint)WM_NCLBUTTONDOWN, (IntPtr)2, IntPtr.Zero); // 2=HTCAPTION
+                }
+            };
+            tl.MouseDown += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    ReleaseCapture();
+                    SendMessage(f.Handle, (uint)WM_NCLBUTTONDOWN, (IntPtr)2, IntPtr.Zero);
+                }
+            };
+            f.Controls.Add(title);
+
+            // ---- 列表: 深色 + 自绘(选中高亮蓝条, 交替行色) ----
+            ListBox lb = new ListBox();
+            lb.Dock = DockStyle.Fill;
+            lb.DrawMode = DrawMode.OwnerDrawFixed;
+            lb.ItemHeight = 30;
+            lb.BackColor = Color.FromArgb(35, 36, 40);
+            lb.ForeColor = Color.FromArgb(225, 228, 232);
+            lb.BorderStyle = BorderStyle.None;
+            lb.Font = new Font("Microsoft YaHei UI", 9.5f);
+            lb.DrawItem += delegate(object s, DrawItemEventArgs e)
+            {
+                if (e.Index < 0) return;
+                bool sel = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+                Color bg = sel ? Color.FromArgb(45, 100, 175) : (e.Index % 2 == 0 ? Color.FromArgb(35, 36, 40) : Color.FromArgb(31, 32, 36));
+                using (SolidBrush b2 = new SolidBrush(bg)) e.Graphics.FillRectangle(b2, e.Bounds);
+                string txt = lb.Items[e.Index].ToString();
+                Color numColor = sel ? Color.FromArgb(190, 215, 255) : Color.FromArgb(110, 120, 135);
+                Color txtColor = sel ? Color.White : Color.FromArgb(225, 228, 232);
+                Rectangle nb = e.Bounds; nb.Offset(10, 0); nb.Width = 44;
+                TextRenderer.DrawText(e.Graphics, txt.Length > 3 ? txt.Substring(0, 4) : txt, lb.Font, nb, numColor, TextFormatFlags.VerticalCenter);
+                Rectangle tb = e.Bounds; tb.Offset(58, 0); tb.Width -= 66;
+                TextRenderer.DrawText(e.Graphics, txt.Length > 4 ? txt.Substring(4) : "", lb.Font, tb, txtColor, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            };
+            for (int i = 0; i < snaps.Count; i++) lb.Items.Add("[" + i + "] " + ClipDisplay(snaps[i]));
+            lb.SelectedIndex = 0;
+            f.Controls.Add(lb);
+            lb.BringToFront();
+
+            // ---- 底部状态条 ----
+            Panel status = new Panel();
+            status.Dock = DockStyle.Bottom;
+            status.Height = 28;
+            status.BackColor = Color.FromArgb(22, 23, 26);
+            Label sl = new Label();
+            sl.Text = "热键 " + (clipHotkeyName == "" ? "?" : clipHotkeyName) + "   ·   单击=复制到剪贴板   双击=粘贴   右键=删除/清空";
+            sl.ForeColor = Color.FromArgb(130, 138, 148);
+            sl.Font = new Font("Microsoft YaHei UI", 8.5f);
+            sl.Dock = DockStyle.Fill;
+            sl.TextAlign = ContentAlignment.MiddleLeft;
+            sl.Padding = new Padding(12, 0, 0, 0);
+            status.Controls.Add(sl);
+            f.Controls.Add(status);
+
+            // ---- 交互 ----
+            Action copyAction = delegate
+            {
+                int idx = lb.SelectedIndex;
+                string pick = (idx >= 0 && idx < snaps.Count) ? snaps[idx] : null;
+                if (pick == null) return;
+                try { Clipboard.SetText(pick); }
+                catch (Exception ex) { Log("clip set err: " + ex.Message); }
+                sl.Text = "✓ 已复制第 " + idx + " 条 (" + ClipDisplay(pick).Length + " 字)，去目标窗口按 Ctrl+V";
+            };
+            Action pasteAction = delegate
+            {
+                int idx = lb.SelectedIndex;
+                string pick = (idx >= 0 && idx < snaps.Count) ? snaps[idx] : null;
+                if (pick == null) return;
+                try { Clipboard.SetText(pick); } catch (Exception ex) { Log("clip set err: " + ex.Message); }
+                f.Close();
+                try
+                {
+                    if (prevFg != IntPtr.Zero) SetForegroundWindow(prevFg);
+                    System.Threading.Thread.Sleep(120);
+                    PressCombo("ctrl+v");
+                }
+                catch (Exception ex) { Log("paste err: " + ex.Message); }
+            };
+            lb.Click += delegate { copyAction(); };                       // 单击 = 复制
+            lb.DoubleClick += delegate { pasteAction(); };                // 双击 = 复制+粘贴
+            lb.KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.KeyData == Keys.Enter) pasteAction();               // Enter = 粘贴
+                else if (e.KeyData == Keys.Escape) f.Close();             // Esc = 关闭
+            };
+            f.KeyPreview = true;
+            f.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyData == Keys.Escape) f.Close(); };
+
+            // 右键菜单: 复制 / 粘贴 / 删除此项 / 清空全部
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.BackColor = Color.FromArgb(40, 41, 46);
+            menu.ForeColor = Color.FromArgb(225, 228, 232);
+            menu.Items.Add("复制此项", null, delegate { copyAction(); });
+            menu.Items.Add("粘贴此项", null, delegate { pasteAction(); });
+            menu.Items.Add("删除此项", null, delegate
+            {
+                int idx = lb.SelectedIndex;
+                if (idx >= 0 && idx < snaps.Count)
+                {
+                    lock (clipLock) clipHist.Remove(snaps[idx]);
+                    lb.Items.RemoveAt(idx);
+                    SaveClipHistory(); // 删除后落盘
+                    if (lb.Items.Count > 0) lb.SelectedIndex = Math.Min(idx, lb.Items.Count - 1);
+                    else f.Close();
+                }
+            });
+            menu.Items.Add("清空全部", null, delegate
+            {
+                lock (clipLock) { clipHist.Clear(); lastClipText = ""; }
+                SaveClipHistory(); // 清空后落盘
+                f.Close();
+            });
+            lb.ContextMenuStrip = menu;
+            lb.MouseUp += delegate(object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Right)
+                {
+                    int idx = lb.IndexFromPoint(e.Location);
+                    if (idx >= 0 && idx < lb.Items.Count) lb.SelectedIndex = idx;
+                }
+            };
+
+            // 窗口关闭时清单例引用(下次热键可重新打开)
+            f.FormClosed += delegate { if (clipHistWin == f) clipHistWin = null; };
+
+            f.ShowDialog();
+        }
+        catch (Exception ex) { Log("clip hist err: " + ex.Message); }
+    }
+
+    static void TrayNotify(string title, string msg)
+    {
+        try { if (TrayIcon != null) TrayIcon.ShowBalloonTip(2500, title, msg, ToolTipIcon.Info); } catch { }
+    }
+
+    // 热键接收窗口: 注册 Ctrl+Win+V, 收到 WM_HOTKEY 弹历史; 收到 WM_DISPLAYCHANGE 立即刷新任务栏(分辨率切换)
+    class HotkeyForm : Form
+    {
+        public HotkeyForm()
+        {
+            ShowInTaskbar = false;
+            FormBorderStyle = FormBorderStyle.None;
+            Opacity = 0;
+            Size = new Size(1, 1);
+            StartPosition = FormStartPosition.Manual;
+            Location = new Point(-100, -100);
+        }
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_HOTKEY && (int)m.WParam == HOTKEY_ID)
+            {
+                ShowClipHistory();
+                return;
+            }
+            if (m.Msg == WM_DISPLAYCHANGE)
+            {
+                // 分辨率/显示器变更: 任务栏窗口句柄与矩形都会变, 立即重建列表, 否则滚轮/中键失效
+                try { RefreshTaskbarWindows(); Log("display change, taskbar refreshed: " + taskbarWnds.Length + " wnds"); }
+                catch { }
+            }
+            base.WndProc(ref m);
+        }
+    }
+    const int WM_DISPLAYCHANGE = 0x007E;
+
+    static void InstallVolumeHook()
+    {
+        try
+        {
+            volHookProc = new LowLevelMouseProc(VolumeHookProc);
+            volHook = SetWindowsHookEx(WH_MOUSE_LL, volHookProc, GetModuleHandle(null), 0);
+            RefreshTaskbarWindows();
+            Log("volume hook installed: handle=" + volHook + " taskbarWnds=" + taskbarWnds.Length);
+            // 任务栏窗口列表兜底刷新线程(5s): WM_DISPLAYCHANGE 之外的双保险
+            Thread rfr = new Thread(new ThreadStart(TaskbarRefreshLoop));
+            rfr.IsBackground = true;
+            rfr.Start();
+            // 钩子自愈: 30s 心跳, 通过热键窗线程(Invoke) 安全重装 — 低级钩子回调必须在安装它线程的消息循环里被调用!
+            // ⚠️ 绝不能在无消息循环的线程重装钩子 (回调会永远不被调用, 实测踩坑)
+            Thread heal = new Thread(new ThreadStart(VolumeHookHealLoop));
+            heal.IsBackground = true;
+            heal.Start();
+            Log("volume hook heal loop started");
+        }
+        catch (Exception ex) { Log("volume hook install err: " + ex.Message); }
+    }
+
+    // 钩子自愈: 低级钩子可被系统静默拔除(回调超时/系统压力) — 定期经消息循环线程重装 + 刷新任务栏窗口快照
+    static void VolumeHookHealLoop()
+    {
+        while (true)
+        {
+            Thread.Sleep(30000);
+            try
+            {
+                // 任务栏窗口句柄/矩形定期刷新(分辨率变更/explorer 重启自适应)
+                RefreshTaskbarWindows();
+                // 重装钩子必须回到 volT(带消息循环)线程执行 — 通过热键窗 Invoke
+                Form hk = hkForm;
+                if (hk != null && hk.IsHandleCreated)
+                {
+                    hk.Invoke(new MethodInvoker(delegate
+                    {
+                        try
+                        {
+                            if (volHook != IntPtr.Zero) UnhookWindowsHookEx(volHook);
+                            volHookProc = new LowLevelMouseProc(VolumeHookProc);
+                            volHook = SetWindowsHookEx(WH_MOUSE_LL, volHookProc, GetModuleHandle(null), 0);
+                            Log("volume hook healed: handle=" + volHook + " taskbarWnds=" + taskbarWnds.Length);
+                        }
+                        catch (Exception ex) { Log("volume hook heal err: " + ex.Message); }
+                    }));
+                }
+            }
+            catch { } // 热键窗可能未就绪/已关闭, 静默等下一轮
+        }
+    }
+
     // ---- 动: 键盘 ----
     static void KeyEvent(ushort vk, ushort scan, uint flags)
     {
@@ -372,6 +900,43 @@ public class ShotService
                 {
                     body = "{\"ok\":true,\"pid\":" + Process.GetCurrentProcess().Id + ",\"session\":" + MySession +
                            ",\"shots\":" + ShotCount + ",\"uptimeSec\":" + (int)(DateTime.Now - StartTime).TotalSeconds + ",\"version\":\"2.0\",\"appVersion\":\"" + APP_VERSION + "\"}";
+                }
+                else if (path == "/taskbar-volume")
+                {
+                    // 任务栏滚轮调音量: GET 查状态; ?enabled=0|1 开关; ?step=N 步进; ?reverse=1 反向; ?refresh=1 强制刷新任务栏列表
+                    if (q.ContainsKey("refresh") && q["refresh"] == "1") RefreshTaskbarWindows();
+                    if (q.ContainsKey("enabled")) { int v; if (int.TryParse(q["enabled"], out v)) volEnabled = v == 1 ? 1 : 0; }
+                    if (q.ContainsKey("reverse")) { int v; if (int.TryParse(q["reverse"], out v)) volReverse = v == 1 ? 1 : 0; }
+                    if (q.ContainsKey("step")) { int v; if (int.TryParse(q["step"], out v) && v >= 1 && v <= 20) volStep = v; }
+                    // 任务栏矩形诊断: 输出每个窗口的 rect, 验证判定坐标系
+                    StringBuilder dr = new StringBuilder();
+                    IntPtr[] wnds = taskbarWnds;
+                    for (int i = 0; i < wnds.Length; i++)
+                    {
+                        RECT r;
+                        if (GetWindowRect(wnds[i], out r))
+                            dr.Append("[").Append(i).Append("]").Append(r.Left).Append(",").Append(r.Top).Append(",").Append(r.Right).Append(",").Append(r.Bottom).Append(" ");
+                    }
+                    body = "{\"ok\":true,\"enabled\":" + volEnabled + ",\"reverse\":" + volReverse + ",\"step\":" + volStep +
+                           ",\"triggers\":" + Interlocked.Read(ref volTriggers) + ",\"calls\":" + Interlocked.Read(ref volCalls) + ",\"taskbarWnds\":" + taskbarWnds.Length + ",\"rects\":\"" + dr.ToString() + "\",\"wheel\":{\"pt\":" + Interlocked.Read(ref volLastWheelPtX) + "," + Interlocked.Read(ref volLastWheelPtY) + ",\"hit\":" + Interlocked.Read(ref volLastWheelHit) + ",\"tick\":" + Interlocked.Read(ref volLastWheelTicks) + "},\"hook\":\"" + volHook + "\"}";
+                }
+                else if (path == "/clipboard/history")
+                {
+                    // 剪贴板历史: GET 返回最近 N 条(默认全部, ?limit=N 截断)。给 AI 查询/复用粘贴内容
+                    int lim = 0;
+                    if (q.ContainsKey("limit")) int.TryParse(q["limit"], out lim);
+                    List<string> snaps;
+                    lock (clipLock) { snaps = new List<string>(clipHist); }
+                    if (lim > 0 && lim < snaps.Count) snaps = snaps.GetRange(0, lim);
+                    StringBuilder sb = new StringBuilder();
+                    sb.Append("{\"ok\":true,\"count\":").Append(snaps.Count).Append(",\"items\":[");
+                    for (int i = 0; i < snaps.Count; i++)
+                    {
+                        if (i > 0) sb.Append(",");
+                        sb.Append("{\"index\":").Append(i).Append(",\"text\":\"").Append(JsonEscape(snaps[i])).Append("\"}");
+                    }
+                    sb.Append("]}");
+                    body = sb.ToString();
                 }
                 else if (path == "/active") { body = ActiveWindowJson(); }
                 else if (path.StartsWith("/img/"))
@@ -566,6 +1131,63 @@ public class ShotService
         Thread srv = new Thread(new ThreadStart(ServerLoop));
         srv.IsBackground = true;
         srv.Start();
+
+        // 任务栏滚轮调音量: 独立线程跑低级钩子(需消息循环驱动回调) — 常驻功能, 与托盘模式无关
+        try
+        {
+            Thread volT = new Thread(new ThreadStart(delegate
+            {
+                InstallVolumeHook();
+                // 剪贴板历史热键窗: 与钩子共享同一 STA 消息循环
+                try
+                {
+                    HotkeyForm hk = new HotkeyForm();
+                    hkForm = hk;
+                    hk.CreateControl();
+                    // 候选组合自动降级: Ctrl+Win+V 是 Win11 系统"切换声音输出"自带键, 故 Ctrl+Alt+V 优先; 记录实际生效键
+                    uint[][] cands = new uint[][]
+                    {
+                        new uint[] { MOD_CONTROL | MOD_ALT, 0x56 },   // Ctrl+Alt+V (优先, 用户确认空闲)
+                        new uint[] { MOD_CONTROL | MOD_WIN, 0x56 },   // Ctrl+Win+V (Win11 系统占用中, 备选)
+                        new uint[] { MOD_CONTROL | MOD_SHIFT, 0x56 }, // Ctrl+Shift+V
+                        new uint[] { MOD_WIN, 0x56 },                 // Win+V (系统剪贴板历史)
+                        new uint[] { MOD_CONTROL | MOD_WIN | MOD_ALT, 0x51 }, // Ctrl+Win+Alt+Q
+                    };
+                    string[] candNames = new string[] { "Ctrl+Alt+V", "Ctrl+Win+V", "Ctrl+Shift+V", "Win+V", "Ctrl+Win+Alt+Q" };
+                    bool hkOk = false;
+                    for (int ci = 0; ci < cands.Length; ci++)
+                    {
+                        if (RegisterHotKey(hk.Handle, HOTKEY_ID, cands[ci][0], cands[ci][1]))
+                        {
+                            clipHotkeyName = candNames[ci];
+                            hkOk = true;
+                            Log("clip hotkey registered: " + candNames[ci]);
+                            break;
+                        }
+                    }
+                    if (!hkOk) Log("clip hotkey register FAILED (all candidates busy)");
+                    Application.Run(hk);
+                }
+                catch (Exception ex) { Log("hotkey form err: " + ex.Message); Application.Run(); }
+            }));
+            volT.SetApartmentState(ApartmentState.STA);
+            volT.IsBackground = true;
+            volT.Start();
+            Log("taskbar volume hook thread started");
+        }
+        catch (Exception ex) { Log("volume hook thread err: " + ex.Message); }
+
+        // 剪贴板历史监听: 独立 STA 线程轮询(Clipboard 需 STA); 先加载持久化历史
+        try
+        {
+            LoadClipHistory();
+            Thread clipT = new Thread(new ThreadStart(ClipWatcherLoop));
+            clipT.SetApartmentState(ApartmentState.STA);
+            clipT.IsBackground = true;
+            clipT.Start();
+            Log("clipboard watcher started");
+        }
+        catch (Exception ex) { Log("clip watcher thread err: " + ex.Message); }
 
         if (allowTray)
         {
@@ -836,6 +1458,31 @@ public class ShotService
                 case "keyboard_type": { string t = McpParam(a, "text"); TypeText(t); return McpText("{\"ok\":true,\"chars\":" + t.Length + "}", false); }
                 case "keyboard_press": { string k = McpParam(a, "keys"); PressCombo(k); return McpText("{\"ok\":true,\"keys\":\"" + JsonEscape(k) + "\"}", false); }
                 case "app_run": { return McpText(AppRun(McpParam(a, "path"), McpParam(a, "args")), false); }
+                case "taskbar_volume":
+                {
+                    // 任务栏滚轮调音量: enabled=0|1(开关) step=音量步进 reverse=1 反向; 不带参会查询状态
+                    if (McpParam(a, "enabled") == "0" || McpParam(a, "enabled") == "1") volEnabled = McpParam(a, "enabled") == "1" ? 1 : 0;
+                    if (McpParam(a, "step") != "") { int v; if (int.TryParse(McpParam(a, "step"), out v) && v >= 1 && v <= 20) volStep = v; }
+                    if (McpParam(a, "reverse") == "1") volReverse = 1;
+                    if (McpParam(a, "reverse") == "0") volReverse = 0;
+                    return McpText("{\"ok\":true,\"enabled\":" + volEnabled + ",\"reverse\":" + volReverse + ",\"step\":" + volStep + ",\"taskbarWnds\":" + taskbarWnds.Length + "}", false);
+                }
+                case "clipboard_history":
+                {
+                    int lim = McpParamInt(a, "limit");
+                    List<string> snaps;
+                    lock (clipLock) { snaps = new List<string>(clipHist); }
+                    if (lim > 0 && lim < snaps.Count) snaps = snaps.GetRange(0, lim);
+                    StringBuilder sb = new StringBuilder();
+                    sb.Append("{\"ok\":true,\"count\":").Append(snaps.Count).Append(",\"items\":[");
+                    for (int i = 0; i < snaps.Count; i++)
+                    {
+                        if (i > 0) sb.Append(",");
+                        sb.Append("{\"index\":").Append(i).Append(",\"text\":\"").Append(JsonEscape(snaps[i])).Append("\"}");
+                    }
+                    sb.Append("]}");
+                    return McpText(sb.ToString(), false);
+                }
                 default: return McpText("unknown tool: " + name, true);
             }
         }
@@ -855,6 +1502,8 @@ public class ShotService
             "{\"name\":\"keyboard_type\",\"description\":\"向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," +
             "{\"name\":\"keyboard_press\",\"description\":\"按组合键，如 ctrl+shift+a / enter / alt+f4 / win / ctrl+s\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"}},\"required\":[\"keys\"]}}," +
             "{\"name\":\"app_run\",\"description\":\"运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"path\"]}}," +
+            "{\"name\":\"taskbar_volume\",\"description\":\"任务栏滚轮调音量（常驻功能）。enabled=0/1 开关，step=每次滚轮音量变化百分比(1-20,默认2)，reverse=1 反向(滚轮上=减小)。不带参返回当前状态。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"enabled\":{\"type\":\"number\"},\"step\":{\"type\":\"number\"},\"reverse\":{\"type\":\"number\"}}}}," +
+            "{\"name\":\"clipboard_history\",\"description\":\"读取剪贴板历史（常驻监听，最多50条，最新在前）。limit=返回条数(可选)。给AI复用刚复制的内容。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"limit\":{\"type\":\"number\"}}}}," +
             "{\"name\":\"get_skill\",\"description\":\"【必须先调用】获取本服务 SKILL 操作手册（铁律/避坑/流程）。所有工具首次调用前强制先读本 SKILL，否则报错。踩坑必须 update_skill 写回，禁止只写记忆。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"update_skill\",\"description\":\"【踩坑必写】把新踩坑经验写回共享 SKILL.md（全体 agent 共享，立即生效）。title=小节标题，entry=markdown 正文\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"entry\":{\"type\":\"string\"}},\"required\":[\"title\",\"entry\"]}}" +
             "]";
