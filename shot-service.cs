@@ -42,7 +42,7 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.11";
+    const string APP_VERSION = "0.0.12";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
@@ -1294,7 +1294,7 @@ public class ShotService
                 wc.Headers.Add("User-Agent", "win-desktop-helper/" + APP_VERSION);
                 wc.DownloadFile(url, tmp); // 直链是普通 HTTPS, 跟随 CDN 302, 无认证, 无 API 限流
             }
-            string dir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\') + "\\";
+            string dir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
             // 停止自愈守护, 避免安装期间 watcher 拉起旧版占用 exe (v0.0.6 起无 watcher, 此行无害保留)
             try { foreach (var p in Process.GetProcessesByName("shot-watcher")) { try { p.Kill(); } catch { } } } catch { }
             Process.Start(tmp, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"" + dir + "\"");
