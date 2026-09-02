@@ -40,6 +40,7 @@
 | 保存文件找不到 | 应用默认位置不是预期目录 | 保存后文件系统验证；用 `app_run` 打开目标目录再操作 |
 | 桌面/开始菜单图标变空白（更新后） | 旧 exe 未内嵌图标，快捷方式也没显式 `IconFilename`，更新替换 exe 后 .lnk 缓存图标解析失效 | 编译时 `/win32icon:icon.ico` 把图标焊进 exe；`setup.iss` 的 `[Icons]` 显式写 `IconFilename: "{app}\icon.ico"; IconIndex: 0`，且 `icon.ico` 必须进 `[Files]`（否则装完磁盘上根本没有图标源） |
 | 分辨率/缩放一变，任务栏滚轮音量失效（改回 2560×1440 才恢复） | .NET winexe 默认 DPI 不感知：`GetWindowRect(Shell_TrayWnd)` 返回逻辑像素，而鼠标钩子 `pt` 是物理像素；非 100% 缩放下两边坐标空间不一致 → `IsPointOnTaskbar` 恒 false → 滚轮静默失效（2560×1440/100% 时两边恰好相等所以正常） | 给 exe 嵌 `PerMonitorV2` DPI manifest（`/win32manifest:app.manifest`，声明 `dpiAwareness=PerMonitorV2`），让 `GetWindowRect` 与钩子 `pt` 都用物理像素；`shot-service.cs:1122` 的 `SetProcessDPIAware()` 保留作兜底（manifest 生效时它会被忽略） |
+| 更新抽风：自动/手动检查都提示有新版、安装器反复 launch 版本却不变，最终进程丢失、下次启动又重试死循环 | **根因两层**：①`setup.iss` 的 `PrepareToInstall` 早期用 `taskkill /IM shot-service.exe /F /T`，`/T` 把整进程树杀掉，而安装器(`wdh-update-setup.exe`)本身就是 `shot-service.exe` 的子进程 → 安装器被一起杀 → exe 永远替换不完；②旧 `DoUpdateSilent` 自己从不退出，文件锁一直握在手里，全靠安装器来 kill 自己 | ①`setup.iss` 去掉 `/T`，只 `taskkill /F /IM shot-service.exe`（安装器独立进程名，不受影响）；②`DoUpdateSilent` 改为：下载后 `Environment.Exit(0)` 释放 exe 锁 → 经 `cmd start` 拉起 **detached** 安装器（不属于本进程树，绝不会被误杀）→ 安装器替换 exe 后由 iss `[Run]` 拉起新版；并加 **30 分钟失败冷却**（`wdh-update-guard.txt`），手动托盘菜单/`/update` 绕过冷却。**铁律：绝不要再给 PrepareToInstall 加回 `/T`，也不要在 DoUpdateSilent 里赖着不退出的旧写法** |
 
 ## 标准流程模板
 
