@@ -12,7 +12,7 @@ UninstallDisplayIcon={app}\icon.ico
 Compression=lzma2
 SolidCompression=yes
 OutputDir=release
-OutputBaseFilename=win-desktop-helper-setup-0.0.13
+OutputBaseFilename=win-desktop-helper-setup-0.0.14
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -50,10 +50,13 @@ Filename: "{cmd}"; Parameters: "/c schtasks /delete /tn dsh-shot-helper /f"; Fla
 
 [Code]
 // 安装前强制结束运行中的进程，避免覆盖 exe 时 DeleteFile code 5 (CloseApplications 对无窗口进程不可靠)
+// 关键修复: 早期用 /F /T 会把整进程树杀掉, 而安装器本身是 shot-service 的子进程 -> 安装器被一起杀 -> 替换永远完不成 -> 更新死循环。
+// 现改为只杀 shot-service.exe 本体(/T 去掉), 安装器(独立进程名)不受影响, 才能正常替换并拉起新版。
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
-  Exec('taskkill.exe', '/IM shot-service.exe /F /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill.exe', '/F /IM shot-service.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill.exe', '/F /IM shot-watcher.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
 end;

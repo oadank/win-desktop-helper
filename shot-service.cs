@@ -42,7 +42,7 @@ using System.Windows.Forms;
 public class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.13";
+    const string APP_VERSION = "0.0.14";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
@@ -978,7 +978,7 @@ public class ShotService
                 }
                 else if (path == "/update")
                 {
-                    Thread t = new Thread(new ThreadStart(DoUpdateSilent));
+                    Thread t = new Thread(() => DoUpdateSilent(true));
                     t.IsBackground = true;
                     t.Start();
                     body = "{\"ok\":true,\"msg\":\"update started (silent)\"}";
@@ -1275,16 +1275,47 @@ public class ShotService
         }
     }
 
-    // 自动静默更新: 下载最新 setup 到临时目录并静默安装到当前目录（保持路径不变，装完由 iss [Run] 拉起新服务）
+    // 自动静默更新: 下载最新 setup, 用独立(detached)安装器替换自身并拉起新版。
+    // 历史坑(几十个版本更新抽风根因): 旧实现让安装器 PrepareToInstall 用 taskkill /IM shot-service.exe /F /T 杀自身,
+    //   但安装器是 shot-service 的子进程, /T 把整棵树(含安装器自己)一起杀 -> exe 永远替换不完 -> 死循环直到进程丢失。
+    //   修复(双层):
+    //   1) setup.iss 去掉 /T, 只杀 shot-service.exe 本体, 不再误杀安装器;
+    //   2) 本函数: 下载后退出自身释放 exe 文件锁, 经由 cmd start 拉起 detached 安装器(不属于本进程树, 绝不会被误杀),
+    //      安装器替换 exe 后由 iss [Run] 拉起新版; 并加 30 分钟失败冷却, 杜绝自动重试风暴。
     static int updatingFlag = 0; // 防重入(启动自动检查与手动触发可能并发)
-    static void DoUpdateSilent()
+    static DateTime ReadUpdateGuard()
+    {
+        try
+        {
+            string f = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wdh-update-guard.txt");
+            if (File.Exists(f)) { long t; if (long.TryParse(File.ReadAllText(f).Trim(), out t)) return new DateTime(t, DateTimeKind.Utc); }
+        }
+        catch { }
+        return DateTime.MinValue;
+    }
+    static void WriteUpdateGuard()
+    {
+        try
+        {
+            string f = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wdh-update-guard.txt");
+            File.WriteAllText(f, DateTime.UtcNow.Ticks.ToString());
+        }
+        catch { }
+    }
+    static void DoUpdateSilent(bool isManual = false)
     {
         if (Interlocked.Exchange(ref updatingFlag, 1) == 1) return;
         try
         {
             string v = LatestVersion();
-            if (string.IsNullOrEmpty(v)) { Log("update: no latest version (release/latest lookup failed)"); return; }
-            if (!IsNewerVersion(v)) { Log("update: already latest (" + APP_VERSION + "), skip"); return; } // 已最新不重装, 避免无意义退出
+            if (string.IsNullOrEmpty(v)) { Log("update: latest lookup failed, skip"); return; }
+            if (!IsNewerVersion(v)) { Log("update: already latest (" + APP_VERSION + "), skip"); return; } // 已最新不重装
+            // 失败冷却: 自动更新近 30 分钟内已尝试过且仍不是新版 -> 不再自动重试, 避免死循环 (手动点击不受限)
+            if (!isManual && (DateTime.UtcNow - ReadUpdateGuard()).TotalMinutes < 30)
+            {
+                Log("update: cooldown active, skip auto retry (use tray menu /update to force)"); return;
+            }
+            WriteUpdateGuard(); // 记录本次尝试, 即便失败也进入冷却, 防止刷屏式重试
             string ver = v.TrimStart('v', 'V');
             // 直链拼装: 文件名带版本号是发布约定 (setup.iss OutputBaseFilename=win-desktop-helper-setup-X.Y.Z)
             string url = REPO_URL + "/releases/download/" + v + "/win-desktop-helper-setup-" + ver + ".exe";
@@ -1292,17 +1323,29 @@ public class ShotService
             using (var wc = new WebClient())
             {
                 wc.Headers.Add("User-Agent", "win-desktop-helper/" + APP_VERSION);
-                wc.DownloadFile(url, tmp); // 直链是普通 HTTPS, 跟随 CDN 302, 无认证, 无 API 限流
+                wc.DownloadFile(url, tmp); // 直链普通 HTTPS, 跟随 CDN 302, 无认证无 API 限流
             }
             string dir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
-            // 停止自愈守护, 避免安装期间 watcher 拉起旧版占用 exe (v0.0.6 起无 watcher, 此行无害保留)
+            // 独立安装器脚本: 等文件锁释放 -> 静默安装(替换 exe) -> 自删。
+            // 安装器由 cmd start 拉起, 不属于本进程树, 绝不会被 PrepareToInstall 的 taskkill 误杀; 替换完由 iss [Run] 拉起新版。
+            string bat = Path.Combine(Path.GetTempPath(), "wdh-update-" + DateTime.Now.Ticks.ToString("x") + ".bat");
+            var sb = new StringBuilder();
+            sb.AppendLine("@echo off");
+            sb.AppendLine("timeout /t 3 /nobreak >nul 2>&1");
+            sb.AppendLine("taskkill /F /IM shot-service.exe >nul 2>&1");
+            sb.AppendLine("set \"INS=" + tmp + "\"");
+            sb.AppendLine("set \"DIR=" + dir + "\"");
+            sb.AppendLine("start \"\" /wait \"%INS%\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"%DIR%\"");
+            sb.AppendLine("del /f /q \"%~f0\" >nul 2>&1");
+            File.WriteAllText(bat, sb.ToString());
             try { foreach (var p in Process.GetProcessesByName("shot-watcher")) { try { p.Kill(); } catch { } } } catch { }
-            Process.Start(tmp, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"" + dir + "\"");
-            Log("update: silent installer launched, target=" + dir + " (self stays alive; installer's PrepareToInstall will taskkill this process, iss [Run] relaunches new version)");
-            // 保险丝: 不要在这里 Environment.Exit。正常路径由安装器 PrepareToInstall taskkill 接管并等待死透;
-            // 异常路径(安装包被安全软件拦截/安装器没跑起来)则本进程继续存活, 服务不消失, 下次再试。
+            Process.Start(new ProcessStartInfo("cmd.exe", "/c \"" + bat + "\"") { CreateNoWindow = true, UseShellExecute = false });
+            Log("update: self-updater launched (detached installer -> " + dir + "), exiting self to release file lock");
+            Thread.Sleep(500);
+            Environment.Exit(0); // 退出自身释放 exe 锁, 安装器才能替换; 新版由 iss [Run] 拉起
         }
         catch (Exception ex) { Log("update err: " + ex.Message); }
+        finally { Interlocked.Exchange(ref updatingFlag, 0); }
     }
 
     // ---- 模式: -watch 自愈守护 (替代独立 shot-watcher.exe) ----
@@ -1549,7 +1592,7 @@ public class ShotService
             {
                 string v = LatestVersion();
                 if (v == null) MessageBox.Show("无法连接 GitHub，请检查网络", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                else if (IsNewerVersion(v)) { MessageBox.Show("发现新版本 v" + v.TrimStart('v', 'V') + "，正在自动静默更新...", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information); Thread.Sleep(800); DoUpdateSilent(); }
+                else if (IsNewerVersion(v)) { MessageBox.Show("发现新版本 v" + v.TrimStart('v', 'V') + "，正在自动静默更新...", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information); Thread.Sleep(800); DoUpdateSilent(true); }
                 else MessageBox.Show("已是最新版本 v" + APP_VERSION, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex) { MessageBox.Show("检查失败: " + ex.Message, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Error); }
