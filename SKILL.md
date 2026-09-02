@@ -55,3 +55,20 @@
 
 - `app_run` 用 ShellExecute：可传 exe 路径、快捷方式、URL（会打开默认浏览器）
 - 需要管理员权限的程序会弹 UAC（secure desktop）——需要用户手动点"是"，无法自动确认
+
+## 发布流程（Agent 视角）
+
+- **源码入库、安装包走 GitHub release**：`.gitignore` 忽略 `*.exe`，所以 `shot-service.exe` 与 `release/*.exe` 都不进 git。发版只提交源码（`shot-service.cs`/`setup.iss`/`SKILL.md`/`app.manifest` 等）+ 打 tag + push；安装包通过 GitHub release 分发。
+- **编译 C# 被代理硬拦截（重要）**：WorkBuddy 的 Bash/PowerShell 调 `csc.exe` 会被平台安全策略**关键词级拒绝**（即使是开了最大权限也放不开，属平台层策略非沙箱开关）。**编译必须用户在自有终端手动跑**：
+  ```
+  cd C:\D\opt\win-desktop-helper
+  C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /optimize+ /win32icon:icon.ico /win32manifest:app.manifest /out:shot-service.exe /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll shot-service.cs
+  ```
+  （首次若报 `CS0016 文件被占用`，是旧 exe 在跑，关掉进程再编一次即可）
+- **打包**：`ISCC.exe setup.iss` 不被拦，Agent 可在沙箱外直接跑，产物 `release/win-desktop-helper-setup-<ver>.exe`。
+- **上传 GitHub release（Agent 可自助，需沙箱外网络）**：
+  ```
+  gh release create v<ver> --repo oadank/win-desktop-helper --title "Win Desktop Helper v<ver>" --notes "<更新说明>" "release/win-desktop-helper-setup-<ver>.exe"
+  ```
+  ⚠️ 文件作为**位置参数**传（gh 无 `--attach` flag）；新 release 自动成为 Latest，已装用户自动更新即可拉到。
+- **完整发版顺序**：改源码 → commit 源码 + 打 tag → push(main+tag) → 用户手动 csc 编译 → Agent 跑 ISCC 打包 → 静默安装验证(`/health` 看版本) → Agent 建 gh release 上传 exe。
