@@ -38,6 +38,8 @@
 | 点窗口没反应 | 点到了遮蔽它的其他窗口 | 先 `alt+tab` 置前再点；用窗口 rect 中心附近点击 |
 | 点击/输入打到别处 | 光标下/前台不是目标 | 立即 `active_window` 检查，停止继续操作并汇报 |
 | 保存文件找不到 | 应用默认位置不是预期目录 | 保存后文件系统验证；用 `app_run` 打开目标目录再操作 |
+| 桌面/开始菜单图标变空白（更新后） | 旧 exe 未内嵌图标，快捷方式也没显式 `IconFilename`，更新替换 exe 后 .lnk 缓存图标解析失效 | 编译时 `/win32icon:icon.ico` 把图标焊进 exe；`setup.iss` 的 `[Icons]` 显式写 `IconFilename: "{app}\icon.ico"; IconIndex: 0`，且 `icon.ico` 必须进 `[Files]`（否则装完磁盘上根本没有图标源） |
+| 分辨率/缩放一变，任务栏滚轮音量失效（改回 2560×1440 才恢复） | .NET winexe 默认 DPI 不感知：`GetWindowRect(Shell_TrayWnd)` 返回逻辑像素，而鼠标钩子 `pt` 是物理像素；非 100% 缩放下两边坐标空间不一致 → `IsPointOnTaskbar` 恒 false → 滚轮静默失效（2560×1440/100% 时两边恰好相等所以正常） | 给 exe 嵌 `PerMonitorV2` DPI manifest（`/win32manifest:app.manifest`，声明 `dpiAwareness=PerMonitorV2`），让 `GetWindowRect` 与钩子 `pt` 都用物理像素；`shot-service.cs:1122` 的 `SetProcessDPIAware()` 保留作兜底（manifest 生效时它会被忽略） |
 
 ## 标准流程模板
 

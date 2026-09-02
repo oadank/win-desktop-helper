@@ -3,16 +3,16 @@
 [Setup]
 AppId={{FE6F68E9-0CEB-450B-B438-49BFDF5FFB15}
 AppName=Win Desktop Helper
-AppVersion=0.0.12
+AppVersion=0.0.13
 AppPublisher=oadank
 AppPublisherURL=https://github.com/oadank/win-desktop-helper
 DefaultDirName={localappdata}\Programs\win-desktop-helper
 DefaultGroupName=Win Desktop Helper
-UninstallDisplayIcon={app}\shot-service.exe
+UninstallDisplayIcon={app}\icon.ico
 Compression=lzma2
 SolidCompression=yes
 OutputDir=release
-OutputBaseFilename=win-desktop-helper-setup-0.0.12
+OutputBaseFilename=win-desktop-helper-setup-0.0.13
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -31,13 +31,14 @@ Source: "mcp-bridge.js"; DestDir: "{app}"; Flags: ignoreversion
 Source: "SKILL.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "shot-service"; ValueData: """{app}\shot-service.exe"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Icons]
-Name: "{autoprograms}\Win Desktop Helper"; Filename: "{app}\shot-service.exe"
-Name: "{autodesktop}\Win Desktop Helper"; Filename: "{app}\shot-service.exe"; Tasks: desktopicon
+Name: "{autoprograms}\Win Desktop Helper"; Filename: "{app}\shot-service.exe"; IconFilename: "{app}\icon.ico"; IconIndex: 0
+Name: "{autodesktop}\Win Desktop Helper"; Filename: "{app}\shot-service.exe"; IconFilename: "{app}\icon.ico"; IconIndex: 0; Tasks: desktopicon
 
 [Run]
 Filename: "{cmd}"; Parameters: "/c schtasks /create /tn dsh-shot-helper /tr ""{app}\shot-service.exe"" /sc once /st 00:00 /it /ru {username} /f"; Flags: runhidden; StatusMsg: "创建计划任务(手动拉起入口)..."
