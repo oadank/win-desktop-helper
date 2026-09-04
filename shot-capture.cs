@@ -27,9 +27,33 @@ partial class ShotService
 {
     const int SHOT_HOTKEY_ID = 0x5713; // 与 HOTKEY_ID(0x5712) 区分
     const int FULLSHOT_HOTKEY_ID = 0x5714; // 全屏截图热键
+    const int PIN_HOTKEY_ID = 0x5715;      // 贴图热键 (剪贴板图片钉到桌面, PixPin F3 同款)
     static string shotHotkeyName = "";
     static string fullShotHotkeyName = "";
+    static string pinHotkeyName = "";
     static bool captureBusy = false;
+
+    // 贴图 (PixPin F3 同款): 剪贴板里的图直接钉到桌面 (屏幕居中), 无图则气泡提示
+    static void DoPinFromClipboard()
+    {
+        try
+        {
+            if (!Clipboard.ContainsImage())
+            {
+                ShowTrayInfo("剪贴板里没有图片。先复制一张图, 再按 " + (pinHotkeyName == "" ? "贴图热键" : pinHotkeyName));
+                return;
+            }
+            Bitmap img;
+            using (Bitmap srcB = (Bitmap)Clipboard.GetImage())
+                img = new Bitmap(srcB);
+            Rectangle vs = SystemInformation.VirtualScreen;
+            int w = Math.Min(img.Width, vs.Width - 40), h = Math.Min(img.Height, vs.Height - 40);
+            PinForm pf = new PinForm(img, new Rectangle(vs.Left + (vs.Width - w) / 2, vs.Top + (vs.Height - h) / 2, w, h));
+            pf.Show();
+            Log("pin from clipboard: " + img.Width + "x" + img.Height);
+        }
+        catch (Exception ex) { Log("pin from clipboard err: " + ex.Message); }
+    }
 
     // 全屏截图 (热键): 截全屏 → 图片复制到剪贴板 → 轻气泡提示 (仅手动热键触发; HTTP/MCP 调用 DoShot 从不弹泡)
     static void DoFullScreenShot()
@@ -402,11 +426,16 @@ partial class ShotService
             textInput = new TextBox();
             textInput.Font = annotFont;
             textInput.ForeColor = Color.FromArgb(255, 70, 70);
-            textInput.BackColor = Color.White;
-            textInput.BorderStyle = BorderStyle.FixedSingle;
+            textInput.BorderStyle = BorderStyle.None;
+            // 视觉透明: 背景贴冻结截图里输入框所在的那块原图 - 底下是什么显示什么, 不遮挡视线
+            Rectangle srcR = new Rectangle(sp.X - SystemInformation.VirtualScreen.X, sp.Y - SystemInformation.VirtualScreen.Y, 340, 44);
+            srcR.Intersect(new Rectangle(0, 0, frozen.Width, frozen.Height));
+            if (srcR.Width > 10 && srcR.Height > 10)
+                textInput.BackgroundImage = frozen.Clone(srcR, frozen.PixelFormat);
+            textInput.BackgroundImageLayout = ImageLayout.None;
             Point c = RectangleToClient(new Rectangle(sp, Size.Empty)).Location;
             textInput.Location = c;
-            textInput.Width = 220;
+            textInput.Width = 340;
             textInput.TextChanged += (s, ev) => { textInput.Width = Math.Max(120, TextRenderer.MeasureText(textInput.Text + "宽", textInput.Font).Width); };
             textInput.KeyDown += (s, ev) =>
             {
@@ -440,6 +469,7 @@ partial class ShotService
         {
             if (textInput != null)
             {
+                try { textInput.BackgroundImage.Dispose(); } catch { }
                 try { textInput.Dispose(); } catch { }
                 textInput = null;
                 Focus(); // 焦点回遮罩, Esc/快捷键继续可用
@@ -723,12 +753,10 @@ partial class ShotService
                         g.DrawLine(w, 4, 4, 14, 4);
                         g.DrawLine(w, 9, 4, 9, 15);
                         break;
-                    case "seq":
+                    case "seq": // 线条画 "1" (竖干+起笔), 几何居中 - 字体方案基线偏移不可控
                         g.DrawEllipse(w, 3, 3, 12, 12);
-                        using (Font f = new Font("Consolas", 7.5f, FontStyle.Bold))
-                        using (Brush b = new SolidBrush(Color.FromArgb(232, 234, 240)))
-                        using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                            g.DrawString("1", f, b, new RectangleF(2, 2, 14, 14), sf); // 圆心对齐
+                        g.DrawLine(w, 9f, 5.6f, 9f, 12.4f);
+                        g.DrawLine(w, 9f, 5.6f, 6.8f, 7.6f);
                         break;
                     case "undo": // ↩ 顶弧 + 左指实心箭头
                         g.DrawArc(w, 4f, 6f, 11f, 9f, -20, 195);
@@ -753,15 +781,21 @@ partial class ShotService
                         g.DrawLine(w, 6.5f, 6, 11.5f, 6);
                         g.DrawLine(w, 9, 6, 9, 13);
                         break;
-                    case "translate": // 双对话气泡 (前实心小 + 后线框大), 翻译语义
-                        g.DrawRectangle(w, 2, 3, 10, 7);          // 后大气泡 (线框)
-                        g.DrawLines(w, new PointF[] { new PointF(4, 10), new PointF(4, 13), new PointF(7, 10) }); // 尾
-                        using (SolidBrush b = new SolidBrush(Color.FromArgb(232, 234, 240)))
-                        {
-                            g.FillRectangle(b, 9, 9, 8, 5);      // 前小气泡 (实心)
-                            g.FillPolygon(b, new PointF[] { new PointF(11, 14), new PointF(14, 14), new PointF(11, 16.5f) }); // 尾
-                        }
+                    case "translate": // "中" + "A" + 底部循环圈 (PixPin 同款语义: 中英互译)
+                    {
+                        // 中 (左): 口 + 贯穿竖
+                        g.DrawRectangle(w, 1.8f, 5.2f, 5.4f, 5.4f);
+                        g.DrawLine(w, 4.5f, 3.2f, 4.5f, 12.6f);
+                        // A (右): 两斜 + 横
+                        g.DrawLine(w, 10.8f, 12.6f, 13.1f, 3.6f);
+                        g.DrawLine(w, 13.1f, 3.6f, 15.4f, 12.6f);
+                        g.DrawLine(w, 11.7f, 9.4f, 14.5f, 9.4f);
+                        // 循环圈 (底部): 弧 + 实心箭头
+                        g.DrawArc(w, 4.5f, 12.2f, 9f, 5f, 200, 140);
+                        using (SolidBrush b = new SolidBrush(w.Color))
+                            g.FillPolygon(b, new PointF[] { new PointF(14.2f, 16.4f), new PointF(13.2f, 13.2f), new PointF(10.6f, 15.4f) });
                         break;
+                    }
                     case "save": // 软盘
                         g.DrawRectangle(w, 2.5f, 2.5f, 13, 13);
                         g.DrawRectangle(w, 6, 3.5f, 6, 4);

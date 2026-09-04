@@ -717,6 +717,11 @@ public partial class ShotService
                 ThreadPool.QueueUserWorkItem(delegate { DoFullScreenShot(); });
                 return;
             }
+            if (m.Msg == WM_HOTKEY && (int)m.WParam == PIN_HOTKEY_ID)
+            {
+                DoPinFromClipboard();
+                return;
+            }
             if (m.Msg == WM_DISPLAYCHANGE)
             {
                 // 分辨率/显示器变更: 任务栏窗口句柄与矩形都会变, 立即重建列表, 否则滚轮/中键失效
@@ -1283,6 +1288,25 @@ public partial class ShotService
                         }
                     }
                     if (!fOk) Log("fullscreen shot hotkey register FAILED (all candidates busy)");
+                    // 贴图热键 (PixPin F3 同款): 剪贴板图钉到桌面
+                    uint[][] pcands = new uint[][]
+                    {
+                        new uint[] { 0, 0x72 },                        // F3 (PixPin 默认, 优先)
+                        new uint[] { MOD_CONTROL | MOD_ALT, 0x50 },    // Ctrl+Alt+P
+                    };
+                    string[] pnames = new string[] { "F3", "Ctrl+Alt+P" };
+                    bool pOk = false;
+                    for (int ci = 0; ci < pcands.Length; ci++)
+                    {
+                        if (RegisterHotKey(hk.Handle, PIN_HOTKEY_ID, pcands[ci][0], pcands[ci][1]))
+                        {
+                            pinHotkeyName = pnames[ci];
+                            pOk = true;
+                            Log("pin hotkey registered: " + pnames[ci]);
+                            break;
+                        }
+                    }
+                    if (!pOk) Log("pin hotkey register FAILED (all candidates busy)");
                     Application.Run(hk);
                 }
                 catch (Exception ex) { Log("hotkey form err: " + ex.Message); Application.Run(); }
