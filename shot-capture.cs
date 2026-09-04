@@ -136,12 +136,16 @@ partial class ShotService
     class Annot
     {
         public const int K_RECT = 0, K_ELLIPSE = 1, K_ARROW = 2, K_PEN = 3, K_TEXT = 4, K_SEQ = 5;
+        // 箭头样式 (PixPin 同款)
+        public const int S_ARROW = 0, S_BOTH = 1, S_LINE = 2, S_CALLOUT = 3;
         public int Kind;
+        public int Style = S_ARROW;  // 箭头样式
+        public float Width = 3f;     // 线宽
         public Rectangle Rect;      // rect/ellipse/arrow 的包围盒; seq/text 的定位点在 Rect.Location
         public List<Point> Pts;     // 画笔折线 (屏坐标)
         public string Text;         // 文字内容
         public int No;              // 序号数字
-        public Color Color = Color.FromArgb(255, 70, 70); // PixPin 默认红
+        public Color Color = Color.FromArgb(242, 80, 59); // PixPin 默认红
     }
 
     // 全屏框选窗 (PixPin/ShareX 同款交互)
@@ -156,9 +160,17 @@ partial class ShotService
         readonly List<Annot> redoStack = new List<Annot>(); // 撤销弹出的标注 (重做用, 新笔画清空)
         Annot cur;               // 正在绘制的标注
         string tool = null;      // 当前标注工具: rect/ellipse/arrow/pen/text/seq; null=未选
+        int curArrowStyle = Annot.S_ARROW;          // 属性栏: 箭头样式
+        float curWidth = 3f;                        // 属性栏: 线宽 (细2/中3.5/粗6)
+        Color curColor = Color.FromArgb(242, 80, 59); // 属性栏: 颜色 (PixPin 默认红)
         int seqNext = 1;
-        TextBox textInput;       // 文字标注的行内输入框
+        // text annotation: self-drawn input (TextBox white opaque bg; BackgroundImage ignored by system EDIT control)
+        // focus stays on overlay; chars arrive via WM_CHAR/KeyPress (IME works); text+caret painted in OnPaint = truly transparent
+        bool textMode = false;
+        string textBuf = "";       // 文字标注的行内输入框
         Point textPt;
+        bool caretOn = true;
+        Timer caretTimer;
         static readonly Font annotFont = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold);
 
         public CaptureOverlay(Bitmap preShot)
@@ -217,10 +229,12 @@ partial class ShotService
                 cur = new Annot();
                 cur.Kind = tool == "rect" ? Annot.K_RECT : tool == "ellipse" ? Annot.K_ELLIPSE :
                            tool == "arrow" ? Annot.K_ARROW : tool == "seq" ? Annot.K_SEQ : Annot.K_PEN;
+                cur.Width = curWidth; cur.Color = curColor; cur.Style = curArrowStyle;
                 if (cur.Kind == Annot.K_SEQ)
                 {
                     cur.No = seqNext++;
                     cur.Rect = new Rectangle(sp.X - 14, sp.Y - 14, 28, 28);
+                    cur.Width = curWidth; cur.Color = curColor;
                     PushAnnot(cur);
                     Log("capture: annot seq #" + cur.No);
                     cur = null; // 序号一笔即成
@@ -253,6 +267,17 @@ partial class ShotService
                     InvalidateAnnot(old);
                     InvalidateAnnot(cur);
                 }
+            }
+        }
+
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            base.OnMouseDoubleClick(e);
+            // PixPin 同款: 双击选区 = 复制并完成 (拖框中/文字输入中/选了工具时不触发)
+            if (e.Button == MouseButtons.Left && hasSel && !dragging && cur == null && !textMode && tool == null)
+            {
+                Log("capture: dblclick = copy");
+                ActCopy();
             }
         }
 
@@ -325,7 +350,21 @@ partial class ShotService
                 g.FillRectangle(dim, 0, d.Top, Math.Max(0, d.Left), d.Height);                  // 左
                 g.FillRectangle(dim, d.Right, d.Top, Math.Max(0, W - d.Right), d.Height);       // 右
             }
-            DrawAnnots(g, Point.Empty); // 选区内标注 (客户区即冻结图坐标, 偏移0)
+            DrawAnnots(g, Point.Empty);
+            if (textMode)
+            {
+                // typing text + blinking caret, painted on overlay = transparent background
+                using (SolidBrush tb = new SolidBrush(curColor))
+                    g.DrawString(textBuf, annotFont, tb, new PointF(d.X + (textPt.X - sel.X), d.Y + (textPt.Y - sel.Y)));
+                if (caretOn)
+                {
+                    SizeF tw = g.MeasureString(textBuf, annotFont);
+                    float cx = d.X + (textPt.X - sel.X) + tw.Width * 0.92f;
+                    float cy = d.Y + (textPt.Y - sel.Y);
+                    using (Pen cp = new Pen(curColor, 2f))
+                        g.DrawLine(cp, cx, cy + 2, cx, cy + annotFont.Height - 2);
+                }
+            } // 选区内标注 (客户区即冻结图坐标, 偏移0)
             using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
             using (Font f = new Font("Consolas", 11))
             using (Brush b = new SolidBrush(Color.Yellow))
@@ -353,7 +392,7 @@ partial class ShotService
         static void DrawOne(Graphics g, Annot a, Point offset)
         {
             if (a == null) return;
-            using (Pen p = new Pen(a.Color, 2.5f))
+            using (Pen p = new Pen(a.Color, a.Width))
             {
                 switch (a.Kind)
                 {
@@ -364,8 +403,8 @@ partial class ShotService
                         g.DrawEllipse(p, a.Rect.X - offset.X, a.Rect.Y - offset.Y, a.Rect.Width, a.Rect.Height);
                         break;
                     case Annot.K_ARROW:
-                        DrawArrow(g, p, a.Rect.X - offset.X, a.Rect.Y - offset.Y,
-                                  a.Rect.Right - offset.X, a.Rect.Bottom - offset.Y);
+                        DrawArrowEx(g, p, a.Rect.X - offset.X, a.Rect.Y - offset.Y,
+                                    a.Rect.Right - offset.X, a.Rect.Bottom - offset.Y, a.Style);
                         break;
                     case Annot.K_PEN:
                         if (a.Pts != null && a.Pts.Count > 1)
@@ -393,15 +432,33 @@ partial class ShotService
             }
         }
 
-        static void DrawArrow(Graphics g, Pen p, float x1, float y1, float x2, float y2)
+        static void DrawArrowHead(Graphics g, Pen p, float tipX, float tipY, float ang, float hl)
+        {
+            PointF a1 = new PointF(tipX - hl * (float)Math.Cos(ang - 0.45), tipY - hl * (float)Math.Sin(ang - 0.45));
+            PointF a2 = new PointF(tipX - hl * (float)Math.Cos(ang + 0.45), tipY - hl * (float)Math.Sin(ang + 0.45));
+            using (SolidBrush b = new SolidBrush(p.Color))
+                g.FillPolygon(b, new PointF[] { new PointF(tipX, tipY), a1, a2 });
+        }
+
+        // 箭头 4 样式 (PixPin 同款): 实线箭头 / 双向箭头 / 直线 / 标注线(两端竖杠)
+        static void DrawArrowEx(Graphics g, Pen p, float x1, float y1, float x2, float y2, int style)
         {
             g.DrawLine(p, x1, y1, x2, y2);
-            double ang = Math.Atan2(y2 - y1, x2 - x1);
-            float hl = 14; // 箭头头长
-            PointF a1 = new PointF(x2 - hl * (float)Math.Cos(ang - 0.45), y2 - hl * (float)Math.Sin(ang - 0.45));
-            PointF a2 = new PointF(x2 - hl * (float)Math.Cos(ang + 0.45), y2 - hl * (float)Math.Sin(ang + 0.45));
-            using (SolidBrush b = new SolidBrush(p.Color))
-                g.FillPolygon(b, new PointF[] { new PointF(x2, y2), a1, a2 });
+            float angA = (float)Math.Atan2(y2 - y1, x2 - x1);         // 指向终点
+            float angB = (float)Math.Atan2(y1 - y2, x1 - x2);         // 指向起点
+            if (style == Annot.S_LINE) return;
+            if (style == Annot.S_CALLOUT)
+            {
+                float barAng = angA + (float)Math.PI / 2;
+                float hl = 7;
+                g.DrawLine(p, x1 + hl * (float)Math.Cos(barAng), y1 + hl * (float)Math.Sin(barAng),
+                               x1 - hl * (float)Math.Cos(barAng), y1 - hl * (float)Math.Sin(barAng));
+                g.DrawLine(p, x2 + hl * (float)Math.Cos(barAng), y2 + hl * (float)Math.Sin(barAng),
+                               x2 - hl * (float)Math.Cos(barAng), y2 - hl * (float)Math.Sin(barAng));
+                return;
+            }
+            DrawArrowHead(g, p, x2, y2, angA, 13);
+            if (style == Annot.S_BOTH) DrawArrowHead(g, p, x1, y1, angB, 13);
         }
 
         // ---- 导出: 冻结图选区 + 标注 合成 ----
@@ -419,62 +476,66 @@ partial class ShotService
         }
 
         // ---- 行内文字输入 (PixPin 同款: 点击处直接打字, 回车落字 Esc 取消) ----
+        // ---- text input (self-drawn): click inside selection, type directly, Enter commits, Esc cancels ----
         void OpenTextInput(Point sp)
         {
             CommitTextInput();
+            textMode = true;
+            textBuf = "";
             textPt = sp;
-            textInput = new TextBox();
-            textInput.Font = annotFont;
-            textInput.ForeColor = Color.FromArgb(255, 70, 70);
-            textInput.BorderStyle = BorderStyle.None;
-            // 视觉透明: 背景贴冻结截图里输入框所在的那块原图 - 底下是什么显示什么, 不遮挡视线
-            Rectangle srcR = new Rectangle(sp.X - SystemInformation.VirtualScreen.X, sp.Y - SystemInformation.VirtualScreen.Y, 340, 44);
-            srcR.Intersect(new Rectangle(0, 0, frozen.Width, frozen.Height));
-            if (srcR.Width > 10 && srcR.Height > 10)
-                textInput.BackgroundImage = frozen.Clone(srcR, frozen.PixelFormat);
-            textInput.BackgroundImageLayout = ImageLayout.None;
-            Point c = RectangleToClient(new Rectangle(sp, Size.Empty)).Location;
-            textInput.Location = c;
-            textInput.Width = 340;
-            textInput.TextChanged += (s, ev) => { textInput.Width = Math.Max(120, TextRenderer.MeasureText(textInput.Text + "宽", textInput.Font).Width); };
-            textInput.KeyDown += (s, ev) =>
+            if (caretTimer == null)
             {
-                if (ev.KeyCode == Keys.Enter) { ev.SuppressKeyPress = true; CommitTextInput(); }
-                else if (ev.KeyCode == Keys.Escape) { ev.SuppressKeyPress = true; DropTextInput(); }
-            };
-            Controls.Add(textInput);
-            textInput.Show();
-            textInput.Focus();
+                caretTimer = new Timer { Interval = 450 };
+                caretTimer.Tick += (s, e) => { caretOn = !caretOn; InvalidateTextInput(); };
+            }
+            caretOn = true;
+            caretTimer.Start();
+            ImeMode = ImeMode.On;
+            Focus();
+            InvalidateTextInput();
             Log("capture: text input opened at " + sp);
+        }
+
+        void InvalidateTextInput()
+        {
+            Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "W", annotFont);
+            Rectangle r = new Rectangle(RectangleToClient(new Rectangle(textPt, Size.Empty)).Location,
+                                        new Size(ts.Width + 40, ts.Height + 10));
+            r.Intersect(ClientRectangle);
+            Invalidate(r);
         }
 
         void CommitTextInput()
         {
-            if (textInput == null) return;
-            string t = textInput.Text;
+            if (!textMode) return;
+            textMode = false;
+            if (caretTimer != null) caretTimer.Stop();
+            string t = textBuf;
             Point pt = textPt;
-            DropTextInput();
+            textBuf = "";
+            InvalidateTextInput();
             if (!string.IsNullOrEmpty(t))
             {
                 Annot a = new Annot();
                 a.Kind = Annot.K_TEXT;
                 a.Text = t;
+                a.Color = curColor;
                 a.Rect = new Rectangle(pt, Size.Empty);
                 PushAnnot(a);
                 Log("capture: annot text (" + t.Length + " chars)");
             }
         }
 
-        void DropTextInput()
+        void CancelTextInput()
         {
-            if (textInput != null)
-            {
-                try { textInput.BackgroundImage.Dispose(); } catch { }
-                try { textInput.Dispose(); } catch { }
-                textInput = null;
-                Focus(); // 焦点回遮罩, Esc/快捷键继续可用
-            }
+            if (!textMode) return;
+            textMode = false;
+            if (caretTimer != null) caretTimer.Stop();
+            textBuf = "";
+            InvalidateTextInput();
+            Log("capture: text input cancelled");
         }
+
 
         // ---- 自绘紧凑工具条 (PixPin 同款密度: 32px 按钮 0 间距 / hover 圆角 / 细分隔线; ToolStrip 间距不可控已弃用) ----
         ToolbarPanel bar;
@@ -518,8 +579,87 @@ partial class ShotService
             foreach (var b in bar.Btns)
                 if (b.IsToggle) b.On = (b.ToolKey == tool);
             bar.Invalidate();
+            ShowPropBar();
             Log("capture: tool=" + (tool ?? "(none)"));
         }
+
+        // ---- 二级属性栏 (PixPin 同款): 样式(箭头) + 粗细 + 颜色; 选中标注工具时贴在主条下方 ----
+        ToolbarPanel propBar;
+
+        void ShowPropBar()
+        {
+            if (propBar == null) { BuildPropBar(); }
+            bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen";
+            if (!need) { propBar.Visible = false; return; }
+            // 箭头样式组仅箭头工具可见
+            foreach (var b in propBar.Btns) if (b.ToolKey != null && b.ToolKey.StartsWith("sty")) b.Enabled = (tool == "arrow");
+            MarkProp();
+            PlacePropBar();
+            propBar.Visible = true;
+        }
+
+        void BuildPropBar()
+        {
+            propBar = new ToolbarPanel();
+            propBar.Add("sty_arrow", "实线箭头", delegate { curArrowStyle = Annot.S_ARROW; MarkProp(); }).ToolKey = "sty_arrow";
+            propBar.Add("sty_both", "双向箭头", delegate { curArrowStyle = Annot.S_BOTH; MarkProp(); }).ToolKey = "sty_both";
+            propBar.Add("sty_line", "直线 (无箭头)", delegate { curArrowStyle = Annot.S_LINE; MarkProp(); }).ToolKey = "sty_line";
+            propBar.Add("sty_callout", "标注线 (两端竖杠)", delegate { curArrowStyle = Annot.S_CALLOUT; MarkProp(); }).ToolKey = "sty_callout";
+            propBar.AddSep();
+            propBar.Add("w_thin", "细线", delegate { curWidth = 2f; MarkProp(); }).ToolKey = "w_thin";
+            propBar.Add("w_mid", "中线", delegate { curWidth = 3.5f; MarkProp(); }).ToolKey = "w_mid";
+            propBar.Add("w_bold", "粗线", delegate { curWidth = 6f; MarkProp(); }).ToolKey = "w_bold";
+            propBar.AddSep();
+            Color[] cols =
+            {
+                Color.FromArgb(242, 80, 59),   // 红 (PixPin 默认)
+                Color.FromArgb(235, 130, 50),  // 橙
+                Color.FromArgb(245, 198, 60),  // 黄
+                Color.FromArgb(94, 176, 100),  // 绿
+                Color.FromArgb(59, 125, 216),  // 蓝
+                Color.FromArgb(150, 150, 150), // 灰
+                Color.FromArgb(255, 255, 255), // 白
+            };
+            string[] cnames = { "红色", "橙色", "黄色", "绿色", "蓝色", "灰色", "白色" };
+            for (int i = 0; i < cols.Length; i++)
+            {
+                Color c = cols[i];
+                propBar.AddColor(c, cnames[i], delegate { curColor = c; MarkProp(); }).ToolKey = "col" + i;
+            }
+            Controls.Add(propBar);
+            propBar.Visible = false;
+        }
+
+        void MarkProp()
+        {
+            foreach (var b in propBar.Btns)
+            {
+                if (b.ToolKey == null) continue;
+                if (b.ToolKey.StartsWith("sty")) b.On = (b.ToolKey == "sty_arrow" && curArrowStyle == Annot.S_ARROW) ||
+                                                        (b.ToolKey == "sty_both" && curArrowStyle == Annot.S_BOTH) ||
+                                                        (b.ToolKey == "sty_line" && curArrowStyle == Annot.S_LINE) ||
+                                                        (b.ToolKey == "sty_callout" && curArrowStyle == Annot.S_CALLOUT);
+                else if (b.ToolKey.StartsWith("w_")) b.On = (b.ToolKey == "w_thin" && curWidth <= 2.5f) ||
+                                                            (b.ToolKey == "w_mid" && curWidth > 2.5f && curWidth <= 4.5f) ||
+                                                            (b.ToolKey == "w_bold" && curWidth > 4.5f);
+                else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
+            }
+            propBar.Invalidate();
+        }
+
+        void PlacePropBar()
+        {
+            if (propBar == null || bar == null) return;
+            Rectangle vs = SystemInformation.VirtualScreen;
+            int x = bar.Left, y = bar.Bottom + 4;
+            if (x + propBar.Width > vs.Right - 4) x = vs.Right - propBar.Width - 4;
+            if (y + propBar.Height > vs.Bottom - 4) y = bar.Top - propBar.Height - 4;
+            if (y < vs.Top + 4) y = vs.Top + 4;
+            Point c = RectangleToClient(new Rectangle(new Point(x, y), Size.Empty)).Location;
+            propBar.Left = c.X; propBar.Top = c.Y;
+        }
+
+        void HidePropBar() { if (propBar != null) propBar.Visible = false; }
 
         void PlaceBar()
         {
@@ -533,7 +673,7 @@ partial class ShotService
             bar.Left = c.X; bar.Top = c.Y;
         }
 
-        void HideBar() { if (bar != null) bar.Visible = false; }
+        void HideBar() { if (bar != null) bar.Visible = false; HidePropBar(); }
 
         // 提交一笔标注: 入栈 + 清空重做栈(新笔画使重做失效, 标准行为)
         void PushAnnot(Annot a)
@@ -694,11 +834,37 @@ partial class ShotService
             catch (Exception ex) { Log("result form err: " + ex.Message); }
         }
 
+        // self-drawn text input: printable chars / IME-committed chars arrive here via WM_CHAR
+        protected override void OnKeyPress(KeyPressEventArgs e)
+        {
+            base.OnKeyPress(e);
+            if (!textMode) return;
+            if (e.KeyChar == '\r')
+            {
+                CommitTextInput();
+                e.Handled = true;
+                return;
+            }
+            if (e.KeyChar == '\b')
+            {
+                if (textBuf.Length > 0) textBuf = textBuf.Remove(textBuf.Length - 1);
+                InvalidateTextInput();
+                e.Handled = true;
+                return;
+            }
+            if (e.KeyChar >= ' ')
+            {
+                textBuf += e.KeyChar;
+                InvalidateTextInput();
+                e.Handled = true;
+            }
+        }
+
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             if (keyData == Keys.Escape)
             {
-                if (textInput != null) { DropTextInput(); return true; }
+                if (textMode) { CancelTextInput(); return true; }
                 if (cur != null) { var c = cur; cur = null; InvalidateAnnot(c); return true; } // 丢弃当前笔画
                 CancelAll();
                 return true;
@@ -781,19 +947,23 @@ partial class ShotService
                         g.DrawLine(w, 6.5f, 6, 11.5f, 6);
                         g.DrawLine(w, 9, 6, 9, 13);
                         break;
-                    case "translate": // "中" + "A" + 底部循环圈 (PixPin 同款语义: 中英互译)
+                    case "translate": // zh top-left, A bottom-right, two arcs forming a circle (mutual convert)
                     {
-                        // 中 (左): 口 + 贯穿竖
-                        g.DrawRectangle(w, 1.8f, 5.2f, 5.4f, 5.4f);
-                        g.DrawLine(w, 4.5f, 3.2f, 4.5f, 12.6f);
-                        // A (右): 两斜 + 横
-                        g.DrawLine(w, 10.8f, 12.6f, 13.1f, 3.6f);
-                        g.DrawLine(w, 13.1f, 3.6f, 15.4f, 12.6f);
-                        g.DrawLine(w, 11.7f, 9.4f, 14.5f, 9.4f);
-                        // 循环圈 (底部): 弧 + 实心箭头
-                        g.DrawArc(w, 4.5f, 12.2f, 9f, 5f, 200, 140);
+                        // "zh": box + through-vertical (top-left)
+                        g.DrawRectangle(w, 1.6f, 2.2f, 5f, 5f);
+                        g.DrawLine(w, 4.1f, 0.9f, 4.1f, 8.6f);
+                        // "A": two diagonals + bar (bottom-right)
+                        g.DrawLine(w, 10.4f, 17f, 12.8f, 9.6f);
+                        g.DrawLine(w, 12.8f, 9.6f, 15.2f, 17f);
+                        g.DrawLine(w, 11.3f, 14.6f, 14.3f, 14.6f);
+                        // arc top-right (zh -> A) + arrowhead
+                        g.DrawArc(w, 3.2f, 3.2f, 11.6f, 11.6f, -78, 62);
                         using (SolidBrush b = new SolidBrush(w.Color))
-                            g.FillPolygon(b, new PointF[] { new PointF(14.2f, 16.4f), new PointF(13.2f, 13.2f), new PointF(10.6f, 15.4f) });
+                            g.FillPolygon(b, new PointF[] { new PointF(14.6f, 4.4f), new PointF(12.2f, 4.2f), new PointF(13.9f, 6.4f) });
+                        // arc bottom-left (A -> zh) + arrowhead
+                        g.DrawArc(w, 3.2f, 3.2f, 11.6f, 11.6f, 102, 62);
+                        using (SolidBrush b2 = new SolidBrush(w.Color))
+                            g.FillPolygon(b2, new PointF[] { new PointF(3.4f, 13.6f), new PointF(5.8f, 13.8f), new PointF(4.1f, 11.6f) });
                         break;
                     }
                     case "save": // 软盘
@@ -807,6 +977,36 @@ partial class ShotService
                     case "cancel": // X
                         g.DrawLine(w, 4, 4, 14, 14);
                         g.DrawLine(w, 14, 4, 4, 14);
+                        break;
+                    case "sty_arrow": // 实线箭头预览
+                        g.DrawLine(w, 2, 9, 14, 9);
+                        using (SolidBrush b = new SolidBrush(w.Color))
+                            g.FillPolygon(b, new PointF[] { new PointF(16.5f, 9f), new PointF(11.5f, 6f), new PointF(11.5f, 12f) });
+                        break;
+                    case "sty_both": // 双向
+                        g.DrawLine(w, 4, 9, 14, 9);
+                        using (SolidBrush b = new SolidBrush(w.Color))
+                        {
+                            g.FillPolygon(b, new PointF[] { new PointF(1.5f, 9f), new PointF(6.5f, 6f), new PointF(6.5f, 12f) });
+                            g.FillPolygon(b, new PointF[] { new PointF(16.5f, 9f), new PointF(11.5f, 6f), new PointF(11.5f, 12f) });
+                        }
+                        break;
+                    case "sty_line": // 直线
+                        g.DrawLine(w, 2, 9, 16, 9);
+                        break;
+                    case "sty_callout": // 标注线 (两端竖杠)
+                        g.DrawLine(w, 4, 9, 14, 9);
+                        g.DrawLine(w, 4, 4.5f, 4, 13.5f);
+                        g.DrawLine(w, 14, 4.5f, 14, 13.5f);
+                        break;
+                    case "w_thin": // 细
+                        using (Pen p2 = new Pen(w.Color, 1.3f)) g.DrawLine(p2, 2, 9, 16, 9);
+                        break;
+                    case "w_mid": // 中
+                        using (Pen p2 = new Pen(w.Color, 3f)) g.DrawLine(p2, 2, 9, 16, 9);
+                        break;
+                    case "w_bold": // 粗
+                        using (Pen p2 = new Pen(w.Color, 5.5f)) g.DrawLine(p2, 2, 9, 16, 9);
                         break;
                 }
             }
@@ -824,6 +1024,13 @@ partial class ShotService
             public Action OnClick;
             public bool IsToggle, On, Enabled = true;
             public Rectangle Rect;
+            public Color Swatch = Color.Empty; // 颜色圆点按钮 (非空时画色块而非图标)
+        }
+
+        public Btn AddColor(Color c, string tipText, Action onClick)
+        {
+            Btn b = new Btn { Icon = "color", Tip = tipText, OnClick = onClick, Swatch = c };
+            Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
         public readonly List<Btn> Btns = new List<Btn>();
@@ -904,8 +1111,22 @@ partial class ShotService
                 if (b.Icon == "|") continue;
                 if (i == hoverIdx || b.On)
                 {
-                    using (SolidBrush br = new SolidBrush(b.On ? DarkUI.Accent : (i == hoverIdx ? Color.FromArgb(64, 68, 80) : Color.Transparent)))
+                    using (SolidBrush br = new SolidBrush(b.On ? Color.FromArgb(58, 62, 74) : (i == hoverIdx ? Color.FromArgb(64, 68, 80) : Color.Transparent)))
                         RoundFill(g, br, b.Rect, 6);
+                    if (b.On && b.Swatch != Color.Empty)
+                    { // 色块选中: 白圈描边 (主色高亮底会吃掉色块对比)
+                        using (Pen ring = new Pen(Color.FromArgb(235, 238, 244), 2f))
+                            g.DrawEllipse(ring, b.Rect.X + 6, b.Rect.Y + 6, 20, 20);
+                    }
+                }
+                if (b.Swatch != Color.Empty)
+                {
+                    using (SolidBrush sb = new SolidBrush(b.Swatch))
+                        g.FillEllipse(sb, b.Rect.X + 9, b.Rect.Y + 9, 14, 14);
+                    if (!b.Enabled)
+                        using (SolidBrush dim = new SolidBrush(Color.FromArgb(140, 26, 27, 31)))
+                            g.FillEllipse(dim, b.Rect.X + 9, b.Rect.Y + 9, 14, 14);
+                    continue;
                 }
                 using (Bitmap ic = MakeIcon(b.Icon))
                 {
@@ -959,6 +1180,7 @@ partial class ShotService
         {
             base.OnMouseUp(e);
             int h = Hit(e.Location);
+            Log("bar click at " + e.Location + " hit=" + h + " icon=" + (h >= 0 ? Btns[h].Icon : "-") + " barL=" + Left + " barT=" + Top);
             if (e.Button == MouseButtons.Left && h >= 0 && h == hoverIdx)
             {
                 Btn b = Btns[h];
