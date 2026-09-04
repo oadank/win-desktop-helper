@@ -39,10 +39,10 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-public class ShotService
+public partial class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.14";
+    const string APP_VERSION = "0.0.15";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
@@ -694,6 +694,11 @@ public class ShotService
                 ShowClipHistory();
                 return;
             }
+            if (m.Msg == WM_HOTKEY && (int)m.WParam == SHOT_HOTKEY_ID)
+            {
+                ShowCaptureOverlay();
+                return;
+            }
             if (m.Msg == WM_DISPLAYCHANGE)
             {
                 // 分辨率/显示器变更: 任务栏窗口句柄与矩形都会变, 立即重建列表, 否则滚轮/中键失效
@@ -1166,6 +1171,26 @@ public class ShotService
                         }
                     }
                     if (!hkOk) Log("clip hotkey register FAILED (all candidates busy)");
+                    // 区域截图热键: 候选组合自动降级 (Win+Shift+S 被 Win11 系统截图占用, 故 Win+Shift+A 优先)
+                    uint[][] scands = new uint[][]
+                    {
+                        new uint[] { MOD_WIN | MOD_SHIFT, 0x41 },      // Win+Shift+A (优先, 空闲)
+                        new uint[] { MOD_CONTROL | MOD_SHIFT, 0x53 }, // Ctrl+Shift+S
+                        new uint[] { MOD_WIN | MOD_SHIFT, 0x53 },      // Win+Shift+S (Win11 系统截图占用, 备选)
+                    };
+                    string[] scanmes = new string[] { "Win+Shift+A", "Ctrl+Shift+S", "Win+Shift+S" };
+                    bool shOk = false;
+                    for (int ci = 0; ci < scands.Length; ci++)
+                    {
+                        if (RegisterHotKey(hk.Handle, SHOT_HOTKEY_ID, scands[ci][0], scands[ci][1]))
+                        {
+                            shotHotkeyName = scanmes[ci];
+                            shOk = true;
+                            Log("shot hotkey registered: " + scanmes[ci]);
+                            break;
+                        }
+                    }
+                    if (!shOk) Log("shot hotkey register FAILED (all candidates busy)");
                     Application.Run(hk);
                 }
                 catch (Exception ex) { Log("hotkey form err: " + ex.Message); Application.Run(); }
@@ -1561,15 +1586,33 @@ public class ShotService
         TrayIcon.Visible = true;
         ContextMenuStrip menu = new ContextMenuStrip();
         menu.Items.Add("Win Desktop Helper  v" + APP_VERSION, null, null).Enabled = false; // 只读版本显示
-        menu.Items.Add("立即截图(全屏+复制路径)", null, delegate
+
+        // 截图 二级菜单 (M1: 区域截图为核心能力, 折叠但置顶)
+        ToolStripMenuItem mShot = new ToolStripMenuItem("截图");
+        mShot.DropDownItems.Add("区域截图 (框选)", null, delegate { ShowCaptureOverlay(); });
+        mShot.DropDownItems.Add("全屏截图", null, delegate
         {
             try { string fp = DoShot(VirtualScreen()); Log("tray shot: " + fp); Clipboard.SetText(fp); TrayIcon.ShowBalloonTip(1500, "Win Desktop Helper", "已截图: " + fp, ToolTipIcon.Info); }
             catch (Exception ex) { Log("tray shot err: " + ex.Message); }
         });
-        menu.Items.Add("区域截图(框选)", null, delegate { ShowCaptureOverlay(); });
-        menu.Items.Add("打开截图目录", null, delegate { try { if (Directory.Exists(ShotDir)) Process.Start("explorer.exe", "\"" + ShotDir + "\""); } catch { } });
-        menu.Items.Add("打开日志", null, delegate { try { if (File.Exists(LogPath)) Process.Start("notepad.exe", "\"" + LogPath + "\""); } catch { } });
-        menu.Items.Add("复制 MCP 接入配置", null, delegate
+        mShot.DropDownItems.Add("打开截图目录", null, delegate { try { if (Directory.Exists(ShotDir)) Process.Start("explorer.exe", "\"" + ShotDir + "\""); } catch { } });
+        menu.Items.Add(mShot);
+
+        // 工具 二级菜单 (MCP/更新/日志等低频项折叠)
+        ToolStripMenuItem mTools = new ToolStripMenuItem("工具");
+        mTools.DropDownItems.Add("检查更新", null, delegate
+        {
+            try
+            {
+                string v = LatestVersion();
+                if (v == null) MessageBox.Show("无法连接 GitHub，请检查网络", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                else if (IsNewerVersion(v)) { MessageBox.Show("发现新版本 v" + v.TrimStart('v', 'V') + "，正在自动静默更新...", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information); Thread.Sleep(800); DoUpdateSilent(true); }
+                else MessageBox.Show("已是最新版本 v" + APP_VERSION, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex) { MessageBox.Show("检查失败: " + ex.Message, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        });
+        mTools.DropDownItems.Add("打开日志", null, delegate { try { if (File.Exists(LogPath)) Process.Start("notepad.exe", "\"" + LogPath + "\""); } catch { } });
+        mTools.DropDownItems.Add("复制 MCP 接入配置", null, delegate
         {
             try
             {
@@ -1587,21 +1630,11 @@ public class ShotService
             }
             catch (Exception ex) { Log("tray mcp cfg err: " + ex.Message); }
         });
-        menu.Items.Add("检查更新", null, delegate
-        {
-            try
-            {
-                string v = LatestVersion();
-                if (v == null) MessageBox.Show("无法连接 GitHub，请检查网络", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                else if (IsNewerVersion(v)) { MessageBox.Show("发现新版本 v" + v.TrimStart('v', 'V') + "，正在自动静默更新...", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information); Thread.Sleep(800); DoUpdateSilent(true); }
-                else MessageBox.Show("已是最新版本 v" + APP_VERSION, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception ex) { MessageBox.Show("检查失败: " + ex.Message, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-        });
-        menu.Items.Add("项目主页 (GitHub)", null, delegate { try { Process.Start(REPO_URL); } catch { } });
-        menu.Items.Add("-");
+        mTools.DropDownItems.Add("项目主页 (GitHub)", null, delegate { try { Process.Start(REPO_URL); } catch { } });
+        menu.Items.Add(mTools);
+
         menu.Items.Add("隐藏托盘图标", null, delegate { TrayIcon.Visible = false; Log("tray hidden (restart service to show again)"); });
-        menu.Items.Add("退出服务", null, delegate { Log("tray exit requested (watcher will relaunch)"); Environment.Exit(0); });
+        menu.Items.Add("退出服务", null, delegate { Log("tray exit requested"); Environment.Exit(0); });
         TrayIcon.ContextMenuStrip = menu;
         TrayIcon.DoubleClick += delegate
         {

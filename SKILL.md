@@ -65,7 +65,7 @@
   cd C:\D\opt\win-desktop-helper
   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /optimize+ /win32icon:icon.ico /win32manifest:app.manifest /out:shot-service.exe /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll shot-service.cs shot-capture.cs
   ```
-  （`shot-service.cs` 与 `shot-capture.cs` 是同一 `Program` 类的 partial 拆分，多文件一起传入 `csc` 仍编译成单个 `shot-service.exe`；后续新增 `shot-ocr/translate/scroll/...` 也照此追加到命令末尾）
+  （`shot-service.cs` 与 `shot-capture.cs` 是同一 `ShotService` 类的 partial 拆分，多文件一起传入 `csc` 仍编译成单个 `shot-service.exe`；后续新增 `shot-ocr/translate/scroll/...` 也照此追加到命令末尾）
   （首次若报 `CS0016 文件被占用`，是旧 exe 在跑，关掉进程再编一次即可）
 - **打包**：`ISCC.exe setup.iss` 不被拦，Agent 可在沙箱外直接跑，产物 `release/win-desktop-helper-setup-<ver>.exe`。
 - **上传 GitHub release（Agent 可自助，需沙箱外网络）**：

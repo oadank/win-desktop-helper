@@ -4,8 +4,8 @@ using System.Drawing.Imaging;
 using System.Windows.Forms;
 
 // 区域截图覆盖层 + 入口 (M1: 吸收 PixPin 截图能力第一步)
-// 与 shot-service.cs 同属 Program 类(partial), 共享 Log/ShotDir/hkForm/TrayIcon 等成员
-partial class Program
+// 与 shot-service.cs 同属 ShotService 类(partial), 共享 Log/ShotDir/hkForm/TrayIcon 等成员
+partial class ShotService
 {
     const int SHOT_HOTKEY_ID = 0x5713; // 与 HOTKEY_ID(0x5712) 区分
     static string shotHotkeyName = "";
