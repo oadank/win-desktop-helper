@@ -68,10 +68,9 @@
 - **编译 C# 的平台差异（重要）**：WorkBuddy 的 Bash/PowerShell 调 `csc.exe` 会被平台安全策略**关键词级拒绝**（平台层策略，开权限也放不开）。**WorkBuddy 环境必须用户手动编译**。但 **ZCode 环境实测不拦 csc**，agent 可直接编译自测（2026-09-05 实测）。Git Bash 下 `/参数` 会被转成路径，csc 参数一律用 `-` 风格：
   ```
   cd C:\D\opt\win-desktop-helper
-  C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -target:winexe -optimize+ -win32icon:icon.ico -win32manifest:app.manifest -out:shot-service.exe -r:System.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll shot-service.cs shot-capture.cs shot-ocr.cs shot-translate.cs shot-config.cs
+  C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -target:winexe -optimize+ -win32icon:icon.ico -win32manifest:app.manifest -out:shot-service.exe -r:System.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll -r:C:\Windows\Microsoft.NET\assembly\GAC_MSIL\UIAutomationClient\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationClient.dll -r:C:\Windows\Microsoft.NET\assembly\GAC_MSIL\UIAutomationTypes\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationTypes.dll -r:C:\Windows\Microsoft.NET\assembly\GAC_MSIL\WindowsBase\v4.0_4.0.0.0__31bf3856ad364e35\WindowsBase.dll shot-service.cs shot-capture.cs shot-ocr.cs shot-translate.cs shot-config.cs shot-automation.cs
   ```
-  （编译前 `Stop-Process -Name shot-service -Force` 释放 exe 锁，否则 CS0016；编完 `Start-Process` 拉起——忘杀旧进程也没事，v0.0.17+ 新实例会自动顶替旧实例并在日志记 `take-over`）
-  （`shot-service.cs` 与其余 `shot-*.cs` 是同一 `ShotService` 类的 partial 拆分，多文件一起传入 `csc` 编译成单个 `shot-service.exe`；后续新增 `shot-scroll/annotate/...` 照此追加到命令末尾）
+  （⚠️ 后 3 个 `-r:` 是 UIA 语义操作的 GAC 程序集，漏掉会 CS0246；`shot-automation.cs` 漏传则全部 /win /ui /drag 端点缺失。编译前 `Stop-Process -Name shot-service -Force` 释放 exe 锁）
 - **自验证（改动后必做，别让用户猜）**：启动后日志首行、托盘菜单第一行、启动气泡、`GET /health` 的 `build` 字段，四处的值都来自 exe 文件的 mtime+大小——与刚才编译完成时间一致 = 跑的是新代码。
 - **打包**：`ISCC.exe setup.iss` 不被拦，Agent 可在沙箱外直接跑，产物 `release/win-desktop-helper-setup-<ver>.exe`。
 - **上传 GitHub release（Agent 可自助，需沙箱外网络）**：

@@ -862,20 +862,30 @@ partial class ShotService
             if (delaySec > 0) ShowTrayInfo(delaySec + " 秒后开始录制" + (fullScreen ? "全屏" : "选区") + "...");
             Task.Run(() =>
             {
-                if (delaySec > 0) System.Threading.Thread.Sleep(delaySec * 1000);
-                string r = RecordStart(area.X, area.Y, area.Width, area.Height, 10);
-                Log("record via toolbar: " + r);
-                bool ok = r.Contains("\"ok\":true");
-                if (ok) ShowRecordHud();
-                else ShowTrayInfo("录屏启动失败: " + r);
+                // ⚠️ 后台线程异常会直接弹 .NET 崩溃框(ThreadException 只兜 UI 线程) — 全包
+                try
+                {
+                    if (delaySec > 0) System.Threading.Thread.Sleep(delaySec * 1000);
+                    string r = RecordStart(area.X, area.Y, area.Width, area.Height, 10);
+                    Log("record via toolbar: " + r);
+                    bool ok = r.Contains("\"ok\":true");
+                    RunOnHk(() => { if (ok) ShowRecordHud(); else ShowTrayInfo("录屏启动失败: " + r); });
+                }
+                catch (Exception ex)
+                {
+                    Log("record task err: " + ex.Message);
+                    RunOnHk(() => ShowTrayInfo("录屏异常: " + ex.Message));
+                }
             });
         }
 
         void RecordStopAndNotify()
         {
-            string r = RecordStop();
-            CloseRecordHud();
-            Log("record stop via toolbar: " + r);
+            RunOnHk(() =>
+            {
+                string r = RecordStop();
+                CloseRecordHud();
+                Log("record stop via toolbar: " + r);
             string file = "";
             int p1 = r.IndexOf("\"file\":\"");
             if (p1 >= 0)
@@ -883,7 +893,8 @@ partial class ShotService
                 int p2 = r.IndexOf("\"", p1 + 9);
                 file = r.Substring(p1 + 9, p2 - p1 - 9).Replace("\\", "/");
             }
-            ShowTrayInfo("录屏已保存: " + file);
+                ShowTrayInfo("录屏已保存: " + file);
+            });
         }
 
         // ---- 录制 HUD: 右下角小浮条 [● REC 00:12] [⏹ 停止] ----
@@ -935,8 +946,23 @@ partial class ShotService
 
         static void CloseRecordHud()
         {
-            Form h = recHud;
-            if (h != null) { try { h.Close(); } catch { } recHud = null; }
+            RunOnHk(() =>
+            {
+                Form h = recHud;
+                if (h != null && !h.IsDisposed) { try { h.Close(); } catch { } recHud = null; }
+            });
+        }
+
+        // 回 hk UI 线程执行 (WinForms 窗体/控件只能在创建线程访问; 后台线程异常直接弹崩溃框)
+        static void RunOnHk(Action a)
+        {
+            try
+            {
+                Form hk = hkForm;
+                if (hk != null && hk.IsHandleCreated) hk.BeginInvoke(new MethodInvoker(delegate { try { a(); } catch (Exception ex) { Log("hk ui err: " + ex.Message); } }));
+                else { try { a(); } catch (Exception ex) { Log("hk ui fallback err: " + ex.Message); } }
+            }
+            catch (Exception ex) { Log("runonhk err: " + ex.Message); }
         }
 
         // 贴图 (PixPin 同款): 选区合成图钉到桌面原位置, 可拖动/滚轮缩放/双击关闭
@@ -1150,68 +1176,39 @@ partial class ShotService
 
     // ---- 自绘图标 (白色线性; 矢量画在 18 坐标系再缩放到目标尺寸, 零图片依赖) ----
     static Bitmap MakeIcon(string kind) { return MakeIcon(kind, 22); }
+    // Segoe MDL2 Assets 字形 (Windows 自带, 比 GDI 手画精致): 码点经字形网格渲染确认
+    static readonly Dictionary<string, string> FontGlyphs = new Dictionary<string, string>
+    {
+        { "rect", "E71A" }, { "arrow", "E72A" }, { "pen", "E70F" }, { "seq", "E762" },
+        { "pin", "E840" }, { "undo", "E7A7" }, { "redo", "E7A6" }, { "translate", "E8C1" },
+        { "save", "E78C" }, { "ok", "E73E" }, { "cancel", "E711" },
+    };
+
     static Bitmap MakeIcon(string kind, int size)
     {
         Bitmap bmp = new Bitmap(size, size);
         using (Graphics g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (FontGlyphs.ContainsKey(kind))
+            {
+                string s = char.ConvertFromUtf32(Convert.ToInt32(FontGlyphs[kind], 16));
+                using (Font f = new Font("Segoe MDL2 Assets", size * 0.66f))
+                    TextRenderer.DrawText(g, s, f, new Rectangle(0, 0, size, size), Color.FromArgb(232, 234, 240),
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                return bmp;
+            }
             g.ScaleTransform(size / 18f, size / 18f); // 18 坐标系统一布局, 按需放大
             using (Pen w = new Pen(Color.FromArgb(232, 234, 240), 2f))
             {
                 w.StartCap = LineCap.Round; w.EndCap = LineCap.Round; w.LineJoin = LineJoin.Round;
                 switch (kind)
                 {
-                    case "rect": g.DrawRectangle(w, 2.5f, 4f, 13, 10); break;
                     case "ellipse": g.DrawEllipse(w, 2.5f, 4f, 13, 10); break;
-                    case "arrow":
-                        g.DrawLine(w, 3, 15, 15, 3);
-                        g.DrawLine(w, 15, 3, 9.5f, 4);
-                        g.DrawLine(w, 15, 3, 14, 8.5f);
-                        break;
-                    case "pen":
-                        g.DrawLine(w, 4, 14, 12, 6);
-                        g.DrawLine(w, 12, 6, 15, 3);
-                        g.DrawLine(w, 4, 14, 3, 15);
-                        break;
                     case "text":
                         g.DrawLine(w, 4, 4, 14, 4);
                         g.DrawLine(w, 9, 4, 9, 15);
                         break;
-                    case "seq": // 线条画 "1" (竖干+起笔), 几何居中 - 字体方案基线偏移不可控
-                        g.DrawEllipse(w, 3, 3, 12, 12);
-                        g.DrawLine(w, 9f, 5.6f, 9f, 12.4f);
-                        g.DrawLine(w, 9f, 5.6f, 6.8f, 7.6f);
-                        break;
-                    case "undo": // ↩ 顶弧 + 左指实心箭头
-                        g.DrawArc(w, 4f, 6f, 11f, 9f, -20, 195);
-                        using (SolidBrush b = new SolidBrush(w.Color))
-                            g.FillPolygon(b, new PointF[] { new PointF(1.5f, 8.5f), new PointF(8f, 5.8f), new PointF(7.2f, 11.8f) });
-                        break;
-                    case "redo": // ↪ 镜像
-                        g.DrawArc(w, 3f, 6f, 11f, 9f, 5, 195);
-                        using (SolidBrush b = new SolidBrush(w.Color))
-                            g.FillPolygon(b, new PointF[] { new PointF(16.5f, 8.5f), new PointF(10f, 5.8f), new PointF(10.8f, 11.8f) });
-                        break;
-                    case "pin": // 图钉 (PixPin 同款): 45度圆角方头 + 左下斜针
-                    {
-                        var st = g.Save();
-                        g.TranslateTransform(10.2f, 7.2f);
-                        g.RotateTransform(45f);
-                        using (System.Drawing.Drawing2D.GraphicsPath gp = new System.Drawing.Drawing2D.GraphicsPath())
-                        {
-                            float rr = 3f;
-                            gp.AddArc(-4.5f, -4.5f, rr * 2, rr * 2, 180, 90);
-                            gp.AddArc(4.5f - rr * 2, -4.5f, rr * 2, rr * 2, 270, 90);
-                            gp.AddArc(4.5f - rr * 2, 4.5f - rr * 2, rr * 2, rr * 2, 0, 90);
-                            gp.AddArc(-4.5f, 4.5f - rr * 2, rr * 2, rr * 2, 90, 90);
-                            gp.CloseFigure();
-                            g.DrawPath(w, gp);
-                        }
-                        g.Restore(st);
-                        g.DrawLine(w, 9.2f, 8.2f, 4f, 15.8f); // 针从头心往左下
-                        break;
-                    }
                     case "ocr": // 扫描框 + T
                         g.DrawLine(w, 1.5f, 5.5f, 1.5f, 1.5f); g.DrawLine(w, 1.5f, 1.5f, 5.5f, 1.5f);
                         g.DrawLine(w, 16.5f, 5.5f, 16.5f, 1.5f); g.DrawLine(w, 16.5f, 1.5f, 12.5f, 1.5f);
@@ -1219,37 +1216,6 @@ partial class ShotService
                         g.DrawLine(w, 16.5f, 12.5f, 16.5f, 16.5f); g.DrawLine(w, 16.5f, 16.5f, 12.5f, 16.5f);
                         g.DrawLine(w, 6.5f, 6, 11.5f, 6);
                         g.DrawLine(w, 9, 6, 9, 13);
-                        break;
-                    case "translate": // "中"(左上) + "A"(右下) + 双弧围圆; 全矢量线条, 精确控制不裁切
-                    {
-                        // 中: 口(扁矩形) + 贯穿竖, 中心约(5,5)
-                        g.DrawRectangle(w, 2.8f, 3f, 4.4f, 4f);
-                        g.DrawLine(w, 5f, 1.2f, 5f, 9.2f);
-                        // A: 两斜 + 横, 中心约(13,13)
-                        g.DrawLine(w, 11f, 16.2f, 13f, 9.6f);
-                        g.DrawLine(w, 13f, 9.6f, 15f, 16.2f);
-                        g.DrawLine(w, 11.7f, 14f, 14.3f, 14f);
-                        // 右上弧 (中->A 方向) + 箭头
-                        g.DrawArc(w, 2.4f, 2.4f, 13.2f, 13.2f, -72, 58);
-                        using (SolidBrush b = new SolidBrush(w.Color))
-                            g.FillPolygon(b, new PointF[] { new PointF(14.8f, 3.2f), new PointF(12.3f, 2.9f), new PointF(14f, 5.3f) });
-                        // 左下弧 (A->中 方向) + 箭头
-                        g.DrawArc(w, 2.4f, 2.4f, 13.2f, 13.2f, 108, 58);
-                        using (SolidBrush b2 = new SolidBrush(w.Color))
-                            g.FillPolygon(b2, new PointF[] { new PointF(3.2f, 14.8f), new PointF(5.7f, 15.1f), new PointF(4f, 12.7f) });
-                        break;
-                    }
-                    case "save": // 软盘
-                        g.DrawRectangle(w, 2.5f, 2.5f, 13, 13);
-                        g.DrawRectangle(w, 6, 3.5f, 6, 4);
-                        g.DrawLine(w, 5, 15.5f, 5, 10.5f); g.DrawLine(w, 5, 10.5f, 13, 10.5f); g.DrawLine(w, 13, 10.5f, 13, 15.5f);
-                        break;
-                    case "ok": // ✓
-                        g.DrawLines(w, new PointF[] { new PointF(3, 10), new PointF(7, 14), new PointF(15, 4) });
-                        break;
-                    case "cancel": // X
-                        g.DrawLine(w, 4, 4, 14, 14);
-                        g.DrawLine(w, 14, 4, 4, 14);
                         break;
                     case "rec": // 红圆点 (录屏)
                         using (SolidBrush b = new SolidBrush(Color.FromArgb(255, 82, 70)))

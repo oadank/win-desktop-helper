@@ -1,99 +1,123 @@
 # Win Desktop Helper
 
-给**任意 AI Agent / 服务进程**（DSH、Claude、Codex、Gemini、……）提供 Windows 桌面能力的桥接服务：
-**看**（截图/窗口/显示器）+ **动**（鼠标/键盘/运行程序）。
+给**任意 AI Agent / 服务进程**（DSH、Claude、Codex、DeepTutor、飞书 bot、……）提供 Windows 桌面能力的桥接服务：
+**看**（截图/窗口/UIA 元素树）+ **动**（鼠标/键盘/窗口管理/运行程序）+ **录**（屏幕录制）+ **控**（语义操作）。
+
+同时自带一套**给人用的 PixPin 式截图套件**（区域截图 / 标注 / OCR / 翻译 / 贴图 / 录屏 / 剪贴板历史 / 任务栏音量），一个 exe 替代 PixPin。
+
+- 单 exe（.NET Framework 4.8，Windows 自带，**零外部依赖**）
+- 常驻用户会话（Session 1）+ 托盘 + HTTP `127.0.0.1:18800` + MCP stdio
+- 自动检查更新、静默自升级
 
 ## 为什么需要它
 
 Windows 从 Vista 起引入 **Session 0 隔离**：以服务方式运行的程序（如 nssm 托管的 agent）在 Session 0，
-**没有用户桌面** —— GDI 截图报"句柄无效"、SendInput 无目标、截图全黑。本服务常驻在**用户登录会话（Session 1）**，
-以 HTTP / MCP 暴露统一接口，Session 0 的任何进程按需调用即可完成"看屏幕 + 操作电脑"。
+**没有用户桌面**——GDI 截图报"句柄无效"、SendInput 无目标、截图全黑。本服务常驻在**用户登录会话（Session 1）**，
+以 HTTP / MCP 暴露统一接口，Session 0 的任何进程按需调用即可完成"看屏幕 + 操作电脑 + 录屏"。
 
-## 快速开始
+## 安装
 
-1. 编译（需 .NET Framework 4.8，Windows 自带 csc）：
+1. 下载本仓库最新 Release 的 `win-desktop-helper-setup-<版本>.exe`，双击安装（可选桌面图标/开机自启）
+2. 安装后自动启动，托盘出现深蓝图标
+3. 已装用户：托盘 → 工具 → 检查更新（发现新版会自动静默升级，无需手动）
 
-```bat
-cd win-desktop-helper
-C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /optimize+ ^
-  /out:shot-service.exe /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll shot-service.cs
-C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /optimize+ ^
-  /out:shot-watcher.exe /r:System.dll shot-watcher.cs
-```
+## 给人用的功能（托盘 / 热键）
 
-2. 启动（在登录会话）：
+| 功能 | 入口 | 说明 |
+|---|---|---|
+| 区域截图 | `Ctrl+Shift+S` 或托盘→截图 | PixPin 式：冻结屏遮罩框选 → 图标工具条 |
+| 全屏截图 | `Ctrl+Alt+A` 或托盘→截图 | 截图直接进剪贴板 |
+| 贴图 | `F3`（剪贴板图）/ 中键点选区 / 工具条📌 | 图钉到桌面，可拖动/滚轮缩放/双击关 |
+| 标注 | 截图工具条 | 矩形/椭圆/箭头(4样式)/画笔/文字(中文输入)/序号 + 撤销重做 + 颜色 7 色 + 粗细 3 档 + 字号/字体 |
+| 双击选区 | — | = 复制并完成 |
+| 右键 | 选区内/外 | 选区内=重新框选；空白处=退出 |
+| OCR 文字识别 | 工具条 | 本机 Ollama qwen3-vl，零花费零 key，结果自动进剪贴板 |
+| 翻译 | 工具条 | **自动语言检测反向翻译**（中文→英/英文→中，混合弹菜单选）；本地 LLM 或百度引擎 |
+| 录屏 | 工具条🔴 | 选区/全屏 + 延迟 1/2/3/5/10s；MP4 (h264)；录制中右下角 HUD 计时/停止 |
+| 剪贴板历史 | `Ctrl+Alt+V` | 自动记录文本 50 条持久化，单击复制/双击粘贴 |
+| 任务栏音量 | 任务栏上滚轮/中键 | 滚轮调音量、中键静音（步进/反向可配） |
+| 检查更新 | 托盘→工具 | 自动发现新版本并静默升级 |
 
-```bat
-shot-service.exe          # 常驻 + 托盘图标（-notray 可不显示托盘）
-shot-watcher.exe          # 可选：自愈守护（30s 探测，挂了自动拉起）
-```
+## 设置中心（托盘 → 设置）
 
-3. 验证：`curl http://127.0.0.1:18800/health` → `{"ok":true,"session":1,...}`
+左侧分类：**翻译 / OCR / 截图 / 剪贴板 / 任务栏音量**。
+- 翻译：引擎（本地 LLM 零花费 / 百度）、目标语言、内置英文示例一键测试（结果直接显示在界面）
+- 截图：保存目录、三个热键（留空走默认降级链，改后重启生效）
+- 剪贴板/音量：开关与参数，保存即生效
+- 配置持久化：安装目录 `shot-service.json`（含密钥，安装包已排除、不覆盖用户已有配置）
 
-## 两种接入方式（AI 任选）
+## 给 AI Agent 的能力（HTTP + MCP，27 个工具）
+
+先 `GET /health` 确认存活（`session:1`）。两种接入等价：
 
 ### 方式一：HTTP（零依赖，任何语言直接调）
 
-| 能力 | 接口 |
+| 分类 | 接口 |
 |---|---|
-| 存活检查 | `GET /health` |
-| 截图 | `GET /shot?region=all` \| `?screen=0` \| `?x=&y=&w=&h=` \| `?window=关键词` |
-| 窗口信息 | `GET /active`（当前前台）`GET /window?title=关键词`（按标题查 rect） |
-| 显示器 | `GET /monitors` |
-| 鼠标 | `GET /mouse/move?x=&y=` `GET /mouse/click?x=&y=&button=left\|right\|middle&double=0\|1` `GET /mouse/scroll?delta=±120`（正上负下） |
-| 键盘 | `GET /keyboard/type?text=中文也行`（Unicode 直发，不依赖输入法）`GET /keyboard/press?keys=ctrl+shift+a` |
-| 运行程序 | `GET /app/run?path=C:\\Windows\\explorer.exe&args=`（ShellExecute，GUI 在用户桌面可见） |
+| 看 | `GET /shot`（全屏/区域/窗口/显示器）· `/active` · `/window?title=` · `/monitors` · `/img/文件名`（图片托管） |
+| 动 | `/mouse/move·click·scroll·down·up·drag·pos` · `/keyboard/type·press·hold` |
+| 窗口管理 | `/win/activate·max·min·restore·close·move·wait·list`（置前三级策略防前台锁） |
+| 语义操作 (UIA) | `/ui/tree`（元素树：类型/名称/位置/模式）· `/ui/click?i=` · `/ui/set?i=&value=` · `/ui/read?i=` · `/ui/readall`（批量读值） |
+| 录屏 | `/record/start·stop·status`（MP4 h264） |
+| 剪贴板 | `/clipboard/history` · `/clipboard/set` |
+| 其它 | `/app/run` · `/app/runas`（管理员，UAC 用户确认） · `/taskbar-volume` · `/health` · `/guide`(SKILL 全文) · `/check-update` · `/update` |
 
-- 截图保存路径：`<用户图片目录>\Screenshots\shot_毫秒时间戳.png`（可用环境变量 `WDH_SHOT_DIR` 覆盖）
-- 操作前建议 `GET /active` 确认前台目标，防止输入进错窗口
+### 方式二：MCP（Claude Desktop / Cursor / DSH 等开箱即用）
 
-### 方式二：MCP（Model Context Protocol，Claude Desktop / Cursor 等开箱即用）
-
-`mcp-bridge.js` 是零依赖的 stdio MCP 服务，内部转发到同机 HTTP。配置示例（Claude Desktop `claude_desktop_config.json`）：
+`mcp-bridge.js` 是零依赖的 stdio MCP 服务，内部转发到同机 HTTP。配置（Claude Desktop `claude_desktop_config.json`）：
 
 ```json
-{
-  "mcpServers": {
-    "win-desktop-helper": {
-      "command": "node",
-      "args": ["C:/path/to/win-desktop-helper/mcp-bridge.js"]
-    }
-  }
-}
+{ "mcpServers": { "win-desktop-helper": { "command": "node", "args": ["C:/path/to/mcp-bridge.js"] } } }
 ```
 
-暴露 10 个工具：`screen_capture` `window_info` `active_window` `monitors`
-`mouse_move` `mouse_click` `mouse_scroll` `keyboard_type` `keyboard_press` `app_run`
+27 个工具与 HTTP 一一对应：`screen_capture` `window_info` `active_window` `monitors` `win_manage`
+`mouse_move` `mouse_click` `mouse_scroll` `mouse_down` `mouse_up` `mouse_drag` `mouse_pos`
+`keyboard_type` `keyboard_press` `keyboard_hold` `ui_tree` `ui_click` `ui_set` `ui_read` `ui_readall`
+`record_start` `record_stop` `record_status` `clipboard_history` `clipboard_set`
+`app_run` `app_runas` `taskbar_volume` `get_skill` `update_skill`。
 
-## 文件清单
+**首次操作前必须调用 `get_skill`**（服务端强制，含操作铁律与避坑清单）；踩坑后 `update_skill` 写回共享手册。
 
-| 文件 | 说明 |
+## Agent 安全纪律（内置强制）
+
+1. 点任何东西之前先定位（`window_info`/`ui_tree`），确认前台再操作
+2. 输入前确认前台是目标窗口
+3. 操作后文件系统/截图验证，不信 UI 口头承诺
+4. 删除/发送等敏感操作先向用户确认
+5. 管理员操作走 `app_runas`（UAC 由用户点确认，AI 无法静默提权）
+
+## 编译（agent 可自助，需 .NET Framework 4.8）
+
+```bat
+C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -target:winexe -optimize+ ^
+  -win32icon:icon.ico -win32manifest:app.manifest -out:shot-service.exe ^
+  -r:System.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll ^
+  -r:C:\Windows\Microsoft.NET\assembly\GAC_MSIL\UIAutomationClient\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationClient.dll ^
+  -r:C:\Windows\Microsoft.NET\assembly\GAC_MSIL\UIAutomationTypes\v4.0_4.0.0.0__31bf3856ad364e35\UIAutomationTypes.dll ^
+  -r:C:\Windows\Microsoft.NET\assembly\GAC_MSIL\WindowsBase\v4.0_4.0.0.0__31bf3856ad364e35\WindowsBase.dll ^
+  shot-service.cs shot-capture.cs shot-ocr.cs shot-translate.cs shot-config.cs shot-automation.cs
+```
+
+## 目录结构
+
+| 文件 | 职责 |
 |---|---|
-| `shot-service.cs` | 主服务源码（C#5，.NET Framework 4.8，winexe） |
-| `shot-watcher.cs` | 可选自愈守护源码（30s 探测 18800，挂了拉起，15s 防抖） |
-| `mcp-bridge.js` | MCP stdio 桥（Node.js，零依赖） |
-| `shot-service.log` / `shot-watcher.log` | 运行日志 |
-
-## 托盘图标
-
-默认显示右下角托盘图标（代码绘制：深蓝底 + 白色镜头 + 青色核心，见 `BuildIcon()`，可自行改图）。
-右键菜单：立即截图 / 打开截图目录 / 打开日志 / 隐藏托盘图标 / 退出服务。
-- 新图标首次出现可能收在系统托盘**溢出区**（任务栏 `^`），拖出来即固定
-- 隐藏后重启服务恢复显示；`-notray` 参数可完全禁用托盘
-
-## 推荐部署（本机 agent 全部可用）
-
-- 登录自启：`HKCU\...\CurrentVersion\Run` 注册 `shot-service` 与 `shot-watcher`（crashed 自愈）
-- 手动拉起/重启：`schtasks /run /tn <your-task>`（用 /it 交互式任务，把进程放进登录会话）
-- 注意：**不要在 Session 0 里直接启动本服务**（否则截图仍然黑屏，/health 的 session 字段会暴露）
+| `shot-service.cs` | 主类：托盘/HTTP/热键/剪贴板/音量/自更新/MCP |
+| `shot-capture.cs` | 区域截图套件：遮罩/工具条/标注/贴图/结果面板/录屏 HUD |
+| `shot-automation.cs` | 自动化：窗口管理/鼠标扩展/UIA/录屏/提权 |
+| `shot-ocr.cs` / `shot-translate.cs` | OCR / 翻译引擎 + 轻量 JSON 工具 |
+| `shot-config.cs` | 设置中心（五分类） |
+| `mcp-bridge.js` | MCP stdio 桥（零依赖 node 脚本） |
+| `setup.iss` | Inno Setup 打包脚本 |
 
 ## 关键限制与坑
 
 - 必须目标用户已登录（Session 1 Active）；锁屏/注销期间不可用
-- `/app/run` 需要管理员权限的程序会弹 UAC（secure desktop 无法自动点，需用户确认）
-- Win11 商店版应用（如新记事本）是 WinUI 窗口，`/window` 按标题可能查不到（标题为英文 "Notepad"）；可用 `/active` 兜底
-- 后台启动的窗口受"前台锁"影响可能不置前，用 `alt+tab` 或点击窗口区域激活
+- 管理员权限的程序会弹 UAC（secure desktop 无法自动点，需用户确认）；要操作 elevated 窗口请用托盘"以管理员重启"
+- Win11 商店版应用（如新记事本）标题是英文 "Notepad"；可用 `/active` 兜底
+- 后台启动的窗口受"前台锁"影响可能不置前，`/win/activate` 已内置三级置前策略
 - 服务仅绑定 `127.0.0.1`，无鉴权，勿暴露公网
+- 录屏需要 PATH 里有 ffmpeg（winget install ffmpeg）
 
 ## License
 
