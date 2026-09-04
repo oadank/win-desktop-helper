@@ -930,7 +930,7 @@ partial class ShotService
 
         void RunTranslation(string ocr, string target)
         {
-            SetBusy("翻译中...");
+            Close(); // OCR 文本已拿到, 翻译后台跑; 结果用浮动面板, 不叠全屏遮罩
             string srcText = ocr, toLang = target;
             Task.Run(async () =>
             {
@@ -1024,6 +1024,7 @@ partial class ShotService
             base.OnFormClosed(e);
             Log("capture: overlay closed (" + annots.Count + " annots)");
             captureBusy = false; // 遮罩退出(动作完成或取消), 允许下一次截图
+            if (caretTimer != null) { try { caretTimer.Stop(); caretTimer.Dispose(); } catch { } caretTimer = null; } // 兜底: 防泄漏后 Tick 访问已释放窗体
             if (BackgroundImage != null) { try { BackgroundImage.Dispose(); } catch { } BackgroundImage = null; }
             if (frozen != null) { try { frozen.Dispose(); } catch { } }
         }

@@ -185,7 +185,9 @@ partial class ShotService
         mkL(pLocal, "模型名:", 12, 70);
         TextBox model = mkT(pLocal); model.Left = 130; model.Top = 67; model.Width = 296; model.Text = d["translate.model"];
         mkL(pLocal, "API Key (选填):", 12, 102);
-        TextBox lak = mkT(pLocal); lak.Left = 130; lak.Top = 99; lak.Width = 296; lak.PasswordChar = '*'; lak.Text = d["translate.apiKey"];
+        TextBox lak = mkT(pLocal); lak.Left = 130; lak.Top = 99; lak.Width = 200; lak.PasswordChar = '*'; lak.Text = d["translate.apiKey"];
+        CheckBox chkShowL = mkC(pLocal); chkShowL.Text = "显示"; chkShowL.Left = 340; chkShowL.Top = 101; chkShowL.AutoSize = true;
+        chkShowL.ForeColor = cDim; chkShowL.Font = new Font("Microsoft YaHei UI", 9f);
 
         Panel pBaidu = new Panel(); pBaidu.Left = LX; pBaidu.Top = 100; pBaidu.Size = new Size(PW - LX * 2, 152);
         pBaidu.BackColor = cPanel; pgTr.Controls.Add(pBaidu);
@@ -199,6 +201,7 @@ partial class ShotService
         chkShow.ForeColor = cDim; chkShow.Font = new Font("Microsoft YaHei UI", 9f);
         mkDim(pBaidu, "留空保存 = 不修改已存密钥", 130, 108);
         chkShow.CheckedChanged += (s, e) => { char pc = chkShow.Checked ? '\0' : '*'; key.PasswordChar = pc; lak.PasswordChar = pc; };
+        chkShowL.CheckedChanged += (s, e) => { char pc = chkShowL.Checked ? '\0' : '*'; key.PasswordChar = pc; lak.PasswordChar = pc; chkShow.Checked = chkShowL.Checked; };
 
         prov.SelectedIndexChanged += (s, e) => { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; };
         { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; }
@@ -362,9 +365,18 @@ partial class ShotService
                 volEnabled = d["volume.enabled"] == "1" ? 1 : 0;
                 volStep = int.Parse(d["volume.step"]);
                 volReverse = d["volume.reverse"] == "1" ? 1 : 0;
-                bool dirChanged = d["capture.dir"].Length > 0 && d["capture.dir"] != ShotDir;
-                TrayNotify("设置已保存",
-                    "音量/剪贴板已即时生效" + (dirChanged ? "；截图目录将用于新截图" : "") + "；热键修改重启后生效");
+                // 截图目录即时生效 (新截图即用新目录)
+                if (d["capture.dir"].Trim().Length > 0)
+                {
+                    string nd = Environment.ExpandEnvironmentVariables(d["capture.dir"].Trim());
+                    if (nd != ShotDir) { ShotDir = nd; try { if (!Directory.Exists(ShotDir)) Directory.CreateDirectory(ShotDir); } catch { } }
+                }
+                else
+                {
+                    string defDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Screenshots");
+                    if (ShotDir != defDir) ShotDir = defDir;
+                }
+                TrayNotify("设置已保存", "音量/剪贴板/截图目录已即时生效；热键修改重启后生效");
             }
             catch (Exception ex)
             {

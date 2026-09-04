@@ -140,6 +140,97 @@ const TOOLS = [
       type: 'object', additionalProperties: false,
       properties: { limit: { type: 'number', description: '返回条数' } }
     }
+  },
+  {
+    name: 'win_manage',
+    description: '窗口管理。verb=activate(置前台)|max|min|restore|close|move(需x,y,w,h)|wait(轮询等title窗口出现,timeout毫秒上限60s)|list(按pid列窗口)。title=窗口标题关键词',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        verb: { type: 'string', description: 'activate|max|min|restore|close|move|wait|list' },
+        title: { type: 'string' }, pid: { type: 'number' },
+        x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' },
+        timeout: { type: 'number' }
+      },
+      required: ['verb']
+    }
+  },
+  {
+    name: 'mouse_down',
+    description: '按住鼠标键不松。button=left(默认)/right/middle。与 mouse_up 配对可做自定义拖拽',
+    inputSchema: { type: 'object', additionalProperties: false, properties: { button: { type: 'string' } } }
+  },
+  {
+    name: 'mouse_up',
+    description: '松开鼠标键。button=left(默认)/right/middle',
+    inputSchema: { type: 'object', additionalProperties: false, properties: { button: { type: 'string' } } }
+  },
+  {
+    name: 'mouse_drag',
+    description: '左键拖拽一条龙: 从 x1,y1 按住平滑拖到 x2,y2 再松开。ms=总时长毫秒(默认300)',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { x1: { type: 'number' }, y1: { type: 'number' }, x2: { type: 'number' }, y2: { type: 'number' }, ms: { type: 'number' } },
+      required: ['x1', 'y1', 'x2', 'y2']
+    }
+  },
+  {
+    name: 'mouse_pos',
+    description: '查当前鼠标光标物理像素坐标',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} }
+  },
+  {
+    name: 'keyboard_hold',
+    description: '按住组合键 ms 毫秒再松开(如按住 win 拖窗口)。keys 格式同 keyboard_press',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { keys: { type: 'string' }, ms: { type: 'number' } },
+      required: ['keys']
+    }
+  },
+  {
+    name: 'clipboard_set',
+    description: '写文本到剪贴板(替代手动复制)',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { text: { type: 'string' } },
+      required: ['text']
+    }
+  },
+  {
+    name: 'ui_tree',
+    description: '【语义操作核心】枚举窗口内 UI Automation 元素(按钮/输入框/菜单)：每项含 i(索引,用于 ui_click/ui_set/ui_read)、type、name、enabled、rect、patterns。先 win_manage activate 置前再列元素效果最佳。max=最大元素数(默认400)',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { title: { type: 'string' }, hwnd: { type: 'number' }, max: { type: 'number' } }
+    }
+  },
+  {
+    name: 'ui_click',
+    description: '按 ui_tree 返回的索引语义点击元素(Invoke/Toggle/Expand/Select 模式优先, 无模式退坐标点中心)。title=窗口标题, i=元素索引',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { title: { type: 'string' }, hwnd: { type: 'number' }, i: { type: 'number' } },
+      required: ['i']
+    }
+  },
+  {
+    name: 'ui_set',
+    description: '按索引直接写输入框的值(ValuePattern, 不走键盘/输入法)。title=窗口标题, i=元素索引, value=文本',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { title: { type: 'string' }, hwnd: { type: 'number' }, i: { type: 'number' }, value: { type: 'string' } },
+      required: ['i', 'value']
+    }
+  },
+  {
+    name: 'ui_read',
+    description: '按索引读元素的 Name/Value/类名/类型(比 OCR 准)。title=窗口标题, i=元素索引',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { title: { type: 'string' }, hwnd: { type: 'number' }, i: { type: 'number' } },
+      required: ['i']
+    }
   }
 ];
 
@@ -202,6 +293,45 @@ function buildUrl(name, args) {
       let qs = [];
       if (a.limit !== undefined) qs.push('limit=' + a.limit);
       return { path: '/clipboard/history', qs };
+    }
+    case 'win_manage': {
+      let qs = ['verb=' + encodeURIComponent(a.verb)];
+      if (a.title !== undefined) qs.push('title=' + encodeURIComponent(a.title));
+      if (a.pid !== undefined) qs.push('pid=' + a.pid);
+      if (a.x !== undefined) qs.push('x=' + a.x, 'y=' + a.y, 'w=' + a.w, 'h=' + a.h);
+      if (a.timeout !== undefined) qs.push('timeout=' + a.timeout);
+      return { path: '/win/' + a.verb, qs };
+    }
+    case 'mouse_down': return { path: '/mouse/down', qs: a.button ? ['button=' + a.button] : [] };
+    case 'mouse_up': return { path: '/mouse/up', qs: a.button ? ['button=' + a.button] : [] };
+    case 'mouse_drag': return { path: '/mouse/drag', qs: ['x1=' + a.x1, 'y1=' + a.y1, 'x2=' + a.x2, 'y2=' + a.y2, 'ms=' + (a.ms || 300)] };
+    case 'mouse_pos': return { path: '/mouse/pos', qs: [] };
+    case 'keyboard_hold': return { path: '/keyboard/hold', qs: ['keys=' + encodeURIComponent(a.keys), 'ms=' + (a.ms || 300)] };
+    case 'clipboard_set': return { path: '/clipboard/set', qs: ['text=' + encodeURIComponent(String(a.text))] };
+    case 'ui_tree': {
+      let qs = [];
+      if (a.title !== undefined) qs.push('title=' + encodeURIComponent(a.title));
+      if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
+      if (a.max !== undefined) qs.push('max=' + a.max);
+      return { path: '/ui/tree', qs };
+    }
+    case 'ui_click': {
+      let qs = ['i=' + a.i];
+      if (a.title !== undefined) qs.push('title=' + encodeURIComponent(a.title));
+      if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
+      return { path: '/ui/click', qs };
+    }
+    case 'ui_set': {
+      let qs = ['i=' + a.i, 'value=' + encodeURIComponent(String(a.value))];
+      if (a.title !== undefined) qs.push('title=' + encodeURIComponent(a.title));
+      if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
+      return { path: '/ui/set', qs };
+    }
+    case 'ui_read': {
+      let qs = ['i=' + a.i];
+      if (a.title !== undefined) qs.push('title=' + encodeURIComponent(a.title));
+      if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
+      return { path: '/ui/read', qs };
     }
     default: return null;
   }

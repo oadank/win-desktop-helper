@@ -20,15 +20,41 @@ partial class ShotService
     const int SW_MAXIMIZE = 3, SW_MINIMIZE = 6, SW_RESTORE = 9, SW_SHOW = 5;
     const uint WM_CLOSE = 0x0010;
 
-    // 置前 (稳妥三步: 恢复最小化 -> SHOW -> SetForegroundWindow)
+    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    [DllImport("user32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+
+    // 置前: Windows 前台锁会拒绝后台进程的 SetForegroundWindow —
+    // 三级策略: 直接置前 -> AttachThreadInput 挂前台输入队列再置前 -> 模拟 ALT 松开解锁再置前
     static string WinActivate(IntPtr h)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
         if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
         ShowWindow(h, SW_SHOW);
         bool ok = SetForegroundWindow(h);
-        Log("win activate: " + h + " ok=" + ok);
-        return "{\"ok\":true,\"activated\":" + (ok ? "true" : "false") + "}";
+        string via = "direct";
+        if (!ok)
+        {
+            IntPtr fg = GetForegroundWindow();
+            uint fgPid; uint fgTid = GetWindowThreadProcessId(fg, out fgPid);
+            uint myTid = GetCurrentThreadId();
+            if (fgTid != 0 && fgTid != myTid)
+            {
+                AttachThreadInput(myTid, fgTid, true);
+                ok = SetForegroundWindow(h);
+                AttachThreadInput(myTid, fgTid, false);
+                via = "attach";
+            }
+        }
+        if (!ok)
+        {
+            keybd_event(0x12, 0, 0, UIntPtr.Zero);           // ALT down: 解除前台锁
+            ok = SetForegroundWindow(h);
+            keybd_event(0x12, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            via = "alt";
+        }
+        Log("win activate: " + h + " ok=" + ok + " via=" + via);
+        return "{\"ok\":true,\"activated\":" + (ok ? "true" : "false") + ",\"via\":\"" + via + "\"}";
     }
 
     static string WinShow(IntPtr h, int cmd, string name)
