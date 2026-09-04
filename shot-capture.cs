@@ -110,7 +110,6 @@ partial class ShotService
         Rectangle sel;
         bool dragging = false;
         bool hasSel = false;
-        ToolStrip bar;           // 图标工具条 (松手后出现, 贴选区)
         readonly List<Annot> annots = new List<Annot>(); // 已提交标注 (屏坐标)
         readonly List<Annot> redoStack = new List<Annot>(); // 撤销弹出的标注 (重做用, 新笔画清空)
         Annot cur;               // 正在绘制的标注
@@ -292,9 +291,12 @@ partial class ShotService
             {
                 string size = sel.Width + " x " + sel.Height;
                 SizeF ts = g.MeasureString(size, f);
-                float tx = Math.Min(d.Right + 4, ClientSize.Width - ts.Width - 4);
-                float ty = Math.Min(d.Bottom + 4, ClientSize.Height - ts.Height - 4);
-                g.FillRectangle(bg, tx - 2, ty - 1, ts.Width + 4, ts.Height + 2);
+                float tx = d.X + d.Width / 2f - ts.Width / 2f; // 选区上方居中 (PixPin 同款)
+                float ty = d.Top - ts.Height - 6;
+                if (ty < 2) { ty = d.Bottom + 4; } // 出顶界翻到下方
+                if (tx < 2) tx = 2;
+                if (tx + ts.Width > ClientSize.Width - 2) tx = ClientSize.Width - ts.Width - 2;
+                g.FillRectangle(bg, tx - 3, ty - 1, ts.Width + 6, ts.Height + 2);
                 g.DrawString(size, f, b, tx, ty);
             }
         }
@@ -426,42 +428,33 @@ partial class ShotService
             }
         }
 
-        // ---- 图标工具条 (排版/分组照 PixPin: 标注 | 撤销重做 | OCR 翻译 贴图 保存 | ✓完成 ✕取消) ----
+        // ---- 自绘紧凑工具条 (PixPin 同款密度: 32px 按钮 0 间距 / hover 圆角 / 细分隔线; ToolStrip 间距不可控已弃用) ----
+        ToolbarPanel bar;
         void ShowBar()
         {
             if (bar != null) { PlaceBar(); bar.Visible = true; return; }
-            bar = new ToolStrip();
-            bar.LayoutStyle = ToolStripLayoutStyle.HorizontalStackWithOverflow;
-            bar.GripStyle = ToolStripGripStyle.Hidden;
-            bar.Dock = DockStyle.None; // ⚠️ ToolStrip 默认 Dock=Top, 会把工具条吸到屏幕顶 — 必须关掉才能自由贴选区
-            bar.AutoSize = true;       // 自适应全部图标宽度 (AutoSize=false 且不设 Width 会把图标挤进溢出区)
-            bar.CanOverflow = false;
-            bar.BackColor = Color.FromArgb(30, 31, 36);
-            bar.Renderer = new DarkToolRenderer();
-            bar.ShowItemToolTips = true;
-            bar.Padding = new Padding(8, 4, 8, 4);
-
-            // [标注组] 矩形/椭圆/箭头/画笔/文字/序号
-            AddToolBtn(bar, "rect", "矩形标注", "矩形标注", true);
-            AddToolBtn(bar, "ellipse", "椭圆标注", "椭圆标注", true);
-            AddToolBtn(bar, "arrow", "箭头标注", "箭头标注", true);
-            AddToolBtn(bar, "pen", "画笔", "自由画笔", true);
-            AddToolBtn(bar, "text", "文字标注", "文字标注 (点击选区内位置输入, 回车落字)", true);
-            AddToolBtn(bar, "seq", "序号标记", "序号标记 (自动递增)", true);
-            bar.Items.Add(NewSep());
-            // [编辑组] 撤销/重做
-            AddActBtn(bar, "undo", "撤销 (Ctrl+Z)", delegate { ActUndo(); });
-            AddActBtn(bar, "redo", "重做 (Ctrl+Y)", delegate { ActRedo(); });
-            bar.Items.Add(NewSep());
-            // [功能组] OCR/翻译/贴图/保存
-            AddActBtn(bar, "ocr", "OCR 文字识别", delegate { ActOcr(); });
-            AddActBtn(bar, "translate", "翻译", delegate { ActTranslate(); });
-            AddActBtn(bar, "pin", "贴图 (钉到桌面)", delegate { ActPin(); });
-            AddActBtn(bar, "save", "保存到截图目录", delegate { ActSave(); });
-            bar.Items.Add(NewSep());
-            // [输出组] ✓复制并完成 / ✕取消
-            AddActBtn(bar, "ok", "复制并完成", delegate { ActCopy(); });
-            AddActBtn(bar, "cancel", "取消 (Esc)", delegate { CancelAll(); });
+            bar = new ToolbarPanel();
+            // [标注组]
+            bar.Add("rect", "矩形标注", delegate { PickTool("rect"); }, true).ToolKey = "rect";
+            bar.Add("ellipse", "椭圆标注", delegate { PickTool("ellipse"); }, true).ToolKey = "ellipse";
+            bar.Add("arrow", "箭头标注", delegate { PickTool("arrow"); }, true).ToolKey = "arrow";
+            bar.Add("pen", "自由画笔", delegate { PickTool("pen"); }, true).ToolKey = "pen";
+            bar.Add("text", "文字标注 (点击选区内输入, 回车落字)", delegate { PickTool("text"); }, true).ToolKey = "text";
+            bar.Add("seq", "序号标记 (自动递增)", delegate { PickTool("seq"); }, true).ToolKey = "seq";
+            bar.AddSep();
+            // [编辑组]
+            bar.Add("undo", "撤销 (Ctrl+Z)", delegate { ActUndo(); });
+            bar.Add("redo", "重做 (Ctrl+Y)", delegate { ActRedo(); });
+            bar.AddSep();
+            // [功能组]
+            bar.Add("ocr", "OCR 文字识别", delegate { ActOcr(); });
+            bar.Add("translate", "翻译", delegate { ActTranslate(); });
+            bar.Add("pin", "贴图 (钉到桌面)", delegate { ActPin(); });
+            bar.Add("save", "保存到截图目录", delegate { ActSave(); });
+            bar.AddSep();
+            // [输出组]
+            bar.Add("ok", "复制并完成", delegate { ActCopy(); });
+            bar.Add("cancel", "取消 (Esc)", delegate { CancelAll(); });
 
             Controls.Add(bar);
             PlaceBar();
@@ -469,55 +462,24 @@ partial class ShotService
             Log("capture: toolbar shown (overlay kept, selection highlighted)");
         }
 
-        ToolStripSeparator NewSep()
+        // 标注工具选中态 (再点同工具=取消; 高亮保持, PixPin 同款)
+        void PickTool(string id)
         {
-            ToolStripSeparator s = new ToolStripSeparator();
-            s.Margin = new Padding(4, 6, 4, 6);
-            return s;
-        }
-
-        void AddActBtn(ToolStrip ts, string icon, string tip, EventHandler onClick)
-        {
-            ToolStripButton b = new ToolStripButton();
-            b.Image = MakeIcon(icon);
-            b.DisplayStyle = ToolStripItemDisplayStyle.Image;
-            b.ImageScaling = ToolStripItemImageScaling.None;
-            b.ToolTipText = tip;
-            b.Click += onClick;
-            ts.Items.Add(b);
-        }
-
-        void AddToolBtn(ToolStrip ts, string id, string label, string tip, bool toggle)
-        {
-            ToolStripButton b = new ToolStripButton();
-            b.Image = MakeIcon(id == "rect" ? "rect" : id == "ellipse" ? "ellipse" : id);
-            b.DisplayStyle = ToolStripItemDisplayStyle.Image;
-            b.ImageScaling = ToolStripItemImageScaling.None;
-            b.ToolTipText = tip;
-            b.Tag = id;
-            b.Click += delegate
-            {
-                CommitTextInput();
-                tool = (tool == id) ? null : id; // 再点一次取消工具
-                foreach (ToolStripItem it in ts.Items)
-                {
-                    ToolStripButton bb = it as ToolStripButton;
-                    if (bb != null && bb.Tag is string) bb.BackColor = ((string)bb.Tag == tool) ? Color.FromArgb(70, 110, 200) : Color.Transparent;
-                }
-                Cursor = tool == null ? Cursors.Cross : Cursors.Cross;
-                Log("capture: tool=" + (tool ?? "(none)"));
-            };
-            ts.Items.Add(b);
+            CommitTextInput();
+            tool = (tool == id) ? null : id;
+            foreach (var b in bar.Btns)
+                if (b.IsToggle) b.On = (b.ToolKey == tool);
+            bar.Invalidate();
+            Log("capture: tool=" + (tool ?? "(none)"));
         }
 
         void PlaceBar()
         {
             if (bar == null) return;
             Rectangle vs = SystemInformation.VirtualScreen;
-            int w = bar.Width + 8;
-            int x = sel.Right + 6, y = sel.Bottom + 6;
-            if (x + w > vs.Right - 4) x = vs.Right - w - 4;
-            if (y + bar.Height > vs.Bottom - 4) y = sel.Top - bar.Height - 6; // 下方放不下翻到选区上方
+            int x = sel.Right + 8, y = sel.Bottom + 8;
+            if (x + bar.Width > vs.Right - 4) x = vs.Right - bar.Width - 4;
+            if (y + bar.Height > vs.Bottom - 4) y = sel.Top - bar.Height - 8; // 下方放不下翻到选区上方
             if (y < vs.Top + 4) y = vs.Top + 4;
             Point c = RectangleToClient(new Rectangle(new Point(x, y), Size.Empty)).Location;
             bar.Left = c.X; bar.Top = c.Y;
@@ -663,28 +625,11 @@ partial class ShotService
             });
         }
 
-        ToolStripButton FindBtn(string tip)
-        {
-            foreach (ToolStripItem it in bar.Items)
-            {
-                ToolStripButton b = it as ToolStripButton;
-                if (b != null && b.ToolTipText == tip) return b;
-            }
-            return null;
-        }
-
-        // 忙碌: 禁用全部按钮 + OCR 按钮显示进度; 空参=恢复
+        // 忙碌: 禁用全部按钮; 空参=恢复
         void SetBusy(string msg)
         {
             if (bar == null) return;
-            foreach (ToolStripItem it in bar.Items)
-            {
-                ToolStripButton b = it as ToolStripButton;
-                if (b == null) continue;
-                b.Enabled = (msg == null);
-                if (b.ToolTipText != null && b.ToolTipText.StartsWith("OCR"))
-                    b.ToolTipText = (msg == null) ? "OCR 文字识别" : msg;
-            }
+            bar.SetEnabledAll(msg == null);
             bar.Invalidate();
         }
 
@@ -731,125 +676,242 @@ partial class ShotService
         }
     }
 
-    // 深色工具条渲染: 深底 + hover 蓝灰高亮 + 深色分隔线
-    class DarkToolRenderer : ToolStripProfessionalRenderer
-    {
-        public DarkToolRenderer() : base(new DarkToolColors()) { RoundedEdges = false; }
-        protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
-        {
-            using (Pen p = new Pen(Color.FromArgb(55, 57, 66)))
-                e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
-        }
-    }
-    class DarkToolColors : ProfessionalColorTable
-    {
-        Color hover = Color.FromArgb(60, 65, 80), press = Color.FromArgb(70, 110, 200), sep = Color.FromArgb(55, 57, 66);
-        public override Color ImageMarginGradientBegin { get { return Color.Transparent; } }
-        public override Color ImageMarginGradientMiddle { get { return Color.Transparent; } }
-        public override Color ImageMarginGradientEnd { get { return Color.Transparent; } }
-        public override Color ButtonSelectedGradientBegin { get { return hover; } }
-        public override Color ButtonSelectedGradientMiddle { get { return hover; } }
-        public override Color ButtonSelectedGradientEnd { get { return hover; } }
-        public override Color ButtonPressedGradientBegin { get { return press; } }
-        public override Color ButtonPressedGradientMiddle { get { return press; } }
-        public override Color ButtonPressedGradientEnd { get { return press; } }
-        public override Color ButtonSelectedHighlight { get { return hover; } }
-        public override Color ButtonSelectedBorder { get { return Color.Transparent; } }
-        public override Color SeparatorDark { get { return sep; } }
-        public override Color SeparatorLight { get { return sep; } }
-    }
 
-    // ---- 自绘 26x26 图标 (白色线性, 透明底; GDI+ 矢量画, 零图片依赖; 排版/语义照 PixPin) ----
+    // ---- 自绘 18x18 图标 (白色线性紧凑版, 密度对齐 PixPin; GDI+ 矢量画, 零图片依赖) ----
     static Bitmap MakeIcon(string kind)
     {
-        Bitmap bmp = new Bitmap(26, 26);
+        Bitmap bmp = new Bitmap(18, 18);
         using (Graphics g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (Pen w = new Pen(Color.FromArgb(235, 238, 244), 2.2f))
+            using (Pen w = new Pen(Color.FromArgb(232, 234, 240), 1.8f))
             {
                 w.StartCap = LineCap.Round; w.EndCap = LineCap.Round; w.LineJoin = LineJoin.Round;
                 switch (kind)
                 {
-                    case "rect": // 空心矩形
-                        g.DrawRectangle(w, 4f, 6.5f, 18, 13);
+                    case "rect": g.DrawRectangle(w, 2.5f, 4f, 13, 10); break;
+                    case "ellipse": g.DrawEllipse(w, 2.5f, 4f, 13, 10); break;
+                    case "arrow":
+                        g.DrawLine(w, 3, 15, 15, 3);
+                        g.DrawLine(w, 15, 3, 9.5f, 4);
+                        g.DrawLine(w, 15, 3, 14, 8.5f);
                         break;
-                    case "ellipse": // 空心椭圆
-                        g.DrawEllipse(w, 4f, 6.5f, 18, 13);
+                    case "pen":
+                        g.DrawLine(w, 4, 14, 12, 6);
+                        g.DrawLine(w, 12, 6, 15, 3);
+                        g.DrawLine(w, 4, 14, 3, 15);
                         break;
-                    case "arrow": // 斜箭头
-                        g.DrawLine(w, 5, 21, 20, 6);
-                        g.DrawLine(w, 20, 6, 13.5f, 7);
-                        g.DrawLine(w, 20, 6, 19, 12.5f);
+                    case "text":
+                        g.DrawLine(w, 4, 4, 14, 4);
+                        g.DrawLine(w, 9, 4, 9, 15);
                         break;
-                    case "pen": // 画笔(斜杆+笔尖)
-                        g.DrawLine(w, 6, 20, 18, 8);
-                        g.DrawLine(w, 18, 8, 21.5f, 4.5f);
-                        g.DrawLine(w, 6, 20, 4, 22);
+                    case "seq":
+                        g.DrawEllipse(w, 3, 3, 12, 12);
+                        using (Font f = new Font("Consolas", 7.5f, FontStyle.Bold))
+                        using (Brush b = new SolidBrush(Color.FromArgb(232, 234, 240)))
+                            g.DrawString("1", f, b, 6.3f, 4.5f);
                         break;
-                    case "text": // T
-                        g.DrawLine(w, 6, 6, 20, 6);
-                        g.DrawLine(w, 13, 6, 13, 21);
-                        break;
-                    case "seq": // 圆圈+1
-                        g.DrawEllipse(w, 5, 5, 16, 16);
-                        using (Font f = new Font("Consolas", 11f, FontStyle.Bold))
-                        using (Brush b = new SolidBrush(Color.FromArgb(235, 238, 244)))
-                            g.DrawString("1", f, b, 9.4f, 6.8f);
-                        break;
-                    case "undo": // 标准撤销 ↩: 顶弧从右弯到左 + 左指实心箭头
-                        g.DrawArc(w, 6f, 9f, 16f, 13f, -20, 195);
+                    case "undo": // ↩ 顶弧 + 左指实心箭头
+                        g.DrawArc(w, 4f, 6f, 11f, 9f, -20, 195);
                         using (SolidBrush b = new SolidBrush(w.Color))
-                            g.FillPolygon(b, new PointF[] { new PointF(2.5f, 12.5f), new PointF(11.5f, 8.5f), new PointF(10.5f, 17f) });
+                            g.FillPolygon(b, new PointF[] { new PointF(1.5f, 8.5f), new PointF(8f, 5.8f), new PointF(7.2f, 11.8f) });
                         break;
-                    case "redo": // 标准重做 ↪: undo 镜像
-                        g.DrawArc(w, 4f, 9f, 16f, 13f, 5, 195);
+                    case "redo": // ↪ 镜像
+                        g.DrawArc(w, 3f, 6f, 11f, 9f, 5, 195);
                         using (SolidBrush b = new SolidBrush(w.Color))
-                            g.FillPolygon(b, new PointF[] { new PointF(23.5f, 12.5f), new PointF(14.5f, 8.5f), new PointF(15.5f, 17f) });
+                            g.FillPolygon(b, new PointF[] { new PointF(16.5f, 8.5f), new PointF(10f, 5.8f), new PointF(10.8f, 11.8f) });
                         break;
-                    case "pin": // 贴图(图钉): 斜针 + 圆头
-                        g.DrawLine(w, 9, 22, 16, 12);
-                        using (SolidBrush b = new SolidBrush(Color.FromArgb(235, 238, 244)))
-                            g.FillEllipse(b, 13, 4, 9, 9);
-                        g.DrawEllipse(w, 13, 4, 9, 9);
+                    case "pin": // 图钉: 斜针 + 圆头
+                        g.DrawLine(w, 6.5f, 15.5f, 11, 9);
+                        using (SolidBrush b = new SolidBrush(Color.FromArgb(232, 234, 240))) g.FillEllipse(b, 9, 2.5f, 6.5f, 6.5f);
+                        g.DrawEllipse(w, 9, 2.5f, 6.5f, 6.5f);
                         break;
                     case "ocr": // 扫描框 + T
-                        g.DrawLine(w, 2, 8, 2, 2); g.DrawLine(w, 2, 2, 8, 2);
-                        g.DrawLine(w, 24, 8, 24, 2); g.DrawLine(w, 24, 2, 18, 2);
-                        g.DrawLine(w, 2, 18, 2, 24); g.DrawLine(w, 2, 24, 8, 24);
-                        g.DrawLine(w, 24, 18, 24, 24); g.DrawLine(w, 24, 24, 18, 24);
-                        g.DrawLine(w, 10, 9, 16, 9);
-                        g.DrawLine(w, 13, 9, 13, 19);
+                        g.DrawLine(w, 1.5f, 5.5f, 1.5f, 1.5f); g.DrawLine(w, 1.5f, 1.5f, 5.5f, 1.5f);
+                        g.DrawLine(w, 16.5f, 5.5f, 16.5f, 1.5f); g.DrawLine(w, 16.5f, 1.5f, 12.5f, 1.5f);
+                        g.DrawLine(w, 1.5f, 12.5f, 1.5f, 16.5f); g.DrawLine(w, 1.5f, 16.5f, 5.5f, 16.5f);
+                        g.DrawLine(w, 16.5f, 12.5f, 16.5f, 16.5f); g.DrawLine(w, 16.5f, 16.5f, 12.5f, 16.5f);
+                        g.DrawLine(w, 6.5f, 6, 11.5f, 6);
+                        g.DrawLine(w, 9, 6, 9, 13);
                         break;
-                    case "translate": // A/文 双字
-                        using (Font f = new Font("Consolas", 11f, FontStyle.Bold))
-                        using (Brush b = new SolidBrush(Color.FromArgb(235, 238, 244)))
+                    case "translate":
+                        using (Font f = new Font("Consolas", 7.5f, FontStyle.Bold))
+                        using (Brush b = new SolidBrush(Color.FromArgb(232, 234, 240)))
                         {
-                            g.DrawString("A", f, b, 2.5f, 2.5f);
-                            using (Font f2 = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold))
-                                g.DrawString("文", f2, b, 12f, 11f);
+                            g.DrawString("A", f, b, 1.5f, 1.5f);
+                            using (Font f2 = new Font("Microsoft YaHei UI", 7.5f, FontStyle.Bold))
+                                g.DrawString("文", f2, b, 8f, 8f);
                         }
                         break;
                     case "save": // 软盘
-                        g.DrawRectangle(w, 4f, 4f, 18, 18);
-                        g.DrawRectangle(w, 9, 5, 8, 6);
-                        g.DrawLine(w, 7, 22, 7, 15); g.DrawLine(w, 7, 15, 19, 15); g.DrawLine(w, 19, 15, 19, 22);
+                        g.DrawRectangle(w, 2.5f, 2.5f, 13, 13);
+                        g.DrawRectangle(w, 6, 3.5f, 6, 4);
+                        g.DrawLine(w, 5, 15.5f, 5, 10.5f); g.DrawLine(w, 5, 10.5f, 13, 10.5f); g.DrawLine(w, 13, 10.5f, 13, 15.5f);
                         break;
-                    case "copy": // 双矩形
-                        g.DrawRectangle(w, 9, 9, 14, 14);
-                        g.DrawLines(w, new PointF[] { new PointF(19f, 5), new PointF(5, 5), new PointF(5, 19) });
-                        break;
-                    case "ok": // ✓ 完成
-                        g.DrawLines(w, new PointF[] { new PointF(4, 14), new PointF(10.5f, 20), new PointF(22, 6) });
+                    case "ok": // ✓
+                        g.DrawLines(w, new PointF[] { new PointF(3, 10), new PointF(7, 14), new PointF(15, 4) });
                         break;
                     case "cancel": // X
-                        g.DrawLine(w, 6, 6, 20, 20);
-                        g.DrawLine(w, 20, 6, 6, 20);
+                        g.DrawLine(w, 4, 4, 14, 14);
+                        g.DrawLine(w, 14, 4, 4, 14);
                         break;
                 }
             }
         }
         return bmp;
+    }
+
+    // 自绘紧凑工具条按钮条 (PixPin 同款密度): 32px 按钮 0 间距 / hover 圆角高亮 / 细分隔线 / tooltip。
+    // 弃用 ToolStrip (默认间距巨大, 排出来稀稀拉拉)
+    class ToolbarPanel : Panel
+    {
+        public class Btn
+        {
+            public string Icon, Tip, ToolKey;
+            public Action OnClick;
+            public bool IsToggle, On, Enabled = true;
+            public Rectangle Rect;
+        }
+
+        public readonly List<Btn> Btns = new List<Btn>();
+        int hoverIdx = -1;
+        readonly ToolTip tip = new ToolTip();
+        string shownTip;
+
+        public ToolbarPanel()
+        {
+            DoubleBuffered = true;
+            BackColor = Color.FromArgb(26, 27, 31);
+        }
+
+        public Btn Add(string icon, string tipText, Action onClick, bool toggle = false)
+        {
+            Btn b = new Btn();
+            b.Icon = icon; b.Tip = tipText; b.OnClick = onClick; b.IsToggle = toggle;
+            Btns.Add(b); Relayout(); Invalidate(); return b;
+        }
+
+        public void AddSep()
+        {
+            Btns.Add(new Btn { Icon = "|" });
+            Relayout(); Invalidate();
+        }
+
+        void Relayout()
+        {
+            int x = 5;
+            foreach (Btn b in Btns)
+            {
+                if (b.Icon == "|") { b.Rect = new Rectangle(x, 10, 1, 20); x += 11; }
+                else { b.Rect = new Rectangle(x, 4, 32, 32); x += 32; }
+            }
+            Width = x + 5; Height = 40;
+        }
+
+        public void SetEnabledAll(bool en)
+        {
+            foreach (Btn b in Btns) b.Enabled = en;
+        }
+
+        int Hit(Point p)
+        {
+            for (int i = 0; i < Btns.Count; i++)
+            {
+                Btn b = Btns[i];
+                if (b.Icon != "|" && b.Rect.Contains(p)) return i;
+            }
+            return -1;
+        }
+
+        static void RoundFill(Graphics g, Brush br, Rectangle r, int rad)
+        {
+            using (GraphicsPath gp = new GraphicsPath())
+            {
+                gp.AddArc(r.X, r.Y, rad * 2, rad * 2, 180, 90);
+                gp.AddArc(r.Right - rad * 2, r.Y, rad * 2, rad * 2, 270, 90);
+                gp.AddArc(r.Right - rad * 2, r.Bottom - rad * 2, rad * 2, rad * 2, 0, 90);
+                gp.AddArc(r.X, r.Bottom - rad * 2, rad * 2, rad * 2, 90, 90);
+                gp.CloseFigure();
+                g.FillPath(br, gp);
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (Pen sp = new Pen(Color.FromArgb(62, 64, 72)))
+                foreach (Btn b in Btns)
+                    if (b.Icon == "|")
+                        g.DrawLine(sp, b.Rect.X, b.Rect.Top, b.Rect.X, b.Rect.Bottom);
+            for (int i = 0; i < Btns.Count; i++)
+            {
+                Btn b = Btns[i];
+                if (b.Icon == "|") continue;
+                if (i == hoverIdx || b.On)
+                {
+                    using (SolidBrush br = new SolidBrush(b.On ? DarkUI.Accent : (i == hoverIdx ? Color.FromArgb(64, 68, 80) : Color.Transparent)))
+                        RoundFill(g, br, b.Rect, 6);
+                }
+                using (Bitmap ic = MakeIcon(b.Icon))
+                {
+                    if (!b.Enabled)
+                    {
+                        System.Drawing.Imaging.ColorMatrix cm = new System.Drawing.Imaging.ColorMatrix { Matrix33 = 0.35f };
+                        using (System.Drawing.Imaging.ImageAttributes ia = new System.Drawing.Imaging.ImageAttributes())
+                        {
+                            ia.SetColorMatrix(cm);
+                            g.DrawImage(ic, new Rectangle(b.Rect.X + 7, b.Rect.Y + 7, 18, 18), 0, 0, 18, 18, GraphicsUnit.Pixel, ia);
+                        }
+                    }
+                    else
+                        g.DrawImage(ic, b.Rect.X + 7, b.Rect.Y + 7, 18, 18);
+                }
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int h = Hit(e.Location);
+            if (h != hoverIdx)
+            {
+                hoverIdx = h;
+                Invalidate();
+                if (h >= 0 && Btns[h].Enabled)
+                {
+                    shownTip = Btns[h].Tip;
+                    tip.Show(shownTip, this, Btns[h].Rect.X, Bottom - 4, 1400);
+                }
+                else { shownTip = null; tip.Hide(this); }
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            hoverIdx = -1; shownTip = null;
+            tip.Hide(this);
+            Invalidate();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Left) { Focus(); hoverIdx = Hit(e.Location); Invalidate(); }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            int h = Hit(e.Location);
+            if (e.Button == MouseButtons.Left && h >= 0 && h == hoverIdx)
+            {
+                Btn b = Btns[h];
+                if (b.Enabled && b.OnClick != null) b.OnClick();
+            }
+        }
     }
 
     // ---- 深色 UI 主题 (全窗体统一色板; 设置窗/剪贴板历史窗/结果窗/贴图窗共用) ----
