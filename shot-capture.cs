@@ -607,6 +607,7 @@ partial class ShotService
             bar.Add("ocr", "OCR 文字识别", delegate { ActOcr(); });
             bar.Add("translate", "翻译", delegate { ActTranslate(); });
             bar.Add("pin", "贴图 (钉到桌面)", delegate { ActPin(); });
+            bar.Add("rec", "录屏 (延迟可选)", delegate { ShowRecMenu(); });
             bar.Add("save", "保存到截图目录", delegate { ActSave(); });
             bar.AddSep();
             // [输出组]
@@ -826,6 +827,116 @@ partial class ShotService
             if (a.Kind == Annot.K_SEQ) seqNext = Math.Max(seqNext, a.No + 1);
             InvalidateAnnot(a);
             Log("capture: redo (" + annots.Count + " annots)");
+        }
+
+        // ---- 录屏 (照 PixPin: 二级菜单选延迟; 录选区或全屏; 录制中 HUD 计时+停止) ----
+        void ShowRecMenu()
+        {
+            CommitTextInput();
+            ContextMenuStrip m = DarkMenu();
+            if (recording)
+            {
+                m.Items.Add("⏹ 停止录制", null, delegate { RecordStopAndNotify(); });
+            }
+            else
+            {
+                m.Items.Add("● 录制选区 (立即)", null, delegate { StartDelayedRecording(0, false); });
+                m.Items.Add("● 录制全屏 (立即)", null, delegate { StartDelayedRecording(0, true); });
+                m.Items.Add(new ToolStripSeparator());
+                int[] delays = { 1, 2, 3, 5, 10 };
+                foreach (int dsec in delays)
+                {
+                    int captured = dsec;
+                    m.Items.Add("-" + dsec + "s 后录制选区", null, delegate { StartDelayedRecording(captured, false); });
+                }
+            }
+            m.Show(bar, 8, bar.Bottom - bar.Top + 2);
+        }
+
+        // 延迟后录: 倒计时期间遮罩关闭让屏幕可用; 结束后 HUD 计时
+        void StartDelayedRecording(int delaySec, bool fullScreen)
+        {
+            CommitTextInput();
+            Rectangle area = fullScreen ? SystemInformation.VirtualScreen : sel;
+            Close(); // 录屏开始前遮罩必须关 (录的是用户看到的屏幕)
+            if (delaySec > 0) ShowTrayInfo(delaySec + " 秒后开始录制" + (fullScreen ? "全屏" : "选区") + "...");
+            Task.Run(() =>
+            {
+                if (delaySec > 0) System.Threading.Thread.Sleep(delaySec * 1000);
+                string r = RecordStart(area.X, area.Y, area.Width, area.Height, 10);
+                Log("record via toolbar: " + r);
+                bool ok = r.Contains("\"ok\":true");
+                if (ok) ShowRecordHud();
+                else ShowTrayInfo("录屏启动失败: " + r);
+            });
+        }
+
+        void RecordStopAndNotify()
+        {
+            string r = RecordStop();
+            CloseRecordHud();
+            Log("record stop via toolbar: " + r);
+            string file = "";
+            int p1 = r.IndexOf("\"file\":\"");
+            if (p1 >= 0)
+            {
+                int p2 = r.IndexOf("\"", p1 + 9);
+                file = r.Substring(p1 + 9, p2 - p1 - 9).Replace("\\", "/");
+            }
+            ShowTrayInfo("录屏已保存: " + file);
+        }
+
+        // ---- 录制 HUD: 右下角小浮条 [● REC 00:12] [⏹ 停止] ----
+        static Form recHud;
+        static Timer hudTimer;
+
+        void ShowRecordHud()
+        {
+            CloseRecordHud();
+            Form hud = new Form();
+            recHud = hud;
+            hud.FormBorderStyle = FormBorderStyle.None;
+            hud.StartPosition = FormStartPosition.Manual;
+            hud.Size = new Size(190, 44);
+            Rectangle vs = SystemInformation.VirtualScreen;
+            hud.Location = new Point(vs.Right - 220, vs.Bottom - 80);
+            hud.TopMost = true;
+            hud.ShowInTaskbar = false;
+            hud.BackColor = Color.FromArgb(30, 31, 36);
+            hud.MaximizeBox = false; hud.MinimizeBox = false;
+            hud.ShowInTaskbar = false;
+
+            Label rec = new Label(); rec.Text = "● REC 00:00"; rec.Left = 12; rec.Top = 10; rec.AutoSize = true;
+            rec.ForeColor = Color.FromArgb(255, 90, 80); rec.Font = new Font("Consolas", 11f, FontStyle.Bold);
+            hud.Controls.Add(rec);
+            Button stop = new Button(); stop.Text = "⏹ 停止"; stop.FlatStyle = FlatStyle.Flat; stop.FlatAppearance.BorderSize = 0;
+            stop.BackColor = Color.FromArgb(200, 60, 60); stop.ForeColor = Color.White;
+            stop.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold); stop.Cursor = Cursors.Hand;
+            stop.SetBounds(128, 6, 54, 32);
+            stop.Click += delegate { RecordStopAndNotify(); };
+            hud.Controls.Add(stop);
+            stop.BringToFront();
+
+            DateTime t0 = DateTime.Now;
+            Timer tm = new Timer { Interval = 500 };
+            tm.Tick += (s, e) =>
+            {
+                try
+                {
+                    var el = DateTime.Now - t0;
+                    rec.Text = "● REC " + ((int)el.TotalSeconds / 60).ToString("00") + ":" + ((int)el.TotalSeconds % 60).ToString("00");
+                }
+                catch { }
+            };
+            tm.Start();
+            hud.FormClosed += (s, e) => { try { tm.Stop(); tm.Dispose(); } catch { } if (recHud == hud) recHud = null; };
+            hud.Show();
+        }
+
+        static void CloseRecordHud()
+        {
+            Form h = recHud;
+            if (h != null) { try { h.Close(); } catch { } recHud = null; }
         }
 
         // 贴图 (PixPin 同款): 选区合成图钉到桌面原位置, 可拖动/滚轮缩放/双击关闭
@@ -1125,6 +1236,11 @@ partial class ShotService
                     case "cancel": // X
                         g.DrawLine(w, 4, 4, 14, 14);
                         g.DrawLine(w, 14, 4, 4, 14);
+                        break;
+                    case "rec": // 红圆点 (录屏)
+                        using (SolidBrush b = new SolidBrush(Color.FromArgb(255, 82, 70)))
+                            g.FillEllipse(b, 4, 4, 10, 10);
+                        g.DrawEllipse(w, 4, 4, 10, 10);
                         break;
                     case "sty_arrow": // 实线箭头预览
                         g.DrawLine(w, 2, 9, 14, 9);

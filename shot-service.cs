@@ -129,6 +129,15 @@ public partial class ShotService
         }
         catch { return "unknown"; }
     }
+    static string BuildStampShort()
+    {
+        try
+        {
+            string exe = Process.GetCurrentProcess().MainModule.FileName;
+            return new FileInfo(exe).LastWriteTime.ToString("MM-dd HH:mm");
+        }
+        catch { return "?"; }
+    }
 
     // ---- 看: 屏幕/窗口 ----
     static Rectangle VirtualScreen()
@@ -1973,7 +1982,7 @@ public partial class ShotService
         TrayIcon.Visible = true;
         ContextMenuStrip menu = new ContextMenuStrip();
         // 版本行带构建指纹: 打开菜单一眼确认跑的是不是刚编的 exe (部署自验证)
-        menu.Items.Add("Win Desktop Helper  v" + APP_VERSION + "  (build " + BuildStamp() + ")", null, null).Enabled = false; // 只读版本显示
+        menu.Items.Add("v" + APP_VERSION + "  build " + BuildStampShort(), null, null).Enabled = false; // 只读版本显示 (短: 菜单不拉宽; 完整信息悬停图标看 tooltip)
 
         // 截图 二级菜单 (M1: 区域截图为核心能力, 折叠但置顶)
         ToolStripMenuItem mShot = new ToolStripMenuItem("截图");
