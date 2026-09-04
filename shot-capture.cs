@@ -1193,11 +1193,25 @@ partial class ShotService
                         using (SolidBrush b = new SolidBrush(w.Color))
                             g.FillPolygon(b, new PointF[] { new PointF(16.5f, 8.5f), new PointF(10f, 5.8f), new PointF(10.8f, 11.8f) });
                         break;
-                    case "pin": // 图钉: 斜针 + 圆头
-                        g.DrawLine(w, 6.5f, 15.5f, 11, 9);
-                        using (SolidBrush b = new SolidBrush(Color.FromArgb(232, 234, 240))) g.FillEllipse(b, 9, 2.5f, 6.5f, 6.5f);
-                        g.DrawEllipse(w, 9, 2.5f, 6.5f, 6.5f);
+                    case "pin": // 图钉 (PixPin 同款): 45度圆角方头 + 左下斜针
+                    {
+                        var st = g.Save();
+                        g.TranslateTransform(10.2f, 7.2f);
+                        g.RotateTransform(45f);
+                        using (System.Drawing.Drawing2D.GraphicsPath gp = new System.Drawing.Drawing2D.GraphicsPath())
+                        {
+                            float rr = 3f;
+                            gp.AddArc(-4.5f, -4.5f, rr * 2, rr * 2, 180, 90);
+                            gp.AddArc(4.5f - rr * 2, -4.5f, rr * 2, rr * 2, 270, 90);
+                            gp.AddArc(4.5f - rr * 2, 4.5f - rr * 2, rr * 2, rr * 2, 0, 90);
+                            gp.AddArc(-4.5f, 4.5f - rr * 2, rr * 2, rr * 2, 90, 90);
+                            gp.CloseFigure();
+                            g.DrawPath(w, gp);
+                        }
+                        g.Restore(st);
+                        g.DrawLine(w, 9.2f, 8.2f, 4f, 15.8f); // 针从头心往左下
                         break;
+                    }
                     case "ocr": // 扫描框 + T
                         g.DrawLine(w, 1.5f, 5.5f, 1.5f, 1.5f); g.DrawLine(w, 1.5f, 1.5f, 5.5f, 1.5f);
                         g.DrawLine(w, 16.5f, 5.5f, 16.5f, 1.5f); g.DrawLine(w, 16.5f, 1.5f, 12.5f, 1.5f);
