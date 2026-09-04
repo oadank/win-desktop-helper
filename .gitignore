@@ -26,3 +26,6 @@ Thumbs.db
 # Inno 卸载残留
 unins*.dat
 
+_gz_*.png
+_cand*.png
+_glyphs_*.png
