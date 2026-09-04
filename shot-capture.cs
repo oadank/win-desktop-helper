@@ -26,8 +26,26 @@ using System.Windows.Forms;
 partial class ShotService
 {
     const int SHOT_HOTKEY_ID = 0x5713; // 与 HOTKEY_ID(0x5712) 区分
+    const int FULLSHOT_HOTKEY_ID = 0x5714; // 全屏截图热键
     static string shotHotkeyName = "";
+    static string fullShotHotkeyName = "";
     static bool captureBusy = false;
+
+    // 全屏截图 (热键): 截全屏 → 图片复制到剪贴板 → 轻气泡提示 (仅手动热键触发; HTTP/MCP 调用 DoShot 从不弹泡)
+    static void DoFullScreenShot()
+    {
+        try
+        {
+            string fp = DoShot(VirtualScreen());
+            using (Bitmap bmp = new Bitmap(fp))
+            {
+                try { Clipboard.SetImage(bmp); } catch { }
+            }
+            Log("fullscreen shot: " + fp + " (image copied to clipboard)");
+            ShowTrayInfo("已截全屏, 图片已复制到剪贴板: " + fp);
+        }
+        catch (Exception ex) { Log("fullscreen shot err: " + ex.Message); }
+    }
 
     // 区域截图入口: 遮罩在 hk(STA) 线程显示, 与热键窗同消息循环。
     // 托盘线程必须走 BeginInvoke 立即返回 — 同步 Invoke 一旦遮罩卡住, 整个托盘假死 (实测踩坑)
@@ -684,7 +702,7 @@ partial class ShotService
         using (Graphics g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (Pen w = new Pen(Color.FromArgb(232, 234, 240), 1.8f))
+            using (Pen w = new Pen(Color.FromArgb(232, 234, 240), 2f))
             {
                 w.StartCap = LineCap.Round; w.EndCap = LineCap.Round; w.LineJoin = LineJoin.Round;
                 switch (kind)
@@ -709,7 +727,8 @@ partial class ShotService
                         g.DrawEllipse(w, 3, 3, 12, 12);
                         using (Font f = new Font("Consolas", 7.5f, FontStyle.Bold))
                         using (Brush b = new SolidBrush(Color.FromArgb(232, 234, 240)))
-                            g.DrawString("1", f, b, 6.3f, 4.5f);
+                        using (StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                            g.DrawString("1", f, b, new RectangleF(2, 2, 14, 14), sf); // 圆心对齐
                         break;
                     case "undo": // ↩ 顶弧 + 左指实心箭头
                         g.DrawArc(w, 4f, 6f, 11f, 9f, -20, 195);
@@ -734,13 +753,13 @@ partial class ShotService
                         g.DrawLine(w, 6.5f, 6, 11.5f, 6);
                         g.DrawLine(w, 9, 6, 9, 13);
                         break;
-                    case "translate":
-                        using (Font f = new Font("Consolas", 7.5f, FontStyle.Bold))
-                        using (Brush b = new SolidBrush(Color.FromArgb(232, 234, 240)))
+                    case "translate": // 双对话气泡 (前实心小 + 后线框大), 翻译语义
+                        g.DrawRectangle(w, 2, 3, 10, 7);          // 后大气泡 (线框)
+                        g.DrawLines(w, new PointF[] { new PointF(4, 10), new PointF(4, 13), new PointF(7, 10) }); // 尾
+                        using (SolidBrush b = new SolidBrush(Color.FromArgb(232, 234, 240)))
                         {
-                            g.DrawString("A", f, b, 1.5f, 1.5f);
-                            using (Font f2 = new Font("Microsoft YaHei UI", 7.5f, FontStyle.Bold))
-                                g.DrawString("文", f2, b, 8f, 8f);
+                            g.FillRectangle(b, 9, 9, 8, 5);      // 前小气泡 (实心)
+                            g.FillPolygon(b, new PointF[] { new PointF(11, 14), new PointF(14, 14), new PointF(11, 16.5f) }); // 尾
                         }
                         break;
                     case "save": // 软盘
@@ -882,7 +901,7 @@ partial class ShotService
                 if (h >= 0 && Btns[h].Enabled)
                 {
                     shownTip = Btns[h].Tip;
-                    tip.Show(shownTip, this, Btns[h].Rect.X, Bottom - 4, 1400);
+                    tip.Show(shownTip, this, Btns[h].Rect.X, Btns[h].Rect.Y - 28, 1400); // 按钮正上方
                 }
                 else { shownTip = null; tip.Hide(this); }
             }

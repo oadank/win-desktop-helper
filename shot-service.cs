@@ -712,6 +712,11 @@ public partial class ShotService
                 ShowCaptureOverlay();
                 return;
             }
+            if (m.Msg == WM_HOTKEY && (int)m.WParam == FULLSHOT_HOTKEY_ID)
+            {
+                ThreadPool.QueueUserWorkItem(delegate { DoFullScreenShot(); });
+                return;
+            }
             if (m.Msg == WM_DISPLAYCHANGE)
             {
                 // 分辨率/显示器变更: 任务栏窗口句柄与矩形都会变, 立即重建列表, 否则滚轮/中键失效
@@ -723,29 +728,37 @@ public partial class ShotService
     }
     const int WM_DISPLAYCHANGE = 0x007E;
 
-    static void InstallVolumeHook()
+    static Control hookSync; // 钩子线程的同步控件: 自愈重装经它 Invoke 回钩子线程 (回调必须在安装线程的消息循环里被调用)
+
+    // 鼠标钩子独立线程入口 (拖卡根治): WH_MOUSE_LL 回调在安装线程同步执行 —
+    // 若与遮罩 UI 同线程, 拖框时每帧重绘会阻塞回调 → 鼠标指针/事件全部排队 → 拖动巨卡 (实测复现)。
+    // 专用线程 + 自己的消息循环: UI 再忙也不影响鼠标。
+    static void InstallMouseHook()
     {
         try
         {
+            hookSync = new Control();
+            hookSync.CreateControl(); // 消息循环所在线程的句柄, 供 Invoke
             volHookProc = new LowLevelMouseProc(VolumeHookProc);
             volHook = SetWindowsHookEx(WH_MOUSE_LL, volHookProc, GetModuleHandle(null), 0);
             RefreshTaskbarWindows();
-            Log("volume hook installed: handle=" + volHook + " taskbarWnds=" + taskbarWnds.Length);
+            Log("mouse hook installed on dedicated thread: handle=" + volHook + " taskbarWnds=" + taskbarWnds.Length);
             // 任务栏窗口列表兜底刷新线程(5s): WM_DISPLAYCHANGE 之外的双保险
             Thread rfr = new Thread(new ThreadStart(TaskbarRefreshLoop));
             rfr.IsBackground = true;
             rfr.Start();
-            // 钩子自愈: 30s 心跳, 通过热键窗线程(Invoke) 安全重装 — 低级钩子回调必须在安装它线程的消息循环里被调用!
+            // 钩子自愈: 30s 心跳, 经 hookSync Invoke 回本线程安全重装
             // ⚠️ 绝不能在无消息循环的线程重装钩子 (回调会永远不被调用, 实测踩坑)
             Thread heal = new Thread(new ThreadStart(VolumeHookHealLoop));
             heal.IsBackground = true;
             heal.Start();
             Log("volume hook heal loop started");
+            Application.Run(); // 钩子线程消息循环: 驱动钩子回调 + hookSync.Invoke
         }
-        catch (Exception ex) { Log("volume hook install err: " + ex.Message); }
+        catch (Exception ex) { Log("mouse hook install err: " + ex.Message); }
     }
 
-    // 钩子自愈: 低级钩子可被系统静默拔除(回调超时/系统压力) — 定期经消息循环线程重装 + 刷新任务栏窗口快照
+    // 钩子自愈: 低级钩子可被系统静默拔除(回调超时/系统压力) — 定期经钩子线程重装 + 刷新任务栏窗口快照
     static void VolumeHookHealLoop()
     {
         while (true)
@@ -755,11 +768,11 @@ public partial class ShotService
             {
                 // 任务栏窗口句柄/矩形定期刷新(分辨率变更/explorer 重启自适应)
                 RefreshTaskbarWindows();
-                // 重装钩子必须回到 volT(带消息循环)线程执行 — 通过热键窗 Invoke
-                Form hk = hkForm;
-                if (hk != null && hk.IsHandleCreated)
+                // 重装钩子必须回到钩子线程执行 — 通过钩子线程同步控件 Invoke
+                Control hs = hookSync;
+                if (hs != null && hs.IsHandleCreated)
                 {
-                    hk.Invoke(new MethodInvoker(delegate
+                    hs.Invoke(new MethodInvoker(delegate
                     {
                         try
                         {
@@ -772,7 +785,7 @@ public partial class ShotService
                     }));
                 }
             }
-            catch { } // 热键窗可能未就绪/已关闭, 静默等下一轮
+            catch { } // 钩子线程可能未就绪/已退出, 静默等下一轮
         }
     }
 
@@ -1188,13 +1201,21 @@ public partial class ShotService
         srv.IsBackground = true;
         srv.Start();
 
-        // 任务栏滚轮调音量: 独立线程跑低级钩子(需消息循环驱动回调) — 常驻功能, 与托盘模式无关
+        // 鼠标钩子独立线程 (拖卡根治): 回调在专用线程消息循环执行, 与截图遮罩 UI 线程彻底解耦
+        try
+        {
+            Thread hookT = new Thread(new ThreadStart(InstallMouseHook));
+            hookT.IsBackground = true;
+            hookT.Start();
+            Log("mouse hook thread started");
+        }
+        catch (Exception ex) { Log("mouse hook thread err: " + ex.Message); }
+
+        // 热键窗 (UI 线程): 剪贴板历史热键 + 区域/全屏截图热键
         try
         {
             Thread volT = new Thread(new ThreadStart(delegate
             {
-                InstallVolumeHook();
-                // 剪贴板历史热键窗: 与钩子共享同一 STA 消息循环
                 try
                 {
                     HotkeyForm hk = new HotkeyForm();
@@ -1242,6 +1263,26 @@ public partial class ShotService
                         }
                     }
                     if (!shOk) Log("shot hotkey register FAILED (all candidates busy)");
+                    // 全屏截图热键 (Ctrl+Alt+A, 候选降级)
+                    uint[][] fcands = new uint[][]
+                    {
+                        new uint[] { MOD_CONTROL | MOD_ALT, 0x41 },    // Ctrl+Alt+A (优先)
+                        new uint[] { MOD_CONTROL | MOD_SHIFT, 0x41 },  // Ctrl+Shift+A
+                        new uint[] { MOD_CONTROL | MOD_ALT, 0x46 },    // Ctrl+Alt+F
+                    };
+                    string[] fnames = new string[] { "Ctrl+Alt+A", "Ctrl+Shift+A", "Ctrl+Alt+F" };
+                    bool fOk = false;
+                    for (int ci = 0; ci < fcands.Length; ci++)
+                    {
+                        if (RegisterHotKey(hk.Handle, FULLSHOT_HOTKEY_ID, fcands[ci][0], fcands[ci][1]))
+                        {
+                            fullShotHotkeyName = fnames[ci];
+                            fOk = true;
+                            Log("fullscreen shot hotkey registered: " + fnames[ci]);
+                            break;
+                        }
+                    }
+                    if (!fOk) Log("fullscreen shot hotkey register FAILED (all candidates busy)");
                     Application.Run(hk);
                 }
                 catch (Exception ex) { Log("hotkey form err: " + ex.Message); Application.Run(); }
@@ -1249,9 +1290,9 @@ public partial class ShotService
             volT.SetApartmentState(ApartmentState.STA);
             volT.IsBackground = true;
             volT.Start();
-            Log("taskbar volume hook thread started");
+            Log("hotkey thread started");
         }
-        catch (Exception ex) { Log("volume hook thread err: " + ex.Message); }
+        catch (Exception ex) { Log("hotkey thread err: " + ex.Message); }
 
         // 剪贴板历史监听: 独立 STA 线程轮询(Clipboard 需 STA); 先加载持久化历史
         try
