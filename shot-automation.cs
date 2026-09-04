@@ -368,4 +368,166 @@ partial class ShotService
             return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}";
         }
     }
+
+    // ==================== 屏幕录制 (抓帧管道 -> ffmpeg -> MP4 h264) ====================
+    static System.Diagnostics.Process recProc;
+    static System.IO.StreamWriter recStdin;
+    static Thread recThread;
+    static volatile bool recording;
+    static string recPath;
+    static Rectangle recRect;
+    static DateTime recStart;
+    static int recFps;
+
+    static string RecordStart(int x, int y, int w, int h, int fps)
+    {
+        if (recording) return "{\"ok\":false,\"error\":\"already recording\",\"file\":\"" + JsonEscape(recPath) + "\"}";
+        if (w <= 0 || h <= 0) { var vs = VirtualScreen(); x = vs.X; y = vs.Y; w = vs.Width; h = vs.Height; }
+        if (w % 2 != 0) w--;
+        if (h % 2 != 0) h--;
+        if (fps <= 0 || fps > 30) fps = 10;
+        recRect = new Rectangle(x, y, w, h);
+        recFps = fps;
+        recPath = System.IO.Path.Combine(ShotDir, "rec_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".mp4");
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo("ffmpeg",
+                "-hide_banner -loglevel error -f rawvideo -pixel_format bgra -video_size " + w + "x" + h +
+                " -framerate " + fps + " -i - -c:v libx264 -preset ultrafast -crf 26 -pix_fmt yuv420p -y \"" + recPath + "\"");
+            psi.UseShellExecute = false;
+            psi.RedirectStandardInput = true;
+            psi.CreateNoWindow = true;
+            recProc = System.Diagnostics.Process.Start(psi);
+            recStdin = recProc.StandardInput;
+        }
+        catch (Exception ex)
+        {
+            return "{\"ok\":false,\"error\":\"ffmpeg start failed: " + JsonEscape(ex.Message) + "\"}";
+        }
+        recording = true;
+        recStart = DateTime.Now;
+        recThread = new Thread(new ThreadStart(RecordLoop));
+        recThread.IsBackground = true;
+        recThread.Start();
+        Log("record start: " + recRect.ToString() + " fps=" + fps);
+        return "{\"ok\":true,\"file\":\"" + JsonEscape(recPath) + "\",\"fps\":" + fps + "}";
+    }
+
+    static void RecordLoop()
+    {
+        int bw = recRect.Width, bh = recRect.Height;
+        using (Bitmap frame = new Bitmap(bw, bh, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+        {
+            byte[] row = new byte[bw * 4];
+            while (recording)
+            {
+                try
+                {
+                    using (Graphics g = Graphics.FromImage(frame))
+                        g.CopyFromScreen(recRect.X, recRect.Y, 0, 0, recRect.Size);
+                    var bd = frame.LockBits(new Rectangle(0, 0, bw, bh), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    try
+                    {
+                        IntPtr ptr = bd.Scan0;
+                        for (int y = 0; y < bh; y++)
+                        {
+                            Marshal.Copy(new IntPtr(ptr.ToInt64() + y * bd.Stride), row, 0, row.Length);
+                            recStdin.BaseStream.Write(row, 0, row.Length);
+                            recStdin.BaseStream.Flush();
+                        }
+                    }
+                    finally { frame.UnlockBits(bd); }
+                }
+                catch (Exception ex) { Log("record frame err: " + ex.Message); break; }
+                Thread.Sleep(1000 / recFps);
+            }
+        }
+        try { recStdin.BaseStream.Flush(); recStdin.BaseStream.Close(); } catch { }
+    }
+
+    static string RecordStop()
+    {
+        if (!recording) return "{\"ok\":false,\"error\":\"not recording\"}";
+        recording = false;
+        if (recThread != null) recThread.Join(4000);
+        try { recStdin.BaseStream.Close(); } catch { }
+        bool exited = recProc.WaitForExit(15000);
+        if (!exited) { try { recProc.Kill(); } catch { } }
+        long bytes = 0;
+        double dur = (DateTime.Now - recStart).TotalSeconds;
+        try { var fi = new System.IO.FileInfo(recPath); bytes = fi.Length; } catch { }
+        Log("record stop: " + recPath + " " + bytes + "B " + (int)dur + "s");
+        recProc.Dispose(); recProc = null; recStdin = null; recThread = null;
+        return "{\"ok\":true,\"file\":\"" + JsonEscape(recPath) + "\",\"bytes\":" + bytes + ",\"durationSec\":" + (int)dur + "}";
+    }
+
+    static string RecordStatus()
+    {
+        if (!recording) return "{\"ok\":true,\"recording\":false}";
+        return "{\"ok\":true,\"recording\":true,\"file\":\"" + JsonEscape(recPath) + "\",\"elapsedSec\":" + (int)(DateTime.Now - recStart).TotalSeconds + ",\"fps\":" + recFps + "}";
+    }
+
+    // ==================== UIA 批量读值 ====================
+    static string UiReadAll(Dictionary<string, string> q)
+    {
+        try
+        {
+            string hwndStr = UiResolveHwnd(q);
+            if (hwndStr == null) return "{\"ok\":false,\"error\":\"window not found\"}";
+            IntPtr h = new IntPtr(long.Parse(hwndStr));
+            var root = System.Windows.Automation.AutomationElement.FromHandle(h);
+            int max = 300;
+            if (q.ContainsKey("max")) { int v; if (int.TryParse(q["max"], out v) && v > 0 && v < 2000) max = v; }
+            var all = root.FindAll(System.Windows.Automation.TreeScope.Descendants, System.Windows.Automation.Condition.TrueCondition);
+            var items = new List<string>();
+            int n = Math.Min(all.Count, max);
+            for (int i = 0; i < n; i++)
+            {
+                var e = all[i];
+                string name = ""; string val = ""; string ctl = "";
+                bool en = true;
+                try { name = e.Current.Name ?? ""; } catch { }
+                try { ctl = e.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); } catch { }
+                try { en = e.Current.IsEnabled; } catch { }
+                try
+                {
+                    object pat;
+                    if (e.TryGetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern, out pat))
+                        val = ((System.Windows.Automation.ValuePattern)pat).Current.Value ?? "";
+                }
+                catch { }
+                if (name.Length > 200) name = name.Substring(0, 200);
+                if (val.Length > 1000) val = val.Substring(0, 1000);
+                items.Add("{\"i\":" + i + ",\"type\":\"" + JsonEscape(ctl) + "\",\"name\":\"" + JsonEscape(name) + "\",\"value\":\"" + JsonEscape(val) + "\",\"enabled\":" + (en ? "true" : "false") + "}");
+            }
+            return "{\"ok\":true,\"hwnd\":" + h.ToInt64() + ",\"count\":" + n + (all.Count > n ? ",\"truncated\":true" : "") + ",\"elements\":[" + string.Join(",", items.ToArray()) + "]}";
+        }
+        catch (Exception ex)
+        {
+            return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}";
+        }
+    }
+
+    // ==================== 按需提权 (UAC 由用户确认, 不静默) ====================
+    static string AppRunAs(string path, string args)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(path, args == null ? "" : args);
+            psi.UseShellExecute = true;
+            psi.Verb = "runas";
+            System.Diagnostics.Process.Start(psi);
+            Log("[runas] " + path + " " + args);
+            return "{\"ok\":true,\"note\":\"elevated (user confirmed UAC)\"}";
+        }
+        catch (System.ComponentModel.Win32Exception wex)
+        {
+            return "{\"ok\":false,\"error\":\"user cancelled or denied UAC (code \" + wex.ErrorCode + \")\"}";
+        }
+        catch (Exception ex)
+        {
+            return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}";
+        }
+    }
+
 }

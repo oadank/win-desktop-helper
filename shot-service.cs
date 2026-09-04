@@ -921,7 +921,7 @@ public partial class ShotService
                 q[key] = val;
             }
 
-            bool needUserSession = path.StartsWith("/mouse") || path.StartsWith("/keyboard") || path == "/shot" || path.StartsWith("/app") || path == "/open-repo";
+            bool needUserSession = path.StartsWith("/mouse") || path.StartsWith("/keyboard") || path == "/shot" || path.StartsWith("/app") || path == "/open-repo" || path.StartsWith("/record") || path.StartsWith("/ui") || path.StartsWith("/win");
             bool control = path.StartsWith("/mouse") || path.StartsWith("/keyboard");
             int code = 200;
             string body = "";
@@ -1190,6 +1190,21 @@ public partial class ShotService
                 else if (path == "/ui/click") { body = UiClick(q); Log("[ui] click " + target); }
                 else if (path == "/ui/set") { body = UiSet(q); Log("[ui] set " + target); }
                 else if (path == "/ui/read") { body = UiRead(q); Log("[ui] read " + target); }
+                else if (path == "/ui/readall") { body = UiReadAll(q); Log("[ui] readall " + target); }
+                else if (path == "/record/start")
+                {
+                    int rx = 0, ry = 0, rw = 0, rh = 0, rf = 10;
+                    TryInt(q, "x", out rx); TryInt(q, "y", out ry); TryInt(q, "w", out rw); TryInt(q, "h", out rh); TryInt(q, "fps", out rf);
+                    body = RecordStart(rx, ry, rw, rh, rf); // RecordStart 内部: w/h<=0 用全屏, fps 越界用默认
+                    Log("[rec] start " + target);
+                }
+                else if (path == "/record/stop") { body = RecordStop(); Log("[rec] stop"); }
+                else if (path == "/record/status") { body = RecordStatus(); }
+                else if (path == "/app/runas")
+                {
+                    if (!q.ContainsKey("path")) { code = 400; body = "{\"ok\":false,\"error\":\"need path (UAC 由用户确认)\"}"; }
+                    else { body = AppRunAs(q["path"], q.ContainsKey("args") ? q["args"] : ""); Log("[runas] " + q["path"]); }
+                }
                 else { code = 404; body = "{\"ok\":false,\"error\":\"not found\"}"; }
             }
             catch (Exception ex) { code = 500; body = "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; Log("handler err: " + ex.Message); }
@@ -1891,6 +1906,23 @@ public partial class ShotService
                     foreach (var kv in new[] { "title", "hwnd", "i" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
                     return McpText(UiRead(q2), false);
                 }
+                case "ui_readall":
+                {
+                    Dictionary<string, string> q2 = new Dictionary<string, string>();
+                    foreach (var kv in new[] { "title", "hwnd", "max" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    return McpText(UiReadAll(q2), false);
+                }
+                case "record_start":
+                {
+                    int rx = 0, ry = 0, rw = 0, rh = 0, rf = 10;
+                    int.TryParse(McpParam(a, "x"), out rx); int.TryParse(McpParam(a, "y"), out ry);
+                    int.TryParse(McpParam(a, "w"), out rw); int.TryParse(McpParam(a, "h"), out rh);
+                    int.TryParse(McpParam(a, "fps"), out rf);
+                    return McpText(RecordStart(rx, ry, rw, rh, rf), false);
+                }
+                case "record_stop": return McpText(RecordStop(), false);
+                case "record_status": return McpText(RecordStatus(), false);
+                case "app_runas": return McpText(AppRunAs(McpParam(a, "path"), McpParam(a, "args")), false);
                 default: return McpText("unknown tool: " + name, true);
             }
         }
@@ -1919,7 +1951,11 @@ public partial class ShotService
             "{\"name\":\"mouse_pos\",\"description\":\"查当前鼠标光标物理像素坐标\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}," +
             "{\"name\":\"keyboard_hold\",\"description\":\"按住组合键ms毫秒再松开(如按住win拖窗口)。keys格式同keyboard_press\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"},\"ms\":{\"type\":\"number\"}},\"required\":[\"keys\"]}," +
             "{\"name\":\"clipboard_set\",\"description\":\"写文本到剪贴板(替代手动复制)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}," +
-            "{\"name\":\"ui_tree\",\"description\":\"【语义操作核心】枚举窗口内UI Automation元素(按钮/输入框/菜单): 每项含 i(索引用于ui_click/ui_set/ui_read)、type、name、enabled、rect、patterns。先activate窗口再列元素。max=最大元素数(默认400)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"max\":{\"type\":\"number\"}}}," +
+            "{\"name\":\"ui_readall\",\"description\":\"批量读整棵元素树的 Name/Value(输入框内容)/类型 — 找输入框里的值/页面文本时用这个, 比 ui_read 逐个快。title=窗口标题, max=上限(默认300)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"max\":{\"type\":\"number\"}}}," +
+            "{\"name\":\"record_start\",\"description\":\"开始录屏(抓屏管道喂ffmpeg出MP4 h264)。x,y,w,h=区域(默认全屏), fps=帧率(默认10,上限30)。无音频。用 record_stop 结束\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"fps\":{\"type\":\"number\"}}}}," +
+            "{\"name\":\"record_stop\",\"description\":\"停止录屏, 返回 MP4 文件路径\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
+            "{\"name\":\"record_status\",\"description\":\"查录屏状态(是否在录/已录秒数/文件)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
+            "{\"name\":\"app_runas\",\"description\":\"以管理员运行程序(触发UAC, 用户点确认才执行; AI无法静默提权)。path=程序, args=参数\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"path\"]}}," +
             "{\"name\":\"ui_click\",\"description\":\"按ui_tree索引语义点击元素(Invoke/Toggle/Expand/Select优先,无模式退坐标中心)。title=窗口标题,i=元素索引\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"}},\"required\":[\"i\"]}," +
             "{\"name\":\"ui_set\",\"description\":\"按索引直接写输入框值(ValuePattern,不走键盘输入法)。title=窗口标题,i=索引,value=文本\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"},\"value\":{\"type\":\"string\"}},\"required\":[\"i\",\"value\"]}," +
             "{\"name\":\"ui_read\",\"description\":\"按索引读元素Name/Value/类名/类型(比OCR准)。title=窗口标题,i=索引\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"}},\"required\":[\"i\"]}," +
@@ -1965,6 +2001,21 @@ public partial class ShotService
             catch (Exception ex) { MessageBox.Show("检查失败: " + ex.Message, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         });
         mTools.DropDownItems.Add("打开日志", null, delegate { try { if (File.Exists(LogPath)) Process.Start("notepad.exe", "\"" + LogPath + "\""); } catch { } });
+        mTools.DropDownItems.Add("以管理员重启", null, delegate
+        {
+            try
+            {
+                // UAC 由用户确认; 确认后退出当前实例, 新实例以管理员拉起 (iss [Run] 的自启仍是普通权限)
+                string exe = Process.GetCurrentProcess().MainModule.FileName;
+                var psi = new ProcessStartInfo(exe); psi.UseShellExecute = true; psi.Verb = "runas";
+                Process.Start(psi);
+                Log("elevate restart requested");
+                Thread.Sleep(800);
+                Environment.Exit(0);
+            }
+            catch (System.ComponentModel.Win32Exception) { TrayNotify("已取消", "未提升管理员权限, 服务保持普通权限运行"); }
+            catch (Exception ex) { Log("elevate restart err: " + ex.Message); TrayNotify("重启失败", ex.Message); }
+        });
         mTools.DropDownItems.Add("复制 MCP 接入配置", null, delegate
         {
             try
