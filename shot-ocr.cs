@@ -122,39 +122,72 @@ partial class ShotService
         return -1;
     }
 
-    // 轻量配置读取: shot-service.json 同目录; 支持 "a.b.c" 点嵌套; 无文件/缺字段返回 def
+    // 取 "key": 之后值的完整文本。对象/数组 → 配对花括号的完整子串 (含边界, 供下一层继续解析);
+    // 字符串 → 含引号; 标量 → 到逗号/右括号/行尾。
+    // ⚠️ 旧版把对象值切到第一个逗号/换行 → 多行格式下嵌套节只切出 "{" → 后续键全部找不到
+    //    (P0-3 "设置保存失效/读不回"的真根因; 曾被用户的单行手写 json 掩盖)
+    static string JsonValueAt(string json, int valStart)
+    {
+        int i = valStart;
+        while (i < json.Length && (json[i] == ' ' || json[i] == '\t' || json[i] == '\r' || json[i] == '\n')) i++;
+        if (i >= json.Length) return "";
+        if (json[i] == '{' || json[i] == '[')
+        {
+            char open = json[i], close = open == '{' ? '}' : ']';
+            int depth = 0; bool inStr = false;
+            for (int j = i; j < json.Length; j++)
+            {
+                char c = json[j];
+                if (inStr) { if (c == '\\') j++; else if (c == '"') inStr = false; }
+                else if (c == '"') inStr = true;
+                else if (c == open) depth++;
+                else if (c == close) { depth--; if (depth == 0) return json.Substring(i, j - i + 1); }
+            }
+            return json.Substring(i); // 未闭合, 尽力而为
+        }
+        if (json[i] == '"')
+        {
+            for (int j = i + 1; j < json.Length; j++)
+            {
+                if (json[j] == '\\') { j++; continue; }
+                if (json[j] == '"') return json.Substring(i, j - i + 1);
+            }
+            return json.Substring(i);
+        }
+        int k = i;
+        while (k < json.Length && json[k] != ',' && json[k] != '}' && json[k] != ']' && json[k] != '\n' && json[k] != '\r') k++;
+        return json.Substring(i, k - i).Trim();
+    }
+
+    static string UnquoteJson(string s)
+    {
+        if (s.Length < 2 || s[0] != '"' || s[s.Length - 1] != '"') return s;
+        StringBuilder sb = new StringBuilder(s.Length);
+        for (int i = 1; i < s.Length - 1; i++)
+        {
+            char c = s[i];
+            if (c == '\\' && i + 1 < s.Length - 1) sb.Append(UnescapeJson(s[++i]));
+            else sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    // 轻量配置读取: shot-service.json 同目录; 支持 "a.b.c" 点嵌套(逐层取对象子串); 无文件/缺字段返回 def
     static string Cfg(string key, string def)
     {
         try
         {
             string path = ConfigPath();
             if (!File.Exists(path)) return def;
-            string txt = File.ReadAllText(path);
+            string cur = File.ReadAllText(path);
             string[] parts = key.Split('.');
-            string cur = txt;
-            foreach (var p in parts)
+            for (int pi = 0; pi < parts.Length; pi++)
             {
-                int i = FindJsonKey(cur, p, 0);
-                if (i < 0) return def;
-                while (i < cur.Length && (cur[i] == ' ' || cur[i] == '\t')) i++;
-                int j = i;
-                if (j >= cur.Length) return def;
-                if (cur[j] == '"')
-                {
-                    j++;
-                    StringBuilder sb = new StringBuilder();
-                    while (j < cur.Length)
-                    {
-                        char c = cur[j++];
-                        if (c == '\\') { if (j < cur.Length) sb.Append(UnescapeJson(cur[j++])); }
-                        else if (c == '"') break;
-                        else sb.Append(c);
-                    }
-                    cur = sb.ToString();
-                }
-                else { while (j < cur.Length && cur[j] != ',' && cur[j] != '}' && cur[j] != '\n') j++; cur = cur.Substring(i, j - i).Trim().Trim('"'); }
+                int val = FindJsonKey(cur, parts[pi], 0);
+                if (val < 0) return def;
+                cur = JsonValueAt(cur, val); // 末层=值全文(字符串含引号); 中间层=对象子串
             }
-            return cur;
+            return UnquoteJson(cur);
         }
         catch (Exception ex) { Log("cfg err: " + ex.Message); return def; }
     }

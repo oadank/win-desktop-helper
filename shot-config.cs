@@ -8,6 +8,7 @@ using System.Windows.Forms;
 
 // M3: 设置/登录入口 (让用户自助填 OCR/翻译配置, 存 shot-service.json 热生效)
 // 与 shot-service.cs 同属 ShotService 类(partial), 共享 Cfg/Log/TrayIcon
+// UI 深色主题 (与剪贴板历史窗一致); 密钥留空=保留原值 (防止"读显示空→保存→清掉真值"恶性循环)
 partial class ShotService
 {
     // 配置文件路径: 读写统一走这里, 设置窗显示给用户 — 杜绝"写进哪个文件都不知道"
@@ -73,81 +74,160 @@ partial class ShotService
         return b.ToString();
     }
 
-    // 设置/配置窗 (托盘菜单"设置..."触发; UI 线程 STA, ShowDialog 安全)
-    // 翻译引擎下拉动态切换: local -> 本地 LLM 配置; baidu -> 百度 appid/密钥
-    // 含: 测试按钮(按当前面板值实测连通性) / 密钥掩码+显示切换 / 配置文件路径可见+一键打开
+    // ---- 设置窗 (深色, 自绘标题栏可拖动; 托盘菜单"设置..."触发) ----
     static void ShowSettingsForm()
     {
         string cfgPath = ConfigPath();
         var d = LoadCfgDict();
-        Form f = new Form();
-        f.Text = "Win Desktop Helper 设置";
-        f.FormBorderStyle = FormBorderStyle.FixedDialog;
-        f.StartPosition = FormStartPosition.CenterScreen;
-        f.Width = 500; f.Height = 500;
-        f.MaximizeBox = false; f.MinimizeBox = false;
+        string loadedBaiduKey = d["translate.baiduKey"]; // 留空保护基准: UI 清空不回写覆盖
+        string loadedApiKey = d["translate.apiKey"];
 
-        int y = 16;
-        Label l1 = new Label(); l1.Text = "翻译引擎:"; l1.Left = 16; l1.Top = y; l1.Width = 90; f.Controls.Add(l1);
-        ComboBox prov = new ComboBox(); prov.Left = 112; prov.Top = y; prov.Width = 320; prov.DropDownStyle = ComboBoxStyle.DropDownList;
-        prov.Items.AddRange(new object[] { "local (本机 LLM 零花费)", "baidu (百度翻译)" });
+        Color cBg = Color.FromArgb(35, 36, 40), cPanel = Color.FromArgb(28, 29, 33), cField = Color.FromArgb(22, 23, 27),
+              cText = Color.FromArgb(225, 228, 232), cDim = Color.FromArgb(130, 136, 146),
+              cBtn = Color.FromArgb(52, 54, 62), cAccent = Color.FromArgb(64, 108, 190);
+
+        Form f = new Form();
+        f.Text = "设置";
+        f.FormBorderStyle = FormBorderStyle.None;
+        f.StartPosition = FormStartPosition.CenterScreen;
+        f.Size = new Size(500, 446);
+        f.TopMost = true;
+        f.BackColor = cBg;
+        f.KeyPreview = true;
+
+        // ---- 自绘标题栏: 标题 + 可拖动 + × ----
+        Panel title = new Panel(); title.Dock = DockStyle.Top; title.Height = 38; title.BackColor = Color.FromArgb(22, 23, 26);
+        Label tl = new Label(); tl.Text = "  设置 — 翻译 / OCR"; tl.ForeColor = cText; tl.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold);
+        tl.AutoSize = false; tl.Dock = DockStyle.Fill; tl.TextAlign = ContentAlignment.MiddleLeft;
+        Button bx = new Button(); bx.Text = "×"; bx.FlatStyle = FlatStyle.Flat; bx.FlatAppearance.BorderSize = 0;
+        bx.BackColor = Color.Transparent; bx.ForeColor = cText; bx.Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
+        bx.Size = new Size(38, 38); bx.Dock = DockStyle.Right;
+        bx.Click += (s, e) => { f.DialogResult = DialogResult.Cancel; f.Close(); };
+        title.Controls.Add(tl); title.Controls.Add(bx);
+        MouseEventHandler dragH = (s, e) => { if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(f.Handle, 0xA1, (IntPtr)2, IntPtr.Zero); } };
+        title.MouseDown += dragH; tl.MouseDown += dragH;
+        f.Controls.Add(title);
+
+        int LX = 24, FX = 140, FW = 336; // 标签左缘 / 字段左缘 / 字段宽
+
+        // 深色控件工厂
+        Func<string, int, int, Label> mkLabel = (text, x, y) =>
+        {
+            Label l = new Label(); l.Text = text; l.Left = x; l.Top = y; l.AutoSize = true;
+            l.ForeColor = cText; l.Font = new Font("Microsoft YaHei UI", 9.5f); f.Controls.Add(l); return l;
+        };
+        Func<TextBox> mkText = () =>
+        {
+            TextBox t = new TextBox(); t.BackColor = cField; t.ForeColor = cText; t.BorderStyle = BorderStyle.FixedSingle;
+            t.Font = new Font("Microsoft YaHei UI", 9.5f); f.Controls.Add(t); return t;
+        };
+        Func<Button> mkBtn = () =>
+        {
+            Button b = new Button(); b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderSize = 0;
+            b.BackColor = cBtn; b.ForeColor = cText; b.Font = new Font("Microsoft YaHei UI", 9.5f);
+            b.Cursor = Cursors.Hand; f.Controls.Add(b); return b;
+        };
+
+        mkLabel("翻译引擎:", LX, 52);
+        ComboBox prov = new ComboBox(); prov.Left = FX; prov.Top = 49; prov.Width = FW; prov.DropDownStyle = ComboBoxStyle.DropDownList;
+        prov.FlatStyle = FlatStyle.Flat; prov.BackColor = cField; prov.ForeColor = cText;
+        prov.Font = new Font("Microsoft YaHei UI", 9.5f);
+        prov.Items.AddRange(new object[] { "local   本机 LLM · 零花费", "baidu   百度翻译 · 需 APP ID + 密钥" });
+        prov.DrawMode = DrawMode.OwnerDrawFixed; prov.ItemHeight = 22;
+        prov.DrawItem += (s, e) =>
+        {
+            e.DrawBackground();
+            bool sel2 = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            using (SolidBrush b = new SolidBrush(sel2 ? cAccent : cField)) e.Graphics.FillRectangle(b, e.Bounds);
+            if (e.Index >= 0)
+                TextRenderer.DrawText(e.Graphics, prov.Items[e.Index].ToString(), prov.Font, e.Bounds, cText, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+        };
         prov.SelectedIndex = (d["translate.provider"] == "baidu") ? 1 : 0;
         f.Controls.Add(prov);
-        y += 36;
 
-        Label l2 = new Label(); l2.Text = "目标语言:"; l2.Left = 16; l2.Top = y; l2.Width = 90; f.Controls.Add(l2);
-        TextBox to = new TextBox(); to.Left = 112; to.Top = y; to.Width = 120; to.Text = d["translate.to"]; f.Controls.Add(to);
-        y += 40;
+        mkLabel("目标语言:", LX, 90);
+        TextBox to = mkText(); to.Left = FX; to.Top = 87; to.Width = 120; to.Text = d["translate.to"];
 
-        // ---- 本地 LLM 面板 ----
-        Panel pLocal = new Panel(); pLocal.Left = 16; pLocal.Top = y; pLocal.Width = 450; pLocal.Height = 150; pLocal.BorderStyle = BorderStyle.FixedSingle; f.Controls.Add(pLocal);
-        Label lL = new Label(); lL.Text = "【本地 LLM】"; lL.Left = 8; lL.Top = 6; lL.Width = 120; lL.Font = new Font(lL.Font, FontStyle.Bold); pLocal.Controls.Add(lL);
-        Label lEp = new Label(); lEp.Text = "地址(endpoint):"; lEp.Left = 8; lEp.Top = 32; lEp.Width = 110; pLocal.Controls.Add(lEp);
-        TextBox ep = new TextBox(); ep.Left = 124; ep.Top = 29; ep.Width = 310; ep.Text = d["translate.endpoint"]; pLocal.Controls.Add(ep);
-        Label lMd = new Label(); lMd.Text = "模型名:"; lMd.Left = 8; lMd.Top = 68; lMd.Width = 110; pLocal.Controls.Add(lMd);
-        TextBox model = new TextBox(); model.Left = 124; model.Top = 65; model.Width = 310; model.Text = d["translate.model"]; pLocal.Controls.Add(model);
-        Label lAk = new Label(); lAk.Text = "API Key(选填):"; lAk.Left = 8; lAk.Top = 104; lAk.Width = 110; pLocal.Controls.Add(lAk);
-        TextBox lak = new TextBox(); lak.Left = 124; lak.Top = 101; lak.Width = 310; lak.PasswordChar = '*'; lak.Text = d["translate.apiKey"]; pLocal.Controls.Add(lak); // 掩码: 不明文显示
-
-        // ---- 百度面板 ----
-        Panel pBaidu = new Panel(); pBaidu.Left = 16; pBaidu.Top = y; pBaidu.Width = 450; pBaidu.Height = 150; pBaidu.BorderStyle = BorderStyle.FixedSingle; f.Controls.Add(pBaidu);
-        Label lB = new Label(); lB.Text = "【百度翻译】"; lB.Left = 8; lB.Top = 6; lB.Width = 120; lB.Font = new Font(lB.Font, FontStyle.Bold); pBaidu.Controls.Add(lB);
-        Label l3 = new Label(); l3.Text = "APP ID:"; l3.Left = 8; l3.Top = 40; l3.Width = 90; pBaidu.Controls.Add(l3);
-        TextBox appid = new TextBox(); appid.Left = 104; appid.Top = 37; appid.Width = 330; appid.Text = d["translate.baiduAppId"]; pBaidu.Controls.Add(appid);
-        Label l4 = new Label(); l4.Text = "密钥 Key:"; l4.Left = 8; l4.Top = 82; l4.Width = 90; pBaidu.Controls.Add(l4);
-        TextBox key = new TextBox(); key.Left = 104; key.Top = 79; key.Width = 330; key.PasswordChar = '*'; key.Text = d["translate.baiduKey"]; pBaidu.Controls.Add(key); // 已填也只显 ***
-        Label lBtip = new Label(); lBtip.Text = "（只需 APP ID + 密钥，标准 API 无需第三个参数）"; lBtip.Left = 104; lBtip.Top = 112; lBtip.Width = 330; lBtip.ForeColor = Color.Gray; pBaidu.Controls.Add(lBtip);
-
-        // 动态切换
-        prov.SelectedIndexChanged += (s, e) =>
+        // ---- 面板: 本地 LLM ----
+        Panel pLocal = new Panel(); pLocal.Left = LX; pLocal.Top = 126; pLocal.Size = new Size(452, 150);
+        pLocal.BackColor = cPanel; f.Controls.Add(pLocal);
+        Func<Panel, string, int, int, Label> mkPLabel = (p, text, x, y) =>
         {
-            bool baidu = prov.SelectedIndex == 1;
-            pBaidu.Visible = baidu;
-            pLocal.Visible = !baidu;
+            Label l = new Label(); l.Text = text; l.Left = x; l.Top = y; l.AutoSize = true;
+            l.ForeColor = cDim; l.Font = new Font("Microsoft YaHei UI", 9f); p.Controls.Add(l); return l;
         };
-        { bool baidu = prov.SelectedIndex == 1; pBaidu.Visible = baidu; pLocal.Visible = !baidu; }
+        Func<Panel, TextBox> mkPText = (p) =>
+        {
+            TextBox t = new TextBox(); t.BackColor = cField; t.ForeColor = cText; t.BorderStyle = BorderStyle.FixedSingle;
+            t.Font = new Font("Microsoft YaHei UI", 9.5f); p.Controls.Add(t); return t;
+        };
+        Label llt = new Label(); llt.Text = "本地 LLM (Ollama)"; llt.Left = 12; llt.Top = 10; llt.AutoSize = true;
+        llt.ForeColor = cText; llt.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold); pLocal.Controls.Add(llt);
+        mkPLabel(pLocal, "地址 endpoint:", 12, 42);
+        TextBox ep = mkPText(pLocal); ep.Left = 130; ep.Top = 39; ep.Width = 306; ep.Text = d["translate.endpoint"];
+        mkPLabel(pLocal, "模型名:", 12, 74);
+        TextBox model = mkPText(pLocal); model.Left = 130; model.Top = 71; model.Width = 306; model.Text = d["translate.model"];
+        mkPLabel(pLocal, "API Key (选填):", 12, 106);
+        TextBox lak = mkPText(pLocal); lak.Left = 130; lak.Top = 103; lak.Width = 306; lak.PasswordChar = '*'; lak.Text = d["translate.apiKey"];
 
-        y += 162;
-        // 测试按钮: 按当前面板填的值实测一次翻译, 不依赖是否已保存 (P1-4)
-        Button test = new Button(); test.Text = "测试"; test.Left = 112; test.Top = y; test.Width = 80; f.Controls.Add(test);
-        Button save = new Button(); save.Text = "保存"; save.Left = 304; save.Top = y; save.Width = 80; save.DialogResult = DialogResult.OK; f.Controls.Add(save);
-        Button cancel = new Button(); cancel.Text = "取消"; cancel.Left = 392; cancel.Top = y; cancel.Width = 80; cancel.DialogResult = DialogResult.Cancel; f.Controls.Add(cancel);
-        f.AcceptButton = save; f.CancelButton = cancel;
+        // ---- 面板: 百度 ----
+        Panel pBaidu = new Panel(); pBaidu.Left = LX; pBaidu.Top = 126; pBaidu.Size = new Size(452, 150);
+        pBaidu.BackColor = cPanel; f.Controls.Add(pBaidu);
+        Label lbt = new Label(); lbt.Text = "百度翻译"; lbt.Left = 12; lbt.Top = 10; lbt.AutoSize = true;
+        lbt.ForeColor = cText; lbt.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold); pBaidu.Controls.Add(lbt);
+        mkPLabel(pBaidu, "APP ID:", 12, 46);
+        TextBox appid = mkPText(pBaidu); appid.Left = 130; appid.Top = 43; appid.Width = 306; appid.Text = d["translate.baiduAppId"];
+        mkPLabel(pBaidu, "密钥 Key:", 12, 82);
+        TextBox key = mkPText(pBaidu); key.Left = 130; key.Top = 79; key.Width = 306; key.PasswordChar = '*'; key.Text = d["translate.baiduKey"];
+        Label ltip = new Label(); ltip.Text = "标准 API 只需 APP ID + 密钥；密钥留空保存 = 不修改已存的密钥"; ltip.Left = 12; ltip.Top = 118;
+        ltip.AutoSize = true; ltip.ForeColor = cDim; ltip.Font = new Font("Microsoft YaHei UI", 8.5f); pBaidu.Controls.Add(ltip);
 
-        // 显示/隐藏密钥 (默认掩码, 需要核对时勾选明文)
-        CheckBox chkShow = new CheckBox(); chkShow.Text = "显示密钥"; chkShow.Left = 220; chkShow.Top = y + 4; chkShow.Width = 90; chkShow.AutoSize = false; f.Controls.Add(chkShow);
-        chkShow.CheckedChanged += (s, e) => { key.PasswordChar = chkShow.Checked ? '\0' : '*'; lak.PasswordChar = chkShow.Checked ? '\0' : '*'; };
+        // 引擎切换
+        prov.SelectedIndexChanged += (s, e) => { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; };
+        { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; }
 
+        // ---- 操作行 ----
+        CheckBox chkShow = new CheckBox(); chkShow.Text = "显示密钥"; chkShow.Left = FX; chkShow.Top = 288; chkShow.AutoSize = true;
+        chkShow.ForeColor = cDim; chkShow.Font = new Font("Microsoft YaHei UI", 9f); f.Controls.Add(chkShow);
+        chkShow.CheckedChanged += (s, e) => { char pc = chkShow.Checked ? '\0' : '*'; key.PasswordChar = pc; lak.PasswordChar = pc; };
+
+        Button test = mkBtn(); test.Text = "测试连通"; test.SetBounds(FX, 322, 100, 32);
+        Button save = mkBtn(); save.Text = "保存"; save.BackColor = cAccent; save.SetBounds(FX + FW - 96, 322, 96, 32);
+        Button cancel = mkBtn(); cancel.Text = "取消"; cancel.SetBounds(FX + FW - 200, 322, 96, 32);
+        save.Click += (s, e) => { f.DialogResult = DialogResult.OK; f.Close(); };
+        cancel.Click += (s, e) => { f.DialogResult = DialogResult.Cancel; f.Close(); };
+        f.AcceptButton = save;
+
+        // ---- 底部: 配置文件路径 + 打开 ----
+        Label pl = new Label(); pl.Text = "配置文件: " + cfgPath; pl.Left = LX; pl.Top = 368; pl.AutoSize = false;
+        pl.Size = new Size(340, 34); pl.ForeColor = cDim; pl.Font = new Font("Microsoft YaHei UI", 8.5f);
+        pl.AutoEllipsis = true; f.Controls.Add(pl);
+        Button openCfg = mkBtn(); openCfg.Text = "打开配置"; openCfg.SetBounds(FX + FW - 96, 364, 96, 30);
+        openCfg.Click += (s, e) =>
+        {
+            try
+            {
+                if (!File.Exists(cfgPath)) File.WriteAllText(cfgPath, "{\n}\n", Encoding.UTF8);
+                System.Diagnostics.Process.Start("notepad.exe", "\"" + cfgPath + "\"");
+            }
+            catch (Exception ex) { MessageBox.Show(f, "打开失败: " + ex.Message, "Win Desktop Helper"); }
+        };
+
+        // Esc = 取消
+        f.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { f.DialogResult = DialogResult.Cancel; f.Close(); } };
+
+        // ---- 测试连通: 按当前面板值实测一次翻译 (不依赖已保存) ----
         test.Click += (s, e) =>
         {
             bool isBaidu = prov.SelectedIndex == 1;
             string tAppid = appid.Text.Trim(), tKey = key.Text.Trim();
-            string tEp = ep.Text.Trim(), tModel = model.Text.Trim(), tAk = lak.Text.Trim();
-            string tTo = to.Text.Trim();
+            string tEp = ep.Text.Trim(), tModel = model.Text.Trim(), tAk = lak.Text.Trim(), tTo = to.Text.Trim();
             if (isBaidu && (tAppid.Length == 0 || tKey.Length == 0))
             {
-                MessageBox.Show(f, "请先填 APP ID 和密钥再测试", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                // 留空保护: 用已存密钥测
+                if (tAppid.Length == 0 && loadedBaiduKey.Length == 0)
+                { MessageBox.Show(f, "请先填 APP ID 和密钥", "翻译测试"); return; }
+                if (tKey.Length == 0) tKey = loadedBaiduKey;
             }
             test.Enabled = false; test.Text = "测试中...";
             Task.Run(() =>
@@ -166,32 +246,15 @@ partial class ShotService
                 {
                     f.BeginInvoke(new MethodInvoker(() =>
                     {
-                        test.Enabled = true; test.Text = "测试";
+                        test.Enabled = true; test.Text = "测试连通";
                         if (errMsg != null)
                             MessageBox.Show(f, "❌ 测试失败:\n" + errMsg, "翻译测试 (" + (isBaidu ? "baidu" : "local") + ")", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         else
                             MessageBox.Show(f, "✅ 测试成功, 译文: " + okMsg, "翻译测试 (" + (isBaidu ? "baidu" : "local") + ")", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }));
                 }
-                catch { } // 窗口已关, 丢弃结果
+                catch { }
             });
-        };
-
-        // 底部: 配置文件实际路径 + 一键打开 (读写到哪、内容是什么, 用户直接可见 — 排障闭环)
-        Label pathLabel = new Label();
-        pathLabel.Text = "配置文件: " + cfgPath;
-        pathLabel.Left = 16; pathLabel.Top = y + 40; pathLabel.Width = 350;
-        pathLabel.ForeColor = Color.Gray; pathLabel.Font = new Font(pathLabel.Font.FontFamily, 8f);
- pathLabel.AutoEllipsis = true; f.Controls.Add(pathLabel);
-        Button openCfg = new Button(); openCfg.Text = "打开配置"; openCfg.Left = 392; openCfg.Top = y + 34; openCfg.Width = 80; openCfg.Height = 24; f.Controls.Add(openCfg);
-        openCfg.Click += (s, e) =>
-        {
-            try
-            {
-                if (!File.Exists(cfgPath)) File.WriteAllText(cfgPath, "{\n}\n", Encoding.UTF8);
-                System.Diagnostics.Process.Start("notepad.exe", "\"" + cfgPath + "\"");
-            }
-            catch (Exception ex) { MessageBox.Show(f, "打开失败: " + ex.Message, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         };
 
         if (f.ShowDialog() == DialogResult.OK)
@@ -200,19 +263,19 @@ partial class ShotService
             d["translate.to"] = to.Text.Trim();
             d["translate.endpoint"] = ep.Text.Trim();
             d["translate.model"] = model.Text.Trim();
-            d["translate.apiKey"] = lak.Text.Trim();
+            // 密钥留空 = 保留文件原值 (防"显示空→保存→清掉真值"恶性循环)
+            d["translate.apiKey"] = lak.Text.Trim().Length > 0 ? lak.Text.Trim() : loadedApiKey;
             d["translate.baiduAppId"] = appid.Text.Trim();
-            d["translate.baiduKey"] = key.Text.Trim();
+            d["translate.baiduKey"] = key.Text.Trim().Length > 0 ? key.Text.Trim() : loadedBaiduKey;
             try
             {
                 SaveCfgDict(d);
-                TrayNotify("设置已保存",
-                    "provider=" + d["translate.provider"] + ", 写入 " + cfgPath + "，下次 OCR/翻译自动生效");
+                TrayNotify("设置已保存", "provider=" + d["translate.provider"] + "，已写入配置文件，OCR/翻译即时生效");
             }
             catch (Exception ex)
             {
                 Log("config SAVE FAILED: " + ex.Message);
-                MessageBox.Show("保存失败:\n" + ex.Message + "\n\n目标文件: " + cfgPath, "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("保存失败:\n" + ex.Message + "\n\n目标文件: " + cfgPath, "Win Desktop Helper");
             }
         }
     }

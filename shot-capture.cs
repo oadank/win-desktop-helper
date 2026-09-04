@@ -112,6 +112,7 @@ partial class ShotService
         bool hasSel = false;
         ToolStrip bar;           // 图标工具条 (松手后出现, 贴选区)
         readonly List<Annot> annots = new List<Annot>(); // 已提交标注 (屏坐标)
+        readonly List<Annot> redoStack = new List<Annot>(); // 撤销弹出的标注 (重做用, 新笔画清空)
         Annot cur;               // 正在绘制的标注
         string tool = null;      // 当前标注工具: rect/ellipse/arrow/pen/text/seq; null=未选
         int seqNext = 1;
@@ -122,15 +123,10 @@ partial class ShotService
         public CaptureOverlay(Bitmap preShot)
         {
             frozen = preShot;
-            // 一次性预合成暗化背景 (原亮度图 + 35% 暗层) — 拖动/显示期间系统只 blit 这张图
-            Bitmap dim = new Bitmap(frozen.Width, frozen.Height, PixelFormat.Format32bppArgb);
-            using (Graphics g = Graphics.FromImage(dim))
-            {
-                g.DrawImage(frozen, 0, 0, frozen.Width, frozen.Height);
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
-                    g.FillRectangle(b, 0, 0, dim.Width, dim.Height);
-            }
-            BackgroundImage = dim;
+            // 性能关键 (PixPin 同款"反向遮罩"): 背景直接用冻结原图 (框内=原亮度透出),
+            // 暗层在 OnPaint 里画成「选区外的 4 块纯色矩形」— 每帧零大图 DrawImage, 只填纯色。
+            // 旧做法(预合成暗化图 blit + 选区亮块 DrawImage)每帧两次大图采样, 实测拖动巨卡
+            BackgroundImage = frozen;
             BackgroundImageLayout = ImageLayout.None;
 
             FormBorderStyle = FormBorderStyle.None;
@@ -184,8 +180,7 @@ partial class ShotService
                 {
                     cur.No = seqNext++;
                     cur.Rect = new Rectangle(sp.X - 14, sp.Y - 14, 28, 28);
-                    annots.Add(cur);
-                    InvalidateAnnot(cur);
+                    PushAnnot(cur);
                     Log("capture: annot seq #" + cur.No);
                     cur = null; // 序号一笔即成
                 }
@@ -232,8 +227,8 @@ partial class ShotService
             }
             if (cur != null)
             {
-                if (cur.Kind == Annot.K_PEN) { if (cur.Pts.Count > 1) { annots.Add(cur); InvalidateAnnot(cur); } }
-                else if (cur.Rect.Width > 2 && cur.Rect.Height > 2) { annots.Add(cur); InvalidateAnnot(cur); }
+                if (cur.Kind == Annot.K_PEN) { if (cur.Pts.Count > 1) PushAnnot(cur); }
+                else if (cur.Rect.Width > 2 && cur.Rect.Height > 2) PushAnnot(cur);
                 cur = null;
             }
         }
@@ -278,26 +273,29 @@ partial class ShotService
             base.OnPaint(e);
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            if (hasSel)
+            if (!hasSel) { using (SolidBrush dim = new SolidBrush(Color.FromArgb(90, 0, 0, 0))) g.FillRectangle(dim, e.ClipRectangle); return; }
+            Rectangle d = RectangleToClient(sel); // 客户区坐标 = 冻结图坐标 (窗体原点=虚拟屏原点)
+            // 反向遮罩: 只填「选区外的 4 块纯色矩形」(纯色 alpha 填充, 无大图采样, 微秒级) — 框内原亮度由背景图透出
+            using (SolidBrush dim = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
             {
-                Rectangle d = RectangleToClient(sel); // 客户区坐标 = 冻结图坐标 (窗体原点=虚拟屏原点)
-                // 框内露出原亮度 (把暗层"挖亮": 局部重画冻结原图)
-                g.SetClip(d);
-                g.DrawImage(frozen, d, d, GraphicsUnit.Pixel);
-                DrawAnnots(g, Point.Empty); // 选区内标注 (客户区即冻结图坐标, 偏移0)
-                g.ResetClip();
-                using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
-                using (Font f = new Font("Consolas", 11))
-                using (Brush b = new SolidBrush(Color.Yellow))
-                using (Brush bg = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
-                {
-                    string size = sel.Width + " x " + sel.Height;
-                    SizeF ts = g.MeasureString(size, f);
-                    float tx = Math.Min(d.Right + 4, ClientSize.Width - ts.Width - 4);
-                    float ty = Math.Min(d.Bottom + 4, ClientSize.Height - ts.Height - 4);
-                    g.FillRectangle(bg, tx - 2, ty - 1, ts.Width + 4, ts.Height + 2);
-                    g.DrawString(size, f, b, tx, ty);
-                }
+                int W = ClientSize.Width, H = ClientSize.Height;
+                g.FillRectangle(dim, 0, 0, W, Math.Max(0, d.Top));                              // 上
+                g.FillRectangle(dim, 0, d.Bottom, W, Math.Max(0, H - d.Bottom));                // 下
+                g.FillRectangle(dim, 0, d.Top, Math.Max(0, d.Left), d.Height);                  // 左
+                g.FillRectangle(dim, d.Right, d.Top, Math.Max(0, W - d.Right), d.Height);       // 右
+            }
+            DrawAnnots(g, Point.Empty); // 选区内标注 (客户区即冻结图坐标, 偏移0)
+            using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
+            using (Font f = new Font("Consolas", 11))
+            using (Brush b = new SolidBrush(Color.Yellow))
+            using (Brush bg = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
+            {
+                string size = sel.Width + " x " + sel.Height;
+                SizeF ts = g.MeasureString(size, f);
+                float tx = Math.Min(d.Right + 4, ClientSize.Width - ts.Width - 4);
+                float ty = Math.Min(d.Bottom + 4, ClientSize.Height - ts.Height - 4);
+                g.FillRectangle(bg, tx - 2, ty - 1, ts.Width + 4, ts.Height + 2);
+                g.DrawString(size, f, b, tx, ty);
             }
         }
 
@@ -413,8 +411,7 @@ partial class ShotService
                 a.Kind = Annot.K_TEXT;
                 a.Text = t;
                 a.Rect = new Rectangle(pt, Size.Empty);
-                annots.Add(a);
-                InvalidateAnnot(a);
+                PushAnnot(a);
                 Log("capture: annot text (" + t.Length + " chars)");
             }
         }
@@ -429,7 +426,7 @@ partial class ShotService
             }
         }
 
-        // ---- 图标工具条 (照 PixPin: 深色圆角浮条 + 自绘图标 + hover 高亮 + tooltip + 分组分隔) ----
+        // ---- 图标工具条 (排版/分组照 PixPin: 标注 | 撤销重做 | OCR 翻译 贴图 保存 | ✓完成 ✕取消) ----
         void ShowBar()
         {
             if (bar != null) { PlaceBar(); bar.Visible = true; return; }
@@ -442,24 +439,28 @@ partial class ShotService
             bar.BackColor = Color.FromArgb(30, 31, 36);
             bar.Renderer = new DarkToolRenderer();
             bar.ShowItemToolTips = true;
-            bar.Padding = new Padding(6, 2, 6, 2);
+            bar.Padding = new Padding(8, 4, 8, 4);
 
-            // [标注组] 矩形/椭圆/箭头/画笔/文字/序号 | [撤销] | [OCR 翻译] | [保存 复制 另存 取消]
-            AddToolBtn(bar, "rect", "矩形", "矩形标注", true);
-            AddToolBtn(bar, "ellipse", "椭圆", "椭圆标注", true);
-            AddToolBtn(bar, "arrow", "箭头", "箭头标注", true);
+            // [标注组] 矩形/椭圆/箭头/画笔/文字/序号
+            AddToolBtn(bar, "rect", "矩形标注", "矩形标注", true);
+            AddToolBtn(bar, "ellipse", "椭圆标注", "椭圆标注", true);
+            AddToolBtn(bar, "arrow", "箭头标注", "箭头标注", true);
             AddToolBtn(bar, "pen", "画笔", "自由画笔", true);
-            AddToolBtn(bar, "text", "文字", "文字标注 (点击选区内位置输入, 回车落字)", true);
-            AddToolBtn(bar, "seq", "序号", "序号标记 (自动递增)", true);
-            bar.Items.Add(new ToolStripSeparator());
-            AddActBtn(bar, "undo", "撤销", delegate { ActUndo(); });
-            bar.Items.Add(new ToolStripSeparator());
-            AddActBtn(bar, "ocr", "OCR 识别", delegate { ActOcr(); });
+            AddToolBtn(bar, "text", "文字标注", "文字标注 (点击选区内位置输入, 回车落字)", true);
+            AddToolBtn(bar, "seq", "序号标记", "序号标记 (自动递增)", true);
+            bar.Items.Add(NewSep());
+            // [编辑组] 撤销/重做
+            AddActBtn(bar, "undo", "撤销 (Ctrl+Z)", delegate { ActUndo(); });
+            AddActBtn(bar, "redo", "重做 (Ctrl+Y)", delegate { ActRedo(); });
+            bar.Items.Add(NewSep());
+            // [功能组] OCR/翻译/贴图/保存
+            AddActBtn(bar, "ocr", "OCR 文字识别", delegate { ActOcr(); });
             AddActBtn(bar, "translate", "翻译", delegate { ActTranslate(); });
-            bar.Items.Add(new ToolStripSeparator());
-            AddActBtn(bar, "save", "保存", delegate { ActSave(); });
-            AddActBtn(bar, "copy", "复制", delegate { ActCopy(); });
-            AddActBtn(bar, "saveas", "另存", delegate { ActSaveAs(); });
+            AddActBtn(bar, "pin", "贴图 (钉到桌面)", delegate { ActPin(); });
+            AddActBtn(bar, "save", "保存到截图目录", delegate { ActSave(); });
+            bar.Items.Add(NewSep());
+            // [输出组] ✓复制并完成 / ✕取消
+            AddActBtn(bar, "ok", "复制并完成", delegate { ActCopy(); });
             AddActBtn(bar, "cancel", "取消 (Esc)", delegate { CancelAll(); });
 
             Controls.Add(bar);
@@ -468,7 +469,13 @@ partial class ShotService
             Log("capture: toolbar shown (overlay kept, selection highlighted)");
         }
 
-        ToolStripButton undoBtn;
+        ToolStripSeparator NewSep()
+        {
+            ToolStripSeparator s = new ToolStripSeparator();
+            s.Margin = new Padding(4, 6, 4, 6);
+            return s;
+        }
+
         void AddActBtn(ToolStrip ts, string icon, string tip, EventHandler onClick)
         {
             ToolStripButton b = new ToolStripButton();
@@ -477,7 +484,6 @@ partial class ShotService
             b.ImageScaling = ToolStripItemImageScaling.None;
             b.ToolTipText = tip;
             b.Click += onClick;
-            if (icon == "undo") undoBtn = b;
             ts.Items.Add(b);
         }
 
@@ -519,16 +525,46 @@ partial class ShotService
 
         void HideBar() { if (bar != null) bar.Visible = false; }
 
+        // 提交一笔标注: 入栈 + 清空重做栈(新笔画使重做失效, 标准行为)
+        void PushAnnot(Annot a)
+        {
+            annots.Add(a);
+            redoStack.Clear();
+            InvalidateAnnot(a);
+        }
+
         void ActUndo()
         {
             CommitTextInput();
             if (annots.Count == 0) return;
             Annot a = annots[annots.Count - 1];
             annots.RemoveAt(annots.Count - 1);
+            redoStack.Add(a);
             if (a.Kind == Annot.K_SEQ) seqNext = Math.Max(1, seqNext - 1);
             InvalidateAnnot(a);
-            InvalidateSelArea(sel);
-            Log("capture: undo (" + annots.Count + " left)");
+            Log("capture: undo (" + annots.Count + " left, " + redoStack.Count + " redoable)");
+        }
+
+        void ActRedo()
+        {
+            if (redoStack.Count == 0) return;
+            Annot a = redoStack[redoStack.Count - 1];
+            redoStack.RemoveAt(redoStack.Count - 1);
+            annots.Add(a);
+            if (a.Kind == Annot.K_SEQ) seqNext = Math.Max(seqNext, a.No + 1);
+            InvalidateAnnot(a);
+            Log("capture: redo (" + annots.Count + " annots)");
+        }
+
+        // 贴图 (PixPin 同款): 选区合成图钉到桌面原位置, 可拖动/滚轮缩放/双击关闭
+        void ActPin()
+        {
+            CommitTextInput();
+            Bitmap bmp = CropTaken();
+            PinForm pf = new PinForm(bmp, sel);
+            pf.Show();
+            Log("capture: pinned " + sel.Width + "x" + sel.Height + " to screen");
+            Close();
         }
 
         void ActSave()
@@ -561,36 +597,10 @@ partial class ShotService
             Close();
         }
 
-        void ActSaveAs()
-        {
-            try
-            {
-                CommitTextInput();
-                using (SaveFileDialog dlg = new SaveFileDialog())
-                {
-                    dlg.Filter = "PNG 图片|*.png|JPEG 图片|*.jpg|位图|*.bmp";
-                    dlg.FileName = "shot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".png";
-                    dlg.DefaultExt = "png";
-                    dlg.Title = "另存为截图";
-                    if (dlg.ShowDialog(this) == DialogResult.OK)
-                    {
-                        ImageFormat fmt = dlg.FileName.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ? ImageFormat.Jpeg :
-                                          dlg.FileName.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase) ? ImageFormat.Bmp : ImageFormat.Png;
-                        using (Bitmap bmp = CropTaken()) bmp.Save(dlg.FileName, fmt);
-                        Log("capture saved as: " + dlg.FileName);
-                        ShowTrayInfo("已保存: " + dlg.FileName);
-                        Close();
-                    }
-                }
-            }
-            catch (Exception ex) { Log("capture saveas err: " + ex.Message); ShowTrayInfo("另存失败: " + ex.Message); }
-        }
 
         // OCR: 遮罩与选区保持, 完成后关遮罩弹结果窗; 失败气泡报错可重试
-        ToolStripButton ocrBtn;
         void ActOcr()
         {
-            if (ocrBtn == null) ocrBtn = FindBtn("OCR 识别");
             CommitTextInput();
             SetBusy("OCR 识别中...");
             Bitmap bmp = CropTaken();
@@ -618,10 +628,8 @@ partial class ShotService
             });
         }
 
-        ToolStripButton trBtn;
         void ActTranslate()
         {
-            if (trBtn == null) trBtn = FindBtn("翻译");
             CommitTextInput();
             SetBusy("识别+翻译中...");
             Bitmap bmp = CropTaken();
@@ -665,15 +673,19 @@ partial class ShotService
             return null;
         }
 
+        // 忙碌: 禁用全部按钮 + OCR 按钮显示进度; 空参=恢复
         void SetBusy(string msg)
         {
+            if (bar == null) return;
             foreach (ToolStripItem it in bar.Items)
             {
                 ToolStripButton b = it as ToolStripButton;
                 if (b == null) continue;
-                if (msg != null) { b.Enabled = false; if (b.ToolTipText == "OCR 识别") b.ToolTipText = msg; }
-                else { b.Enabled = true; if (b.ToolTipText != null && b.ToolTipText.EndsWith("中...")) b.ToolTipText = "OCR 识别"; }
+                b.Enabled = (msg == null);
+                if (b.ToolTipText != null && b.ToolTipText.StartsWith("OCR"))
+                    b.ToolTipText = (msg == null) ? "OCR 文字识别" : msg;
             }
+            bar.Invalidate();
         }
 
         // 回 hk UI 线程 (遮罩所在线程), BeginInvoke 不等待 — 任何情况不卡后台任务
@@ -699,6 +711,7 @@ partial class ShotService
                 return true;
             }
             if (keyData == (Keys.Control | Keys.Z)) { ActUndo(); return true; } // Ctrl+Z 撤销
+            if (keyData == (Keys.Control | Keys.Y)) { ActRedo(); return true; } // Ctrl+Y 重做
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -746,84 +759,92 @@ partial class ShotService
         public override Color SeparatorLight { get { return sep; } }
     }
 
-    // ---- 自绘 16x16 图标 (白色线条, 透明底; GDI+ 矢量画, 零图片依赖) ----
+    // ---- 自绘 26x26 图标 (白色线性, 透明底; GDI+ 矢量画, 零图片依赖; 排版/语义照 PixPin) ----
     static Bitmap MakeIcon(string kind)
     {
-        Bitmap bmp = new Bitmap(18, 18);
+        Bitmap bmp = new Bitmap(26, 26);
         using (Graphics g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (Pen w = new Pen(Color.FromArgb(230, 232, 238), 1.6f))
+            using (Pen w = new Pen(Color.FromArgb(235, 238, 244), 2.2f))
             {
                 w.StartCap = LineCap.Round; w.EndCap = LineCap.Round; w.LineJoin = LineJoin.Round;
                 switch (kind)
                 {
                     case "rect": // 空心矩形
-                        g.DrawRectangle(w, 2.5f, 4.5f, 13, 9);
+                        g.DrawRectangle(w, 4f, 6.5f, 18, 13);
                         break;
                     case "ellipse": // 空心椭圆
-                        g.DrawEllipse(w, 2.5f, 4.5f, 13, 9);
+                        g.DrawEllipse(w, 4f, 6.5f, 18, 13);
                         break;
                     case "arrow": // 斜箭头
-                        g.DrawLine(w, 3, 15, 14, 4);
-                        g.DrawLine(w, 14, 4, 9.5f, 5);
-                        g.DrawLine(w, 14, 4, 13, 8.5f);
+                        g.DrawLine(w, 5, 21, 20, 6);
+                        g.DrawLine(w, 20, 6, 13.5f, 7);
+                        g.DrawLine(w, 20, 6, 19, 12.5f);
                         break;
                     case "pen": // 画笔(斜杆+笔尖)
-                        g.DrawLine(w, 4, 14, 12, 6);
-                        g.DrawLine(w, 12, 6, 14.5f, 3.5f);
-                        g.DrawLine(w, 4, 14, 3, 15);
+                        g.DrawLine(w, 6, 20, 18, 8);
+                        g.DrawLine(w, 18, 8, 21.5f, 4.5f);
+                        g.DrawLine(w, 6, 20, 4, 22);
                         break;
                     case "text": // T
-                        g.DrawLine(w, 4, 4, 14, 4);
-                        g.DrawLine(w, 9, 4, 9, 15);
+                        g.DrawLine(w, 6, 6, 20, 6);
+                        g.DrawLine(w, 13, 6, 13, 21);
                         break;
                     case "seq": // 圆圈+1
-                        g.DrawEllipse(w, 3, 3, 12, 12);
-                        using (Font f = new Font("Consolas", 7.5f, FontStyle.Bold))
-                        using (Brush b = new SolidBrush(Color.FromArgb(230, 232, 238)))
-                            g.DrawString("1", f, b, 6.2f, 4.6f);
+                        g.DrawEllipse(w, 5, 5, 16, 16);
+                        using (Font f = new Font("Consolas", 11f, FontStyle.Bold))
+                        using (Brush b = new SolidBrush(Color.FromArgb(235, 238, 244)))
+                            g.DrawString("1", f, b, 9.4f, 6.8f);
                         break;
-                    case "undo": // 左弧箭头
-                        g.DrawArc(w, 4, 4, 11, 10, -30, 220);
-                        g.DrawLine(w, 4.5f, 7.5f, 3.5f, 3.5f);
-                        g.DrawLine(w, 4.5f, 7.5f, 8.5f, 7);
+                    case "undo": // 标准撤销 ↩: 顶弧从右弯到左 + 左指实心箭头
+                        g.DrawArc(w, 6f, 9f, 16f, 13f, -20, 195);
+                        using (SolidBrush b = new SolidBrush(w.Color))
+                            g.FillPolygon(b, new PointF[] { new PointF(2.5f, 12.5f), new PointF(11.5f, 8.5f), new PointF(10.5f, 17f) });
+                        break;
+                    case "redo": // 标准重做 ↪: undo 镜像
+                        g.DrawArc(w, 4f, 9f, 16f, 13f, 5, 195);
+                        using (SolidBrush b = new SolidBrush(w.Color))
+                            g.FillPolygon(b, new PointF[] { new PointF(23.5f, 12.5f), new PointF(14.5f, 8.5f), new PointF(15.5f, 17f) });
+                        break;
+                    case "pin": // 贴图(图钉): 斜针 + 圆头
+                        g.DrawLine(w, 9, 22, 16, 12);
+                        using (SolidBrush b = new SolidBrush(Color.FromArgb(235, 238, 244)))
+                            g.FillEllipse(b, 13, 4, 9, 9);
+                        g.DrawEllipse(w, 13, 4, 9, 9);
                         break;
                     case "ocr": // 扫描框 + T
-                        g.DrawLine(w, 2, 5, 2, 2); g.DrawLine(w, 2, 2, 5, 2);
-                        g.DrawLine(w, 16, 5, 16, 2); g.DrawLine(w, 16, 2, 13, 2);
-                        g.DrawLine(w, 2, 13, 2, 16); g.DrawLine(w, 2, 16, 5, 16);
-                        g.DrawLine(w, 16, 13, 16, 16); g.DrawLine(w, 16, 16, 13, 16);
-                        g.DrawLine(w, 6, 6, 12, 6);
-                        g.DrawLine(w, 9, 6, 9, 13);
+                        g.DrawLine(w, 2, 8, 2, 2); g.DrawLine(w, 2, 2, 8, 2);
+                        g.DrawLine(w, 24, 8, 24, 2); g.DrawLine(w, 24, 2, 18, 2);
+                        g.DrawLine(w, 2, 18, 2, 24); g.DrawLine(w, 2, 24, 8, 24);
+                        g.DrawLine(w, 24, 18, 24, 24); g.DrawLine(w, 24, 24, 18, 24);
+                        g.DrawLine(w, 10, 9, 16, 9);
+                        g.DrawLine(w, 13, 9, 13, 19);
                         break;
                     case "translate": // A/文 双字
-                        using (Font f = new Font("Consolas", 7f, FontStyle.Bold))
-                        using (Brush b = new SolidBrush(Color.FromArgb(230, 232, 238)))
+                        using (Font f = new Font("Consolas", 11f, FontStyle.Bold))
+                        using (Brush b = new SolidBrush(Color.FromArgb(235, 238, 244)))
                         {
-                            g.DrawString("A", f, b, 1.5f, 1.5f);
-                            using (Font f2 = new Font("Microsoft YaHei UI", 7f, FontStyle.Bold))
-                                g.DrawString("文", f2, b, 7.5f, 7.5f);
+                            g.DrawString("A", f, b, 2.5f, 2.5f);
+                            using (Font f2 = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold))
+                                g.DrawString("文", f2, b, 12f, 11f);
                         }
                         break;
                     case "save": // 软盘
-                        g.DrawRectangle(w, 2.5f, 2.5f, 13, 13);
-                        g.DrawRectangle(w, 6, 3.5f, 6, 4);
-                        g.DrawLine(w, 5, 15, 5, 10); g.DrawLine(w, 5, 10, 13, 10); g.DrawLine(w, 13, 10, 13, 15);
+                        g.DrawRectangle(w, 4f, 4f, 18, 18);
+                        g.DrawRectangle(w, 9, 5, 8, 6);
+                        g.DrawLine(w, 7, 22, 7, 15); g.DrawLine(w, 7, 15, 19, 15); g.DrawLine(w, 19, 15, 19, 22);
                         break;
                     case "copy": // 双矩形
-                        g.DrawRectangle(w, 5.5f, 5.5f, 10, 10);
-                        g.DrawLines(w, new PointF[] { new PointF(12.5f, 3), new PointF(3, 3), new PointF(3, 12.5f) });
+                        g.DrawRectangle(w, 9, 9, 14, 14);
+                        g.DrawLines(w, new PointF[] { new PointF(19f, 5), new PointF(5, 5), new PointF(5, 19) });
                         break;
-                    case "saveas": // 托盘+下箭头
-                        g.DrawLines(w, new PointF[] { new PointF(2, 11), new PointF(2, 15), new PointF(16, 15), new PointF(16, 11) });
-                        g.DrawLine(w, 9, 2, 9, 10);
-                        g.DrawLine(w, 9, 10, 6, 7);
-                        g.DrawLine(w, 9, 10, 12, 7);
+                    case "ok": // ✓ 完成
+                        g.DrawLines(w, new PointF[] { new PointF(4, 14), new PointF(10.5f, 20), new PointF(22, 6) });
                         break;
                     case "cancel": // X
-                        g.DrawLine(w, 4, 4, 14, 14);
-                        g.DrawLine(w, 14, 4, 4, 14);
+                        g.DrawLine(w, 6, 6, 20, 20);
+                        g.DrawLine(w, 20, 6, 6, 20);
                         break;
                 }
             }
@@ -831,16 +852,180 @@ partial class ShotService
         return bmp;
     }
 
-    // M2: OCR/翻译结果展示窗 (只读 + 复制按钮)
+    // ---- 深色 UI 主题 (全窗体统一色板; 设置窗/剪贴板历史窗/结果窗/贴图窗共用) ----
+    static class DarkUI
+    {
+        public static readonly Color Bg = Color.FromArgb(35, 36, 40);      // 窗体底
+        public static readonly Color BgPanel = Color.FromArgb(28, 29, 33); // 面板
+        public static readonly Color BgField = Color.FromArgb(22, 23, 27); // 输入框
+        public static readonly Color BgTitle = Color.FromArgb(22, 23, 26); // 自绘标题栏
+        public static readonly Color Text = Color.FromArgb(225, 228, 232);
+        public static readonly Color TextDim = Color.FromArgb(130, 136, 146);
+        public static readonly Color Btn = Color.FromArgb(52, 54, 62);
+        public static readonly Color Accent = Color.FromArgb(64, 108, 190);
+        public static readonly Color Danger = Color.FromArgb(200, 60, 60);
+
+        // 给任意窗装上深色自绘标题栏(标题+×+拖动), 返回标题栏 Panel
+        public static Panel MakeTitleBar(Form f, string title)
+        {
+            Panel p = new Panel(); p.Dock = DockStyle.Top; p.Height = 38; p.BackColor = BgTitle;
+            Label tl = new Label(); tl.Text = "  " + title; tl.ForeColor = Text; tl.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold);
+            tl.AutoSize = false; tl.Dock = DockStyle.Fill; tl.TextAlign = ContentAlignment.MiddleLeft;
+            Button bx = new Button(); bx.Text = "×"; bx.FlatStyle = FlatStyle.Flat; bx.FlatAppearance.BorderSize = 0;
+            bx.BackColor = Color.Transparent; bx.ForeColor = Text; bx.Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
+            bx.Size = new Size(38, 38); bx.Dock = DockStyle.Right;
+            bx.FlatAppearance.MouseOverBackColor = Danger;
+            bx.Click += (s, e) => { f.DialogResult = DialogResult.Cancel; f.Close(); };
+            p.Controls.Add(tl); p.Controls.Add(bx);
+            MouseEventHandler drag = (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(f.Handle, 0xA1, (IntPtr)2, IntPtr.Zero); }
+            };
+            p.MouseDown += drag; tl.MouseDown += drag;
+            f.Controls.Add(p);
+            return p;
+        }
+    }
+
+    // 贴图窗 (PixPin 同款): 选区图钉在桌面原位置, 左键拖动 / 滚轮缩放 / 双击关闭 / 右键深色菜单
+    class PinForm : Form
+    {
+        readonly Bitmap img;
+        readonly float ratio;
+
+        public PinForm(Bitmap image, Rectangle screenRect)
+        {
+            img = image;
+            ratio = (float)img.Height / img.Width;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            Bounds = screenRect;
+            BackgroundImage = img;
+            BackgroundImageLayout = ImageLayout.Stretch;
+            DoubleBuffered = true;
+            KeyPreview = true;
+
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.BackColor = Color.FromArgb(40, 41, 46); menu.ForeColor = DarkUI.Text;
+            menu.Items.Add("放大 (+)", null, delegate { ScaleBy(1.1f); });
+            menu.Items.Add("缩小 (-)", null, delegate { ScaleBy(1f / 1.1f); });
+            menu.Items.Add("实际大小 (1:1)", null, delegate { ResizeTo(img.Width, img.Height); });
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("复制图片", null, delegate { try { Clipboard.SetImage(img); } catch { } });
+            menu.Items.Add("关闭 (双击/Esc)", null, delegate { Close(); });
+            ContextMenuStrip = menu;
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get { CreateParams cp = base.CreateParams; cp.ClassStyle |= 0x20000; return cp; } // CS_DROPSHADOW 阴影
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Escape) Close();
+            else if (e.KeyCode == Keys.Oemplus || e.KeyCode == Keys.Add) ScaleBy(1.1f);
+            else if (e.KeyCode == Keys.OemMinus || e.KeyCode == Keys.Subtract) ScaleBy(1f / 1.1f);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero); } // 拖动
+        }
+
+        protected override void OnMouseDoubleClick(MouseEventArgs e) { base.OnMouseDoubleClick(e); if (e.Button == MouseButtons.Left) Close(); }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            ScaleBy(e.Delta > 0 ? 1.1f : 1f / 1.1f);
+        }
+
+        void ScaleBy(float k)
+        {
+            ResizeTo((int)(Width * k), (int)(Width * k * ratio));
+        }
+
+        void ResizeTo(int w, int h)
+        {
+            if (w < 40) w = 40;
+            if (h < 30) h = 30;
+            if (w > SystemInformation.VirtualScreen.Width) w = SystemInformation.VirtualScreen.Width;
+            h = (int)(w * ratio);
+            // 中心锚
+            int cx = Left + Width / 2, cy = Top + Height / 2;
+            SetBounds(cx - w / 2, cy - h / 2, w, h);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            base.OnFormClosed(e);
+            BackgroundImage = null;
+            try { img.Dispose(); } catch { }
+        }
+    }
+
+    // M2: OCR/翻译结果窗 (深色: 自绘标题栏 + 中文友好字体 + 复制内联反馈, 不弹系统 MessageBox)
     class ResultForm : Form
     {
+        readonly string text;
+        readonly Button copyBtn;
+
         public ResultForm(string title, string text)
         {
-            Text = title; Width = 520; Height = 340; StartPosition = FormStartPosition.CenterScreen; TopMost = true;
-            var tb = new TextBox() { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both, Text = text, Font = new Font("Consolas", 11) };
-            var btn = new Button() { Text = "复制", Dock = DockStyle.Bottom, Height = 34 };
-            btn.Click += (s, ev) => { try { Clipboard.SetText(text); MessageBox.Show("已复制", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { } };
-            Controls.Add(tb); Controls.Add(btn);
+            this.text = text;
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.CenterScreen;
+            Size = new Size(600, 440);
+            TopMost = true;
+            BackColor = DarkUI.Bg;
+            KeyPreview = true;
+
+            DarkUI.MakeTitleBar(this, title);
+
+            TextBox tb = new TextBox();
+            tb.Multiline = true; tb.ReadOnly = true; tb.ScrollBars = ScrollBars.Vertical;
+            tb.Dock = DockStyle.Fill;
+            tb.BackColor = DarkUI.BgField; tb.ForeColor = DarkUI.Text; tb.BorderStyle = BorderStyle.None;
+            tb.Font = new Font("Microsoft YaHei UI", 10.5f);
+            tb.Text = text;
+            tb.Margin = new Padding(10);
+            tb.Padding = new Padding(10);
+            tb.KeyDown += (s, e) => { if (e.KeyCode == Keys.C && e.Control) { CopyNow(); e.SuppressKeyPress = true; } };
+            Controls.Add(tb);
+            tb.BringToFront();
+
+            Panel bottom = new Panel(); bottom.Dock = DockStyle.Bottom; bottom.Height = 52; bottom.BackColor = DarkUI.BgPanel;
+            Label info = new Label(); info.Text = text.Length + " 字符 · Ctrl+C 复制 · Esc 关闭"; info.Left = 14;
+            info.AutoSize = true; info.ForeColor = DarkUI.TextDim; info.Font = new Font("Microsoft YaHei UI", 9f);
+            info.TextAlign = ContentAlignment.MiddleLeft; info.Dock = DockStyle.Fill;
+            copyBtn = new Button(); copyBtn.Text = "复制"; copyBtn.FlatStyle = FlatStyle.Flat; copyBtn.FlatAppearance.BorderSize = 0;
+            copyBtn.BackColor = DarkUI.Accent; copyBtn.ForeColor = DarkUI.Text;
+            copyBtn.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+            copyBtn.Size = new Size(120, 36); copyBtn.Cursor = Cursors.Hand;
+            copyBtn.Dock = DockStyle.Right; copyBtn.Margin = new Padding(8, 8, 10, 8);
+            copyBtn.Padding = new Padding(0, 8, 0, 0);
+            copyBtn.Click += delegate { CopyNow(); };
+            bottom.Controls.Add(info); bottom.Controls.Add(copyBtn);
+            Controls.Add(bottom);
+            bottom.BringToFront();
+            copyBtn.BringToFront();
+
+            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+        }
+
+        void CopyNow()
+        {
+            try { Clipboard.SetText(text); } catch { }
+            copyBtn.Text = "✓ 已复制";
+            copyBtn.BackColor = Color.FromArgb(40, 130, 80);
+            Timer t = new Timer(); t.Interval = 900;
+            t.Tick += (s, e) => { t.Stop(); t.Dispose(); Close(); };
+            t.Start();
         }
     }
 }
