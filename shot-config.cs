@@ -90,7 +90,7 @@ partial class ShotService
         f.Text = "设置";
         f.FormBorderStyle = FormBorderStyle.None;
         f.StartPosition = FormStartPosition.CenterScreen;
-        f.Size = new Size(500, 494);
+        f.Size = new Size(500, 446);
         f.TopMost = true;
         f.BackColor = cBg;
         f.KeyPreview = true;
@@ -178,22 +178,23 @@ partial class ShotService
         mkPLabel(pBaidu, "APP ID:", 12, 46);
         TextBox appid = mkPText(pBaidu); appid.Left = 130; appid.Top = 43; appid.Width = 306; appid.Text = d["translate.baiduAppId"];
         mkPLabel(pBaidu, "密钥 Key:", 12, 82);
-        TextBox key = mkPText(pBaidu); key.Left = 130; key.Top = 79; key.Width = 306; key.PasswordChar = '*'; key.Text = d["translate.baiduKey"];
-        Label ltip = new Label(); ltip.Text = "标准 API 只需 APP ID + 密钥；密钥留空保存 = 不修改已存的密钥"; ltip.Left = 12; ltip.Top = 118;
+        TextBox key = mkPText(pBaidu); key.Left = 130; key.Top = 79; key.Width = 330; key.PasswordChar = '*'; key.Text = d["translate.baiduKey"];
+        // 显示密钥: 放在密钥后面 (同时控制本地面板的 API Key)
+        CheckBox chkShow = new CheckBox(); chkShow.Text = "显示"; chkShow.Left = 130; chkShow.Top = 108; chkShow.AutoSize = true;
+        chkShow.ForeColor = cDim; chkShow.Font = new Font("Microsoft YaHei UI", 9f); pBaidu.Controls.Add(chkShow);
+        Label ltip = new Label(); ltip.Text = "留空保存 = 不修改已存密钥"; ltip.Left = 195; ltip.Top = 112;
         ltip.AutoSize = true; ltip.ForeColor = cDim; ltip.Font = new Font("Microsoft YaHei UI", 8.5f); pBaidu.Controls.Add(ltip);
 
         // 引擎切换
         prov.SelectedIndexChanged += (s, e) => { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; };
         { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; }
 
-        // ---- 测试区: 内置英文示例, 结果直接显示在界面 (不弹窗) ----
-        CheckBox chkShow = new CheckBox(); chkShow.Text = "显示密钥"; chkShow.Left = LX; chkShow.Top = 284; chkShow.AutoSize = true;
-        chkShow.ForeColor = cDim; chkShow.Font = new Font("Microsoft YaHei UI", 9f); f.Controls.Add(chkShow);
-        chkShow.CheckedChanged += (s, e) => { char pc = chkShow.Checked ? '\0' : '*'; key.PasswordChar = pc; lak.PasswordChar = pc; };
-
+        // ---- 测试区: 内置英文示例 (整行), 结果直接显示在界面 (不弹窗) ----
         Label demoLabel = new Label(); demoLabel.Text = "示例: The quick brown fox jumps over the lazy dog.";
-        demoLabel.Left = LX + 110; demoLabel.Top = 287; demoLabel.AutoSize = true;
+        demoLabel.Left = LX; demoLabel.Top = 286; demoLabel.AutoSize = true;
         demoLabel.ForeColor = cDim; demoLabel.Font = new Font("Consolas", 9f); f.Controls.Add(demoLabel);
+        // 勾选逻辑 (chkShow 在百度面板内, 同时控制两个密钥框)
+        chkShow.CheckedChanged += (s, e) => { char pc = chkShow.Checked ? '\0' : '*'; key.PasswordChar = pc; lak.PasswordChar = pc; };
 
         TextBox testResult = new TextBox(); testResult.Multiline = true; testResult.ReadOnly = true;
         testResult.Left = LX; testResult.Top = 310; testResult.Width = 452; testResult.Height = 56;
@@ -208,21 +209,6 @@ partial class ShotService
         save.Click += (s, e) => { f.DialogResult = DialogResult.OK; f.Close(); };
         cancel.Click += (s, e) => { f.DialogResult = DialogResult.Cancel; f.Close(); };
         f.AcceptButton = save;
-
-        // ---- 底部: 配置文件路径 + 打开 ----
-        Label pl = new Label(); pl.Text = "配置文件: " + cfgPath; pl.Left = LX; pl.Top = 418; pl.AutoSize = false;
-        pl.Size = new Size(340, 30); pl.ForeColor = cDim; pl.Font = new Font("Microsoft YaHei UI", 8.5f);
-        pl.AutoEllipsis = true; f.Controls.Add(pl);
-        Button openCfg = mkBtn(); openCfg.Text = "打开配置"; openCfg.SetBounds(FX + FW - 96, 414, 96, 30);
-        openCfg.Click += (s, e) =>
-        {
-            try
-            {
-                if (!File.Exists(cfgPath)) File.WriteAllText(cfgPath, "{\n}\n", Encoding.UTF8);
-                System.Diagnostics.Process.Start("notepad.exe", "\"" + cfgPath + "\"");
-            }
-            catch (Exception ex) { MessageBox.Show(f, "打开失败: " + ex.Message, "Win Desktop Helper"); }
-        };
 
         // Esc = 取消
         f.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { f.DialogResult = DialogResult.Cancel; f.Close(); } };
