@@ -1566,6 +1566,7 @@ public class ShotService
             try { string fp = DoShot(VirtualScreen()); Log("tray shot: " + fp); Clipboard.SetText(fp); TrayIcon.ShowBalloonTip(1500, "Win Desktop Helper", "已截图: " + fp, ToolTipIcon.Info); }
             catch (Exception ex) { Log("tray shot err: " + ex.Message); }
         });
+        menu.Items.Add("区域截图(框选)", null, delegate { ShowCaptureOverlay(); });
         menu.Items.Add("打开截图目录", null, delegate { try { if (Directory.Exists(ShotDir)) Process.Start("explorer.exe", "\"" + ShotDir + "\""); } catch { } });
         menu.Items.Add("打开日志", null, delegate { try { if (File.Exists(LogPath)) Process.Start("notepad.exe", "\"" + LogPath + "\""); } catch { } });
         menu.Items.Add("复制 MCP 接入配置", null, delegate
