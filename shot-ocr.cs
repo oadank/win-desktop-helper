@@ -27,6 +27,7 @@ partial class ShotService
             string json = "{\"model\":\"qwen3-vl:4b-instruct\",\"prompt\":" + EscapeJson(prompt) + ",\"images\":[\"" + b64 + "\"],\"stream\":false}";
             using (var wc = new WebClient())
             {
+                wc.Encoding = Encoding.UTF8; // ⚠️ Ollama 返回的 application/json 不带 charset, WebClient 默认按 Latin-1 解码 → 中文全乱码 (实测踩坑)
                 wc.Headers[HttpRequestHeader.ContentType] = "application/json";
                 string resp = await wc.UploadStringTaskAsync(endpoint, json);
                 return ExtractField(resp, "response").Trim();
@@ -105,24 +106,39 @@ partial class ShotService
         switch (c) { case 'n': return '\n'; case 't': return '\t'; case 'r': return '\r'; case '"': return '"'; case '\\': return '\\'; default: return c; }
     }
 
+    // 在 json 中定位 "key"(闭合引号) 后的第一个冒号, 返回冒号之后的位置; 找不到返回 -1。
+    // 比旧版(硬编码 "\"key\":") 健壮: 容忍冒号前空白/换行, 且不会误匹配含 key 字样的更长键名
+    static int FindJsonKey(string json, string key, int from)
+    {
+        string pat = "\"" + key + "\"";
+        int i = from;
+        while ((i = json.IndexOf(pat, i, StringComparison.Ordinal)) >= 0)
+        {
+            int j = i + pat.Length;
+            while (j < json.Length && (json[j] == ' ' || json[j] == '\t' || json[j] == '\r' || json[j] == '\n')) j++;
+            if (j < json.Length && json[j] == ':') return j + 1;
+            i += pat.Length;
+        }
+        return -1;
+    }
+
     // 轻量配置读取: shot-service.json 同目录; 支持 "a.b.c" 点嵌套; 无文件/缺字段返回 def
     static string Cfg(string key, string def)
     {
         try
         {
-            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shot-service.json");
+            string path = ConfigPath();
             if (!File.Exists(path)) return def;
             string txt = File.ReadAllText(path);
             string[] parts = key.Split('.');
             string cur = txt;
             foreach (var p in parts)
             {
-                string k = "\"" + p + "\":";
-                int i = cur.IndexOf(k, StringComparison.Ordinal);
+                int i = FindJsonKey(cur, p, 0);
                 if (i < 0) return def;
-                i += k.Length;
                 while (i < cur.Length && (cur[i] == ' ' || cur[i] == '\t')) i++;
                 int j = i;
+                if (j >= cur.Length) return def;
                 if (cur[j] == '"')
                 {
                     j++;

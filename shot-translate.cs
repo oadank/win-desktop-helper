@@ -17,16 +17,18 @@ partial class ShotService
     // 默认零 key: 本地 LLM (本机 Ollama qwen3-vl 当翻译用, 零花费离线)
     class LocalLlmTranslateProvider : ITranslateProvider
     {
-        readonly string ep;
-        public LocalLlmTranslateProvider(string e) { ep = e; }
+        readonly string ep, model, apiKey;
+        public LocalLlmTranslateProvider(string e, string m, string k) { ep = e; model = m; apiKey = k; }
         public async Task<string> TranslateAsync(string text, string to)
         {
             string lang = (to == "en") ? "English" : "Chinese";
             string prompt = "Translate the following text into " + lang + ". Output ONLY the translation, no explanation, no quotes.\n\n" + text;
-            string json = "{\"model\":\"qwen3-vl:4b-instruct\",\"prompt\":" + EscapeJson(prompt) + ",\"stream\":false}";
+            string json = "{\"model\":" + EscapeJson(model) + ",\"prompt\":" + EscapeJson(prompt) + ",\"stream\":false}";
             using (var wc = new WebClient())
             {
+                wc.Encoding = Encoding.UTF8; // 同上: Ollama 响应无 charset, 默认 Latin-1 解码中文乱码
                 wc.Headers[HttpRequestHeader.ContentType] = "application/json";
+                if (!string.IsNullOrEmpty(apiKey)) wc.Headers[HttpRequestHeader.Authorization] = "Bearer " + apiKey;
                 string resp = await wc.UploadStringTaskAsync(ep, json);
                 return ExtractField(resp, "response").Trim();
             }
@@ -68,7 +70,9 @@ partial class ShotService
             Log("translate: baidu selected but appid/key missing -> fallback local LLM");
         }
         string ep = Cfg("translate.endpoint", "http://127.0.0.1:11434/api/generate");
-        return new LocalLlmTranslateProvider(ep);
+        string model = Cfg("translate.model", "qwen3-vl:4b-instruct");
+        string ak = Cfg("translate.apiKey", "");
+        return new LocalLlmTranslateProvider(ep, model, ak);
     }
 
     static string Md5(string s)

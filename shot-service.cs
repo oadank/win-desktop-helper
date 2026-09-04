@@ -42,7 +42,7 @@ using System.Windows.Forms;
 public partial class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.16";
+    const string APP_VERSION = "0.0.17";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
@@ -116,6 +116,19 @@ public partial class ShotService
     }
 
     static void Log(string msg) { try { File.AppendAllText(LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + "\r\n"); } catch { } }
+
+    // 构建指纹: 本进程 exe 的修改时间+大小 (= csc 写出 exe 的时刻)。日志/托盘/气泡/health 都带它,
+    // 用户肉眼比对"编译时间 vs 运行时间"即可确认跑的是不是刚编的
+    static string BuildStamp()
+    {
+        try
+        {
+            string exe = Process.GetCurrentProcess().MainModule.FileName;
+            FileInfo fi = new FileInfo(exe);
+            return fi.LastWriteTime.ToString("MM-dd HH:mm") + " " + (fi.Length / 1024) + "KB";
+        }
+        catch { return "unknown"; }
+    }
 
     // ---- 看: 屏幕/窗口 ----
     static Rectangle VirtualScreen()
@@ -904,7 +917,8 @@ public partial class ShotService
                 else if (path == "/health")
                 {
                     body = "{\"ok\":true,\"pid\":" + Process.GetCurrentProcess().Id + ",\"session\":" + MySession +
-                           ",\"shots\":" + ShotCount + ",\"uptimeSec\":" + (int)(DateTime.Now - StartTime).TotalSeconds + ",\"version\":\"2.0\",\"appVersion\":\"" + APP_VERSION + "\"}";
+                           ",\"shots\":" + ShotCount + ",\"uptimeSec\":" + (int)(DateTime.Now - StartTime).TotalSeconds +
+                           ",\"version\":\"" + APP_VERSION + "\",\"build\":\"" + BuildStamp() + "\"}";
                 }
                 else if (path == "/taskbar-volume")
                 {
@@ -1108,15 +1122,8 @@ public partial class ShotService
     [STAThread]
     public static void Main(string[] args)
     {
-        // 单实例互斥: 已有实例则直接退出 (防 Session 0/1 双进程抢端口)
-        bool createdNew;
-        try
-        {
-            instanceMutex = new Mutex(true, MUTEX_NAME, out createdNew);
-            if (!createdNew) { Log("another instance running, exit"); return; }
-        }
-        catch (Exception ex) { Log("mutex err: " + ex.Message); }
-
+        // 构建指纹: exe 文件的修改时间+大小 = 用户编译时刻。跑的是不是刚编的, 一眼可验 (堵"改了没变化"坑)
+        string build = BuildStamp();
         bool allowTray = true, watchMode = false;
         foreach (string a in args)
         {
@@ -1124,10 +1131,54 @@ public partial class ShotService
             if (x == "-notray") allowTray = false;
             else if (x == "-watch") watchMode = true;
         }
+
+        // 单实例互斥: 已有实例则自动顶替(结束旧进程后接管) — 堵死"忘了 Stop-Process, 新 exe 静默退出,
+        // 用户跑的还是旧代码"这个反复踩坑的部署漏洞 (2026-09-05)
+        bool createdNew;
+        try
+        {
+            instanceMutex = new Mutex(true, MUTEX_NAME, out createdNew);
+            if (!createdNew)
+            {
+                Log("another instance running, auto take-over: killing old process (build of old=unknown)");
+                try
+                {
+                    string self = Process.GetCurrentProcess().MainModule.FileName;
+                    foreach (Process p in Process.GetProcessesByName("shot-service"))
+                    {
+                        if (p.Id == Process.GetCurrentProcess().Id) continue;
+                        try { p.Kill(); Log("take-over: killed old pid=" + p.Id); } catch (Exception ex2) { Log("take-over: kill pid=" + p.Id + " err: " + ex2.Message); }
+                    }
+                }
+                catch (Exception ex2) { Log("take-over enum err: " + ex2.Message); }
+                bool took = false;
+                for (int i = 0; i < 50 && !took; i++) // 最多等 5s 让旧进程退出/互斥释放
+                {
+                    Thread.Sleep(100);
+                    try
+                    {
+                        if (instanceMutex != null) { try { instanceMutex.Dispose(); } catch { } }
+                        instanceMutex = new Mutex(true, MUTEX_NAME, out createdNew);
+                        took = createdNew;
+                    }
+                    catch { }
+                }
+                if (!took)
+                {
+                    Log("take-over FAILED: old instance still holds mutex, exiting");
+                    if (allowTray && !watchMode)
+                        MessageBox.Show("检测到旧实例仍在运行且无法自动结束。\n请手动结束 shot-service.exe 后再启动。", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                Log("take-over OK: new build " + build + " is now the running instance");
+            }
+        }
+        catch (Exception ex) { Log("mutex err: " + ex.Message); }
+
         try { SetProcessDPIAware(); } catch { }
         // .NET 4.8 默认 TLS1.0, GitHub API 需 TLS1.2 (否则更新检测失败)
         try { System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12; } catch { }
-        Log("shot-service v3 session=" + MySession + " pid=" + Process.GetCurrentProcess().Id +
+        Log("shot-service v" + APP_VERSION + " build=" + build + " session=" + MySession + " pid=" + Process.GetCurrentProcess().Id +
             " mode=" + (watchMode ? "watch" : "service") + (allowTray ? " tray=on" : " tray=off"));
         try { if (!Directory.Exists(ShotDir)) Directory.CreateDirectory(ShotDir); } catch { }
 
@@ -1447,7 +1498,7 @@ public partial class ShotService
                 ? (Dictionary<string, object>)msg["params"] : new Dictionary<string, object>();
 
             if (method == "initialize")
-                return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"win-desktop-helper\",\"version\":\"3.0\"}}";
+                return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"win-desktop-helper\",\"version\":\"" + APP_VERSION + "\"}}";
             if (method == "ping") return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{}}";
             if (method == "notifications/initialized" || method == "notifications/cancelled") return null;
             if (method == "tools/list")
@@ -1582,17 +1633,19 @@ public partial class ShotService
     {
         TrayIcon = new NotifyIcon();
         TrayIcon.Icon = BuildIcon();
-        TrayIcon.Text = "Win Desktop Helper\nSession " + MySession + " | :18800";
+        TrayIcon.Text = "Win Desktop Helper v" + APP_VERSION + "\nbuild " + BuildStamp() + " | :18800";
         TrayIcon.Visible = true;
         ContextMenuStrip menu = new ContextMenuStrip();
-        menu.Items.Add("Win Desktop Helper  v" + APP_VERSION, null, null).Enabled = false; // 只读版本显示
+        // 版本行带构建指纹: 打开菜单一眼确认跑的是不是刚编的 exe (部署自验证)
+        menu.Items.Add("Win Desktop Helper  v" + APP_VERSION + "  (build " + BuildStamp() + ")", null, null).Enabled = false; // 只读版本显示
 
         // 截图 二级菜单 (M1: 区域截图为核心能力, 折叠但置顶)
         ToolStripMenuItem mShot = new ToolStripMenuItem("截图");
         mShot.DropDownItems.Add("区域截图 (框选)", null, delegate { ShowCaptureOverlay(); });
         mShot.DropDownItems.Add("全屏截图", null, delegate
         {
-            try { string fp = DoShot(VirtualScreen()); Log("tray shot: " + fp); Clipboard.SetText(fp); TrayIcon.ShowBalloonTip(1500, "Win Desktop Helper", "已截图: " + fp, ToolTipIcon.Info); }
+            // 不弹气泡 (用户要求): 保存路径已复制到剪贴板, 打开截图目录即可见
+            try { string fp = DoShot(VirtualScreen()); Log("tray shot: " + fp); Clipboard.SetText(fp); }
             catch (Exception ex) { Log("tray shot err: " + ex.Message); }
         });
         mShot.DropDownItems.Add("打开截图目录", null, delegate { try { if (Directory.Exists(ShotDir)) Process.Start("explorer.exe", "\"" + ShotDir + "\""); } catch { } });
@@ -1633,6 +1686,9 @@ public partial class ShotService
         mTools.DropDownItems.Add("项目主页 (GitHub)", null, delegate { try { Process.Start(REPO_URL); } catch { } });
         menu.Items.Add(mTools);
 
+        // M3: 设置/百度翻译登录入口 (用户自助填 appid/key, 存 json 热生效)
+        menu.Items.Add("设置...", null, delegate { try { ShowSettingsForm(); } catch (Exception ex) { Log("settings err: " + ex.Message); } });
+
         menu.Items.Add("隐藏托盘图标", null, delegate { TrayIcon.Visible = false; Log("tray hidden (restart service to show again)"); });
         menu.Items.Add("退出服务", null, delegate { Log("tray exit requested"); Environment.Exit(0); });
         TrayIcon.ContextMenuStrip = menu;
@@ -1641,7 +1697,9 @@ public partial class ShotService
             try { string fp = DoShot(VirtualScreen()); Log("tray dblclick shot: " + fp); Clipboard.SetText(fp); }
             catch (Exception ex) { Log("tray dblclick err: " + ex.Message); }
         };
-        Log("tray icon ready");
+        // 启动气泡报构建指纹: 用户每次启动肉眼确认"跑的是不是刚编的" (部署自验证)
+        TrayNotify("已启动 v" + APP_VERSION, "build " + BuildStamp() + " — 与编译时间一致即新代码生效");
+        Log("tray icon ready, build=" + BuildStamp());
     }
 
     // 代码绘制托盘图标: 深蓝圆底 + 白色镜头圈 + 青色核心
