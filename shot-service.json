@@ -1,0 +1,13 @@
+{
+  "ocr": {
+    "provider": "qwen3vl",
+    "endpoint": "http://127.0.0.1:11434/api/generate"
+  },
+  "translate": {
+    "provider": "local",
+    "endpoint": "http://127.0.0.1:11434/api/generate",
+    "to": "zh",
+    "baiduAppId": "",
+    "baiduKey": ""
+  }
+}

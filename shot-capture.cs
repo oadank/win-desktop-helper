@@ -35,13 +35,14 @@ partial class ShotService
         catch { }
     }
 
-    // 全屏半透明框选窗: 拖框选区域, 松开自动存盘+复制图片; Ctrl+S 另存为; C 仅复制; Esc/右键取消
+    // 全屏半透明框选窗: 拖框选区域, 松开保留选区; Enter存盘+C复制图+Ctrl+S另存为+O识别文字+T翻译+Esc取消
     class CaptureOverlay : Form
     {
         Point start;
         Rectangle sel;
         bool dragging = false;
         bool hasSel = false;
+        Bitmap lastBmp = null; // 选区 bitmap 缓存, 供 OCR/翻译复用(松开不立即存盘)
 
         public CaptureOverlay()
         {
@@ -82,8 +83,11 @@ partial class ShotService
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            if (dragging && hasSel) { dragging = false; FinishCapture(sel); }
-            else { dragging = false; }
+            if (dragging)
+            {
+                dragging = false;
+                if (hasSel) { if (lastBmp != null) { try { lastBmp.Dispose(); } catch { } } lastBmp = CaptureRect(sel); } // 保留选区, 等 Enter/O/T 操作
+            }
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -97,6 +101,9 @@ partial class ShotService
                 using (Font f = new Font("Consolas", 12))
                 using (Brush b = new SolidBrush(Color.Yellow))
                     e.Graphics.DrawString(txt, f, b, d.Right + 4, d.Bottom + 4);
+                using (Font f2 = new Font("Consolas", 10))
+                using (Brush b2 = new SolidBrush(Color.Cyan))
+                    e.Graphics.DrawString("Enter存盘 C复制图 Ctrl+S另存 O识别 T翻译 Esc取消", f2, b2, d.Right + 4, d.Bottom + 22);
             }
         }
 
@@ -106,6 +113,8 @@ partial class ShotService
             if (keyData == (Keys.Control | Keys.S)) { if (hasSel) SaveAs(sel); return true; }
             if (keyData == Keys.C) { if (hasSel) CopyImage(sel); return true; }
             if (keyData == Keys.Enter) { if (hasSel) FinishCapture(sel); return true; }
+            if (keyData == Keys.O) { if (hasSel || lastBmp != null) { OcrCurrent(); return true; } }
+            if (keyData == Keys.T) { if (hasSel || lastBmp != null) { TranslateCurrent(); return true; } }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -139,7 +148,7 @@ partial class ShotService
                 using (Bitmap bmp = CaptureRect(r))
                 {
                     string path = SaveToShotDir(bmp);
-                    Clipboard.SetImage(bmp); // 复制图片到剪贴板(后续 M2 OCR 可在此拦截回填文本)
+                    Clipboard.SetImage(bmp); // 复制图片到剪贴板
                     Log("capture saved: " + path + " (image copied to clipboard)");
                     ShowTrayInfo("已截图: " + path);
                 }
@@ -147,6 +156,61 @@ partial class ShotService
             catch (Exception ex) { Log("capture finish err: " + ex.Message); }
             DialogResult = DialogResult.OK;
             Close();
+        }
+
+        // M2: OCR 当前选区 -> 复制文本 + 弹结果窗
+        void OcrCurrent()
+        {
+            if (lastBmp == null) return;
+            var bmp = lastBmp; lastBmp = null;
+            Task.Run(async () =>
+            {
+                try
+                {
+                    ShowTrayInfo("OCR 识别中...");
+                    string text = await OcrProvider().RecognizeAsync(bmp);
+                    hkForm.Invoke(new MethodInvoker(() =>
+                    {
+                        if (!string.IsNullOrEmpty(text)) { try { Clipboard.SetText(text); } catch { } ShowResultForm(text, "OCR 识别结果"); }
+                        else ShowTrayInfo("未识别到文字");
+                        DialogResult = DialogResult.OK; Close();
+                    }));
+                }
+                catch (Exception ex) { Log("ocr err: " + ex.Message); hkForm.Invoke(new MethodInvoker(() => ShowTrayInfo("OCR 失败: " + ex.Message))); }
+                finally { try { bmp.Dispose(); } catch { } }
+            });
+        }
+
+        // M2: 先 OCR 再翻译 -> 复制译文 + 弹结果窗
+        void TranslateCurrent()
+        {
+            if (lastBmp == null) return;
+            var bmp = lastBmp; lastBmp = null;
+            Task.Run(async () =>
+            {
+                try
+                {
+                    ShowTrayInfo("OCR + 翻译中...");
+                    string text = await OcrProvider().RecognizeAsync(bmp);
+                    if (string.IsNullOrEmpty(text)) { hkForm.Invoke(new MethodInvoker(() => ShowTrayInfo("未识别到文字, 无法翻译"))); return; }
+                    string to = Cfg("translate.to", "zh");
+                    string tr = await TranslateProvider().TranslateAsync(text, to);
+                    hkForm.Invoke(new MethodInvoker(() =>
+                    {
+                        if (!string.IsNullOrEmpty(tr)) { try { Clipboard.SetText(tr); } catch { } ShowResultForm(tr, "翻译结果"); }
+                        else ShowTrayInfo("翻译失败");
+                        DialogResult = DialogResult.OK; Close();
+                    }));
+                }
+                catch (Exception ex) { Log("translate err: " + ex.Message); hkForm.Invoke(new MethodInvoker(() => ShowTrayInfo("翻译失败: " + ex.Message))); }
+                finally { try { bmp.Dispose(); } catch { } }
+            });
+        }
+
+        void ShowResultForm(string text, string title)
+        {
+            try { using (var rf = new ResultForm(title, text)) rf.ShowDialog(hkForm); }
+            catch (Exception ex) { Log("result form err: " + ex.Message); }
         }
 
         void CopyImage(Rectangle r)
@@ -185,6 +249,19 @@ partial class ShotService
                 }
             }
             catch (Exception ex) { Log("capture saveas err: " + ex.Message); }
+        }
+    }
+
+    // M2: OCR/翻译结果展示窗 (只读 + 复制按钮)
+    class ResultForm : Form
+    {
+        public ResultForm(string title, string text)
+        {
+            Text = title; Width = 520; Height = 340; StartPosition = FormStartPosition.CenterScreen; TopMost = true;
+            var tb = new TextBox() { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both, Text = text, Font = new Font("Consolas", 11) };
+            var btn = new Button() { Text = "复制", Dock = DockStyle.Bottom, Height = 34 };
+            btn.Click += (s, ev) => { try { Clipboard.SetText(text); MessageBox.Show("已复制", "Win Desktop Helper", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { } };
+            Controls.Add(tb); Controls.Add(btn);
         }
     }
 }

@@ -3,7 +3,7 @@
 [Setup]
 AppId={{FE6F68E9-0CEB-450B-B438-49BFDF5FFB15}
 AppName=Win Desktop Helper
-AppVersion=0.0.15
+AppVersion=0.0.16
 AppPublisher=oadank
 AppPublisherURL=https://github.com/oadank/win-desktop-helper
 DefaultDirName={localappdata}\Programs\win-desktop-helper
@@ -12,7 +12,7 @@ UninstallDisplayIcon={app}\icon.ico
 Compression=lzma2
 SolidCompression=yes
 OutputDir=release
-OutputBaseFilename=win-desktop-helper-setup-0.0.15
+OutputBaseFilename=win-desktop-helper-setup-0.0.16
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -32,6 +32,7 @@ Source: "SKILL.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "shot-service.json"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "shot-service"; ValueData: """{app}\shot-service.exe"""; Flags: uninsdeletevalue; Tasks: autostart

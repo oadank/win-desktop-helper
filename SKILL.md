@@ -63,7 +63,7 @@
 - **编译 C# 被代理硬拦截（重要）**：WorkBuddy 的 Bash/PowerShell 调 `csc.exe` 会被平台安全策略**关键词级拒绝**（即使是开了最大权限也放不开，属平台层策略非沙箱开关）。**编译必须用户在自有终端手动跑**：
   ```
   cd C:\D\opt\win-desktop-helper
-  C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /optimize+ /win32icon:icon.ico /win32manifest:app.manifest /out:shot-service.exe /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll shot-service.cs shot-capture.cs
+  C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /optimize+ /win32icon:icon.ico /win32manifest:app.manifest /out:shot-service.exe /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll shot-service.cs shot-capture.cs shot-ocr.cs shot-translate.cs
   ```
   （`shot-service.cs` 与 `shot-capture.cs` 是同一 `ShotService` 类的 partial 拆分，多文件一起传入 `csc` 仍编译成单个 `shot-service.exe`；后续新增 `shot-ocr/translate/scroll/...` 也照此追加到命令末尾）
   （首次若报 `CS0016 文件被占用`，是旧 exe 在跑，关掉进程再编一次即可）
