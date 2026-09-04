@@ -142,6 +142,7 @@ partial class ShotService
         public int Style = S_ARROW;  // 箭头样式
         public float Width = 3f;     // 线宽
         public int FontPt = 14;      // 文字/序号字号
+        public string FontFamily = "Microsoft YaHei UI"; // 文字字体
         public Rectangle Rect;      // rect/ellipse/arrow 的包围盒; seq/text 的定位点在 Rect.Location
         public List<Point> Pts;     // 画笔折线 (屏坐标)
         public string Text;         // 文字内容
@@ -173,13 +174,16 @@ partial class ShotService
         bool caretOn = true;
         Timer caretTimer;
         int curFontPt = 14; // 属性栏: 字号 (文字/序号)
-        static readonly Dictionary<int, Font> fontCache = new Dictionary<int, Font>();
-        static Font GetAnnotFont(int pt)
+        string curFontFamily = "Microsoft YaHei UI"; // 属性栏: 字体
+        static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
+        static Font GetAnnotFont(int pt) { return GetAnnotFont("Microsoft YaHei UI", pt); }
+        static Font GetAnnotFont(string family, int pt)
         {
+            string key = family + "@" + pt;
             lock (fontCache)
             {
                 Font f;
-                if (!fontCache.TryGetValue(pt, out f)) { f = new Font("Microsoft YaHei UI", pt, FontStyle.Bold); fontCache[pt] = f; }
+                if (!fontCache.TryGetValue(key, out f)) { f = new Font(family, pt, FontStyle.Bold); fontCache[key] = f; }
                 return f;
             }
         }
@@ -211,13 +215,27 @@ partial class ShotService
             Log("capture: overlay shown bounds=" + Bounds);
         }
 
+        // PixPin 同款: 双击选区 = 复制并完成。
+        // ⚠️ 必须在这里处理: WM_LBUTTONUP 不带点击数, MouseUp 的 e.Clicks 恒为 1 (实测踩坑)。
+        // 第二次 Down 已在 OnMouseDown 里 return 跳过, 此处状态未被破坏; 复制后关闭, 无残余消息
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && hasSel && tool == null && !textMode && cur == null && !IsDisposed)
+            {
+                Log("capture: dblclick = copy");
+                ActCopy();
+                return;
+            }
+            base.OnMouseDoubleClick(e);
+        }
+
         protected override void OnMouseDown(MouseEventArgs e)
         {
             if (IsDisposed) return;
             if (e.Button == MouseButtons.Right) { CancelAll(); return; }
             if (e.Button == MouseButtons.Middle && hasSel) { ActPin(); return; } // 中键 = 贴图 (PixPin 同款)
             if (e.Button != MouseButtons.Left) return;
-            if (e.Clicks >= 2) return; // 双击的第二次按下不动作 (复制在 MouseUp 统一处理, 防重复框选+释放后访问)
+            if (e.Clicks >= 2) return; // 双击的第二次按下不动作 (Double 事件里复制, 防重复框选)
             Point sp = PointToScreen(e.Location);
             if (!hasSel)
             {
@@ -249,7 +267,7 @@ partial class ShotService
                     cur.No = seqNext++;
                     int dia = (int)(curFontPt * 2);
                     cur.Rect = new Rectangle(sp.X - dia / 2, sp.Y - dia / 2, dia, dia);
-                    cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt;
+                    cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
                     PushAnnot(cur);
                     Log("capture: annot seq #" + cur.No);
                     cur = null; // 序号一笔即成
@@ -288,13 +306,6 @@ partial class ShotService
         protected override void OnMouseUp(MouseEventArgs e)
         {
             if (IsDisposed) return;
-            // PixPin 同款: 双击选区 = 复制并完成 (第二次抬起统一处理, 按下已跳过故状态未被破坏)
-            if (e.Clicks == 2 && e.Button == MouseButtons.Left && hasSel && tool == null && !textMode && cur == null)
-            {
-                Log("capture: dblclick = copy");
-                ActCopy();
-                return;
-            }
             Point sp = PointToScreen(e.Location);
             if (dragging)
             {
@@ -338,7 +349,7 @@ partial class ShotService
             }
             if (a.Kind == Annot.K_TEXT)
             {
-                Size ts = TextRenderer.MeasureText(a.Text, GetAnnotFont(a.FontPt));
+                Size ts = TextRenderer.MeasureText(a.Text, GetAnnotFont(a.FontFamily, a.FontPt));
                 return new Rectangle(a.Rect.Location, new Size(ts.Width + 8, ts.Height + 8));
             }
             return a.Rect;
@@ -367,15 +378,15 @@ partial class ShotService
             {
                 // typing text + blinking caret, painted on overlay = transparent background
                 using (SolidBrush tb = new SolidBrush(curColor))
-                using (Font pf = GetAnnotFont(curFontPt))
+                using (Font pf = GetAnnotFont(curFontFamily, curFontPt))
                     g.DrawString(textBuf, pf, tb, new PointF(d.X + (textPt.X - sel.X), d.Y + (textPt.Y - sel.Y)));
                 if (caretOn)
                 {
-                    SizeF tw = g.MeasureString(textBuf, GetAnnotFont(curFontPt));
+                    SizeF tw = g.MeasureString(textBuf, GetAnnotFont(curFontFamily, curFontPt));
                     float cx = d.X + (textPt.X - sel.X) + tw.Width * 0.92f;
                     float cy = d.Y + (textPt.Y - sel.Y);
                     using (Pen cp = new Pen(curColor, 2f))
-                        g.DrawLine(cp, cx, cy + 2, cx, cy + GetAnnotFont(curFontPt).Height - 2);
+                        g.DrawLine(cp, cx, cy + 2, cx, cy + GetAnnotFont(curFontFamily, curFontPt).Height - 2);
                 }
             } // 选区内标注 (客户区即冻结图坐标, 偏移0)
             using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
@@ -429,7 +440,7 @@ partial class ShotService
                         break;
                     case Annot.K_TEXT:
                         using (Brush b = new SolidBrush(a.Color))
-                        using (Font f = GetAnnotFont(a.FontPt))
+                        using (Font f = GetAnnotFont(a.FontFamily, a.FontPt))
                             g.DrawString(a.Text, f, b, a.Rect.X - offset.X, a.Rect.Y - offset.Y);
                         break;
                     case Annot.K_SEQ:
@@ -439,7 +450,7 @@ partial class ShotService
                         {
                             sf.Alignment = StringAlignment.Center; sf.LineAlignment = StringAlignment.Center;
                             using (Brush wb = new SolidBrush(Color.White))
-                            using (Font f = GetAnnotFont(a.FontPt))
+                            using (Font f = GetAnnotFont(a.FontFamily, a.FontPt))
                                 g.DrawString(a.No.ToString(), f, wb, (RectangleF)r, sf);
                         }
                         break;
@@ -536,6 +547,7 @@ partial class ShotService
                 a.Text = t;
                 a.Color = curColor;
                 a.FontPt = curFontPt;
+                a.FontFamily = curFontFamily;
                 a.Rect = new Rectangle(pt, Size.Empty);
                 PushAnnot(a);
                 Log("capture: annot text (" + t.Length + " chars)");
@@ -613,7 +625,7 @@ partial class ShotService
                 if (b.ToolKey == null) continue;
                 if (b.ToolKey.StartsWith("sty")) b.Enabled = (tool == "arrow");
                 else if (b.ToolKey.StartsWith("w_")) b.Enabled = (tool != "text" && tool != "seq");
-                else if (b.ToolKey.StartsWith("f_")) b.Enabled = (tool == "text" || tool == "seq");
+                else if (b.ToolKey != null && b.ToolKey.StartsWith("f_")) b.Enabled = (tool == "text" || tool == "seq");
             }
             MarkProp();
             PlacePropBar();
@@ -632,9 +644,10 @@ partial class ShotService
             propBar.Add("w_mid", "中线", delegate { curWidth = 3.5f; MarkProp(); }).ToolKey = "w_mid";
             propBar.Add("w_bold", "粗线", delegate { curWidth = 6f; MarkProp(); }).ToolKey = "w_bold";
             propBar.AddSep();
-            propBar.Add("f_small", "小字号 (文字/序号)", delegate { curFontPt = 11; MarkProp(); }).ToolKey = "f_small";
-            propBar.Add("f_mid", "中字号 (文字/序号)", delegate { curFontPt = 14; MarkProp(); }).ToolKey = "f_mid";
-            propBar.Add("f_big", "大字号 (文字/序号)", delegate { curFontPt = 20; MarkProp(); }).ToolKey = "f_big";
+            fontBtn = propBar.AddText(curFontPt.ToString(), "字号 (文字/序号)", delegate { ShowFontMenu(); });
+            fontBtn.ToolKey = "f_size";
+            familyBtn = propBar.AddText(FamilyShort(curFontFamily), "字体 (文字/序号)", delegate { ShowFamilyMenu(); });
+            familyBtn.ToolKey = "f_family";
             propBar.AddSep();
             Color[] cols =
             {
@@ -668,9 +681,7 @@ partial class ShotService
                 else if (b.ToolKey.StartsWith("w_")) b.On = (b.ToolKey == "w_thin" && curWidth <= 2.5f) ||
                                                             (b.ToolKey == "w_mid" && curWidth > 2.5f && curWidth <= 4.5f) ||
                                                             (b.ToolKey == "w_bold" && curWidth > 4.5f);
-                else if (b.ToolKey.StartsWith("f_")) b.On = (b.ToolKey == "f_small" && curFontPt <= 12) ||
-                                                            (b.ToolKey == "f_mid" && curFontPt > 12 && curFontPt <= 16) ||
-                                                            (b.ToolKey == "f_big" && curFontPt > 16);
+
                 else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
             }
             propBar.Invalidate();
@@ -686,6 +697,68 @@ partial class ShotService
             if (y < vs.Top + 4) y = vs.Top + 4;
             Point c = RectangleToClient(new Rectangle(new Point(x, y), Size.Empty)).Location;
             propBar.Left = c.X; propBar.Top = c.Y;
+        }
+
+        ToolbarPanel.Btn fontBtn, familyBtn;
+        static string FamilyShort(string fam)
+        {
+            if (fam == "Microsoft YaHei UI") return "雅黑";
+            if (fam == "SimSun") return "宋体";
+            if (fam == "SimHei") return "黑体";
+            if (fam == "KaiTi") return "楷体";
+            if (fam == "Consolas") return "代码";
+            return fam.Length > 3 ? fam.Substring(0, 3) : fam;
+        }
+
+        void ShowFontMenu()
+        {
+            ContextMenuStrip m = DarkMenu();
+            foreach (int pt in new int[] { 11, 14, 18, 22, 26 })
+            {
+                int captured = pt;
+                ToolStripItem it = m.Items.Add(pt.ToString(), null, delegate
+                {
+                    curFontPt = captured;
+                    if (fontBtn != null) { fontBtn.DrawStr = captured.ToString(); propBar.Invalidate(); }
+                    Log("capture: font pt=" + captured);
+                });
+                if (pt == curFontPt) it.Font = new Font(it.Font, FontStyle.Bold);
+            }
+            m.Show(propBar, fontBtn.Rect.X, fontBtn.Rect.Bottom + 2);
+        }
+
+        void ShowFamilyMenu()
+        {
+            ContextMenuStrip m = DarkMenu();
+            string[][] fams =
+            {
+                new string[] { "Microsoft YaHei UI", "雅黑" },
+                new string[] { "SimSun", "宋体" },
+                new string[] { "SimHei", "黑体" },
+                new string[] { "KaiTi", "楷体" },
+                new string[] { "Consolas", "代码(等宽)" },
+            };
+            foreach (string[] fm in fams)
+            {
+                string fam = fm[0], label = fm[1];
+                ToolStripItem it = m.Items.Add(label, null, delegate
+                {
+                    curFontFamily = fam;
+                    if (familyBtn != null) { familyBtn.DrawStr = FamilyShort(fam); propBar.Invalidate(); }
+                    Log("capture: font family=" + fam);
+                });
+                if (fam == curFontFamily) it.Font = new Font(it.Font, FontStyle.Bold);
+            }
+            m.Show(propBar, familyBtn.Rect.X, familyBtn.Rect.Bottom + 2);
+        }
+
+        static ContextMenuStrip DarkMenu()
+        {
+            ContextMenuStrip m = new ContextMenuStrip();
+            m.BackColor = Color.FromArgb(40, 41, 46);
+            m.ForeColor = DarkUI.Text;
+            m.ShowImageMargin = false;
+            return m;
         }
 
         void HidePropBar() { if (propBar != null) propBar.Visible = false; }
@@ -920,13 +993,15 @@ partial class ShotService
     }
 
 
-    // ---- 自绘 18x18 图标 (白色线性紧凑版, 密度对齐 PixPin; GDI+ 矢量画, 零图片依赖) ----
-    static Bitmap MakeIcon(string kind)
+    // ---- 自绘图标 (白色线性; 矢量画在 18 坐标系再缩放到目标尺寸, 零图片依赖) ----
+    static Bitmap MakeIcon(string kind) { return MakeIcon(kind, 22); }
+    static Bitmap MakeIcon(string kind, int size)
     {
-        Bitmap bmp = new Bitmap(18, 18);
+        Bitmap bmp = new Bitmap(size, size);
         using (Graphics g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.ScaleTransform(size / 18f, size / 18f); // 18 坐标系统一布局, 按需放大
             using (Pen w = new Pen(Color.FromArgb(232, 234, 240), 2f))
             {
                 w.StartCap = LineCap.Round; w.EndCap = LineCap.Round; w.LineJoin = LineJoin.Round;
@@ -978,21 +1053,21 @@ partial class ShotService
                         break;
                     case "translate": // 左上"中" 右下"A" 双弧围圆 — 中/A 用真实字体 (手画线条比例失衡)
                     {
-                        using (Font fz = new Font("Microsoft YaHei UI", 7f, FontStyle.Bold))
-                        using (Font fa = new Font("Segoe UI", 7.5f, FontStyle.Bold))
+                        using (Font fz = new Font("Microsoft YaHei UI", 8f, FontStyle.Bold))
+                        using (Font fa = new Font("Segoe UI", 8f, FontStyle.Bold))
                         using (SolidBrush b = new SolidBrush(w.Color))
                         {
-                            g.DrawString("中", fz, b, 0.5f, 0.5f);
-                            g.DrawString("A", fa, b, 10.5f, 9.5f);
+                            g.DrawString("中", fz, b, 0.2f, 0.2f);   // 左上 (18坐标系)
+                            g.DrawString("A", fa, b, 10f, 10f);      // 右下 (弧内侧)
                         }
                         // 右上弧 (中 -> A) + 箭头
-                        g.DrawArc(w, 3.2f, 3.2f, 11.6f, 11.6f, -78, 62);
+                        g.DrawArc(w, 2.6f, 2.6f, 12.8f, 12.8f, -80, 65);
                         using (SolidBrush b = new SolidBrush(w.Color))
-                            g.FillPolygon(b, new PointF[] { new PointF(14.6f, 4.4f), new PointF(12.2f, 4.2f), new PointF(13.9f, 6.4f) });
+                            g.FillPolygon(b, new PointF[] { new PointF(15.4f, 3.8f), new PointF(12.8f, 3.4f), new PointF(14.6f, 5.9f) });
                         // 左下弧 (A -> 中) + 箭头
-                        g.DrawArc(w, 3.2f, 3.2f, 11.6f, 11.6f, 102, 62);
+                        g.DrawArc(w, 2.6f, 2.6f, 12.8f, 12.8f, 100, 65);
                         using (SolidBrush b2 = new SolidBrush(w.Color))
-                            g.FillPolygon(b2, new PointF[] { new PointF(3.4f, 13.6f), new PointF(5.8f, 13.8f), new PointF(4.1f, 11.6f) });
+                            g.FillPolygon(b2, new PointF[] { new PointF(2.6f, 14.2f), new PointF(5.2f, 14.6f), new PointF(3.4f, 12.2f) });
                         break;
                     }
                     case "save": // 软盘
@@ -1054,6 +1129,13 @@ partial class ShotService
             public bool IsToggle, On, Enabled = true;
             public Rectangle Rect;
             public Color Swatch = Color.Empty; // 颜色圆点按钮 (非空时画色块而非图标)
+            public string DrawStr;             // 文字按钮 (非空时画文字而非图标, 如字号/字体当前值)
+        }
+
+        public Btn AddText(string str, string tipText, Action onClick)
+        {
+            Btn b = new Btn { Icon = "#text", DrawStr = str, Tip = tipText, OnClick = onClick };
+            Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
         public Btn AddColor(Color c, string tipText, Action onClick)
@@ -1151,13 +1233,20 @@ partial class ShotService
                 if (b.Swatch != Color.Empty)
                 {
                     using (SolidBrush sb = new SolidBrush(b.Swatch))
-                        g.FillEllipse(sb, b.Rect.X + 9, b.Rect.Y + 9, 14, 14);
+                        g.FillEllipse(sb, b.Rect.X + 8, b.Rect.Y + 8, 16, 16);
                     if (!b.Enabled)
                         using (SolidBrush dim = new SolidBrush(Color.FromArgb(140, 26, 27, 31)))
-                            g.FillEllipse(dim, b.Rect.X + 9, b.Rect.Y + 9, 14, 14);
+                            g.FillEllipse(dim, b.Rect.X + 8, b.Rect.Y + 8, 16, 16);
                     continue;
                 }
-                using (Bitmap ic = MakeIcon(b.Icon))
+                if (b.DrawStr != null)
+                {
+                    TextRenderer.DrawText(g, b.DrawStr, new Font("Microsoft YaHei UI", 9f, FontStyle.Bold), b.Rect,
+                                          b.Enabled ? Color.FromArgb(232, 234, 240) : Color.FromArgb(110, 114, 120),
+                                          TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    continue;
+                }
+                using (Bitmap ic = MakeIcon(b.Icon, 22))
                 {
                     if (!b.Enabled)
                     {
@@ -1165,11 +1254,11 @@ partial class ShotService
                         using (System.Drawing.Imaging.ImageAttributes ia = new System.Drawing.Imaging.ImageAttributes())
                         {
                             ia.SetColorMatrix(cm);
-                            g.DrawImage(ic, new Rectangle(b.Rect.X + 7, b.Rect.Y + 7, 18, 18), 0, 0, 18, 18, GraphicsUnit.Pixel, ia);
+                            g.DrawImage(ic, new Rectangle(b.Rect.X + 5, b.Rect.Y + 5, 22, 22), 0, 0, 22, 22, GraphicsUnit.Pixel, ia);
                         }
                     }
                     else
-                        g.DrawImage(ic, b.Rect.X + 7, b.Rect.Y + 7, 18, 18);
+                        g.DrawImage(ic, b.Rect.X + 5, b.Rect.Y + 5, 22, 22);
                 }
             }
         }
