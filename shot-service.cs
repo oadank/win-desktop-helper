@@ -48,7 +48,7 @@ public partial class ShotService
     const string LATEST_URL = REPO_URL + "/releases/latest";
     const string MUTEX_NAME = @"Global\WinDesktopHelper"; // 单实例互斥(跨会话, 防双进程)
     static Mutex instanceMutex;
-    static readonly string ShotDir = Environment.GetEnvironmentVariable("WDH_SHOT_DIR")
+    static string ShotDir = Environment.GetEnvironmentVariable("WDH_SHOT_DIR")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Screenshots");
     static readonly string LogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shot-service.log");
     static int MySession = Process.GetCurrentProcess().SessionId;
@@ -382,7 +382,8 @@ public partial class ShotService
     const int MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_SHIFT = 0x4, MOD_WIN = 0x8;
     const int WM_HOTKEY = 0x0312;
     const int HOTKEY_ID = 0x5712; // 'W'+'V' 记号
-    const int CLIP_MAX = 50;
+    static int clipMax = 50;    // 设置页可配 (剪贴板最大条数)
+    static int clipEnabled = 1; // 设置页可配: 0 = 暂停剪贴板监听
     static readonly List<string> clipHist = new List<string>();
     static readonly object clipLock = new object();
     static string lastClipText = "";
@@ -445,7 +446,7 @@ public partial class ShotService
                         if (!string.IsNullOrEmpty(v) && !clipHist.Contains(v)) clipHist.Add(v);
                     }
                 }
-                if (clipHist.Count > CLIP_MAX) clipHist.RemoveRange(CLIP_MAX, clipHist.Count - CLIP_MAX);
+                if (clipHist.Count > clipMax) clipHist.RemoveRange(clipMax, clipHist.Count - clipMax);
             }
             Log("clip history loaded: " + clipHist.Count + " items");
         }
@@ -463,7 +464,7 @@ public partial class ShotService
         {
             try
             {
-                if (Clipboard.ContainsText())
+                if (clipEnabled == 1 && Clipboard.ContainsText())
                 {
                     string t = Clipboard.GetText();
                     if (!string.IsNullOrEmpty(t) && t != lastClipText)
@@ -473,7 +474,7 @@ public partial class ShotService
                         {
                             clipHist.Remove(t);
                             clipHist.Insert(0, t);
-                            while (clipHist.Count > CLIP_MAX) clipHist.RemoveAt(clipHist.Count - 1);
+                            while (clipHist.Count > clipMax) clipHist.RemoveAt(clipHist.Count - 1);
                         }
                         SaveClipHistory(); // 新记录落盘持久化
                     }
@@ -1115,6 +1116,80 @@ public partial class ShotService
                         catch (Exception ex) { code = 500; body = "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
                     }
                 }
+                // ---- T2 自动化扩展: 窗口管理 / 鼠标扩展 / 键按住 / 剪贴板 / UIA (实现在 shot-automation.cs) ----
+                else if (path.StartsWith("/win/"))
+                {
+                    string verb = path.Substring(5);
+                    if (verb == "wait")
+                    {
+                        int tmo = 10000;
+                        if (q.ContainsKey("timeout")) { int v; if (int.TryParse(q["timeout"], out v) && v > 0) tmo = v; }
+                        body = WinWait(q.ContainsKey("title") ? q["title"] : "", tmo);
+                    }
+                    else if (verb == "list")
+                    {
+                        int lp = 0; TryInt(q, "pid", out lp);
+                        body = WinListByPid(lp);
+                    }
+                    else
+                    {
+                        IntPtr wh = IntPtr.Zero;
+                        if (q.ContainsKey("title")) wh = FindWindowByTitle(q["title"]);
+                        else if (q.ContainsKey("hwnd")) { try { wh = new IntPtr(long.Parse(q["hwnd"])); } catch { } }
+                        if (wh == IntPtr.Zero) { code = 404; body = "{\"ok\":false,\"error\":\"window not found\"}"; }
+                        else if (verb == "activate") body = WinActivate(wh);
+                        else if (verb == "max") body = WinShow(wh, SW_MAXIMIZE, "maximized");
+                        else if (verb == "min") body = WinShow(wh, SW_MINIMIZE, "minimized");
+                        else if (verb == "restore") body = WinShow(wh, SW_RESTORE, "restored");
+                        else if (verb == "close") body = WinClose(wh);
+                        else if (verb == "move")
+                        {
+                            int mx, my, mw, mh;
+                            if (TryInt(q, "x", out mx) && TryInt(q, "y", out my) && TryInt(q, "w", out mw) && TryInt(q, "h", out mh))
+                                body = WinMove(wh, mx, my, mw, mh);
+                            else { code = 400; body = "{\"ok\":false,\"error\":\"need x,y,w,h\"}"; }
+                        }
+                        else { code = 404; body = "{\"ok\":false,\"error\":\"unknown verb\"}"; }
+                    }
+                    Log("[win] " + target);
+                }
+                else if (path == "/mouse/down" || path == "/mouse/up")
+                {
+                    string btn = q.ContainsKey("button") ? q["button"].ToLowerInvariant() : "left";
+                    body = MouseDownUp(btn, path == "/mouse/down");
+                    Log("[ctrl] mouse " + (path == "/mouse/down" ? "down " : "up ") + btn);
+                }
+                else if (path == "/mouse/drag")
+                {
+                    int x1, y1, x2, y2, ms;
+                    if (TryInt(q, "x1", out x1) && TryInt(q, "y1", out y1) && TryInt(q, "x2", out x2) && TryInt(q, "y2", out y2))
+                    {
+                        if (!TryInt(q, "ms", out ms)) ms = 300;
+                        body = MouseDrag(x1, y1, x2, y2, ms);
+                        Log("[ctrl] drag " + x1 + "," + y1 + " -> " + x2 + "," + y2);
+                    }
+                    else { code = 400; body = "{\"ok\":false,\"error\":\"need x1,y1,x2,y2\"}"; }
+                }
+                else if (path == "/mouse/pos") { body = MousePos(); }
+                else if (path == "/keyboard/hold")
+                {
+                    if (!q.ContainsKey("keys")) { code = 400; body = "{\"ok\":false,\"error\":\"need keys\"}"; }
+                    else
+                    {
+                        int ms; if (!TryInt(q, "ms", out ms)) ms = 300;
+                        body = KeyHold(q["keys"], ms);
+                        Log("[ctrl] hold " + q["keys"] + " " + ms + "ms");
+                    }
+                }
+                else if (path == "/clipboard/set")
+                {
+                    if (!q.ContainsKey("text")) { code = 400; body = "{\"ok\":false,\"error\":\"need text\"}"; }
+                    else { body = ClipboardSetText(q["text"]); Log("[ctrl] clipboard set " + q["text"].Length + " chars"); }
+                }
+                else if (path == "/ui/tree") { body = UiTree(q); Log("[ui] tree " + target); }
+                else if (path == "/ui/click") { body = UiClick(q); Log("[ui] click " + target); }
+                else if (path == "/ui/set") { body = UiSet(q); Log("[ui] set " + target); }
+                else if (path == "/ui/read") { body = UiRead(q); Log("[ui] read " + target); }
                 else { code = 404; body = "{\"ok\":false,\"error\":\"not found\"}"; }
             }
             catch (Exception ex) { code = 500; body = "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; Log("handler err: " + ex.Message); }
@@ -1135,6 +1210,58 @@ public partial class ShotService
         }
         catch (Exception ex) { Log("handle err: " + ex.Message); }
         finally { client.Close(); }
+    }
+
+    // 启动时从 shot-service.json 加载运行时配置 (设置页写入; 热键类重启生效, 音量/条数此处为初值)
+    static void LoadRuntimeSettings()
+    {
+        try
+        {
+            string dir = Cfg("capture.dir", "");
+            if (!string.IsNullOrWhiteSpace(dir))
+            {
+                dir = Environment.ExpandEnvironmentVariables(dir);
+                if (dir.Length > 2) ShotDir = dir;
+            }
+            int cm; if (int.TryParse(Cfg("clipboard.max", "50"), out cm) && cm >= 5 && cm <= 500) clipMax = cm;
+            int ce; if (int.TryParse(Cfg("clipboard.enabled", "1"), out ce)) clipEnabled = ce == 1 ? 1 : 0;
+            int ve; if (int.TryParse(Cfg("volume.enabled", "1"), out ve)) volEnabled = ve == 1 ? 1 : 0;
+            int vs; if (int.TryParse(Cfg("volume.step", "2"), out vs) && vs >= 1 && vs <= 20) volStep = vs;
+            int vr; if (int.TryParse(Cfg("volume.reverse", "0"), out vr)) volReverse = vr == 1 ? 1 : 0;
+            Log("runtime settings: dir=" + ShotDir + " clipMax=" + clipMax + " clipEnabled=" + clipEnabled +
+                " vol[en=" + volEnabled + " step=" + volStep + " rev=" + volReverse + "]");
+        }
+        catch (Exception ex) { Log("load runtime settings err: " + ex.Message); }
+    }
+
+    // 解析热键串 "Ctrl+Alt+S" -> {mods, vk}; 非法返回 null
+    static uint[] HotkeyParse(string spec)
+    {
+        if (string.IsNullOrWhiteSpace(spec)) return null;
+        try
+        {
+            uint mods = 0; ushort vk = 0;
+            string[] parts = spec.Split('+');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string k = parts[i].Trim();
+                if (k.Length == 0) return null;
+                string lk = k.ToLowerInvariant();
+                if (lk == "ctrl" || lk == "control") mods |= MOD_CONTROL;
+                else if (lk == "shift") mods |= MOD_SHIFT;
+                else if (lk == "alt") mods |= MOD_ALT;
+                else if (lk == "win") mods |= MOD_WIN;
+                else
+                {
+                    if (i != parts.Length - 1) return null;
+                    vk = KeyToVk(lk);
+                    if (vk == 0) return null;
+                }
+            }
+            if (vk == 0) return null;
+            return new uint[] { mods, vk };
+        }
+        catch { return null; }
     }
 
     [STAThread]
@@ -1215,6 +1342,7 @@ public partial class ShotService
         try { System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12; } catch { }
         Log("shot-service v" + APP_VERSION + " build=" + build + " session=" + MySession + " pid=" + Process.GetCurrentProcess().Id +
             " mode=" + (watchMode ? "watch" : "service") + (allowTray ? " tray=on" : " tray=off"));
+        LoadRuntimeSettings();
         try { if (!Directory.Exists(ShotDir)) Directory.CreateDirectory(ShotDir); } catch { }
 
         if (watchMode) { RunWatch(); return; }    // 自愈守护 (替代 shot-watcher.exe)
@@ -1266,13 +1394,20 @@ public partial class ShotService
                     }
                     if (!hkOk) Log("clip hotkey register FAILED (all candidates busy)");
                     // 区域截图热键: 候选组合自动降级 (Win+Shift+S 被 Win11 系统截图占用, 故 Win+Shift+A 优先)
-                    uint[][] scands = new uint[][]
+                    uint[][] scands;
+                    string[] scanmes;
+                    uint[] cfgShot = HotkeyParse(Cfg("capture.hotkeyRegion", ""));
+                    if (cfgShot != null) { scands = new uint[][] { cfgShot }; scanmes = new string[] { Cfg("capture.hotkeyRegion", "") }; }
+                    else
                     {
-                        new uint[] { MOD_WIN | MOD_SHIFT, 0x41 },      // Win+Shift+A (优先, 空闲)
-                        new uint[] { MOD_CONTROL | MOD_SHIFT, 0x53 }, // Ctrl+Shift+S
-                        new uint[] { MOD_WIN | MOD_SHIFT, 0x53 },      // Win+Shift+S (Win11 系统截图占用, 备选)
-                    };
-                    string[] scanmes = new string[] { "Win+Shift+A", "Ctrl+Shift+S", "Win+Shift+S" };
+                        scands = new uint[][]
+                        {
+                            new uint[] { MOD_WIN | MOD_SHIFT, 0x41 },
+                            new uint[] { MOD_CONTROL | MOD_SHIFT, 0x53 },
+                            new uint[] { MOD_WIN | MOD_SHIFT, 0x53 },
+                        };
+                        scanmes = new string[] { "Win+Shift+A", "Ctrl+Shift+S", "Win+Shift+S" };
+                    }
                     bool shOk = false;
                     for (int ci = 0; ci < scands.Length; ci++)
                     {
@@ -1286,13 +1421,20 @@ public partial class ShotService
                     }
                     if (!shOk) Log("shot hotkey register FAILED (all candidates busy)");
                     // 全屏截图热键 (Ctrl+Alt+A, 候选降级)
-                    uint[][] fcands = new uint[][]
+                    uint[][] fcands;
+                    string[] fnames;
+                    uint[] cfgFull = HotkeyParse(Cfg("capture.hotkeyFull", ""));
+                    if (cfgFull != null) { fcands = new uint[][] { cfgFull }; fnames = new string[] { Cfg("capture.hotkeyFull", "") }; }
+                    else
                     {
-                        new uint[] { MOD_CONTROL | MOD_ALT, 0x41 },    // Ctrl+Alt+A (优先)
-                        new uint[] { MOD_CONTROL | MOD_SHIFT, 0x41 },  // Ctrl+Shift+A
-                        new uint[] { MOD_CONTROL | MOD_ALT, 0x46 },    // Ctrl+Alt+F
-                    };
-                    string[] fnames = new string[] { "Ctrl+Alt+A", "Ctrl+Shift+A", "Ctrl+Alt+F" };
+                        fcands = new uint[][]
+                        {
+                            new uint[] { MOD_CONTROL | MOD_ALT, 0x41 },
+                            new uint[] { MOD_CONTROL | MOD_SHIFT, 0x41 },
+                            new uint[] { MOD_CONTROL | MOD_ALT, 0x46 },
+                        };
+                        fnames = new string[] { "Ctrl+Alt+A", "Ctrl+Shift+A", "Ctrl+Alt+F" };
+                    }
                     bool fOk = false;
                     for (int ci = 0; ci < fcands.Length; ci++)
                     {
@@ -1306,12 +1448,19 @@ public partial class ShotService
                     }
                     if (!fOk) Log("fullscreen shot hotkey register FAILED (all candidates busy)");
                     // 贴图热键 (PixPin F3 同款): 剪贴板图钉到桌面
-                    uint[][] pcands = new uint[][]
+                    uint[][] pcands;
+                    string[] pnames;
+                    uint[] cfgPin = HotkeyParse(Cfg("capture.hotkeyPin", ""));
+                    if (cfgPin != null) { pcands = new uint[][] { cfgPin }; pnames = new string[] { Cfg("capture.hotkeyPin", "") }; }
+                    else
                     {
-                        new uint[] { 0, 0x72 },                        // F3 (PixPin 默认, 优先)
-                        new uint[] { MOD_CONTROL | MOD_ALT, 0x50 },    // Ctrl+Alt+P
-                    };
-                    string[] pnames = new string[] { "F3", "Ctrl+Alt+P" };
+                        pcands = new uint[][]
+                        {
+                            new uint[] { 0, 0x72 },
+                            new uint[] { MOD_CONTROL | MOD_ALT, 0x50 },
+                        };
+                        pnames = new string[] { "F3", "Ctrl+Alt+P" };
+                    }
                     bool pOk = false;
                     for (int ci = 0; ci < pcands.Length; ci++)
                     {
@@ -1684,6 +1833,64 @@ public partial class ShotService
                     sb.Append("]}");
                     return McpText(sb.ToString(), false);
                 }
+                // ---- T2 automation tools ----
+                case "win_manage":
+                {
+                    string verb = McpParam(a, "verb");
+                    if (verb == "wait")
+                    {
+                        int tmo = McpParamInt(a, "timeout"); if (tmo <= 0) tmo = 10000;
+                        return McpText(WinWait(McpParam(a, "title"), tmo), false);
+                    }
+                    if (verb == "list") return McpText(WinListByPid(McpParamInt(a, "pid")), false);
+                    IntPtr wh = IntPtr.Zero;
+                    string ttl = McpParam(a, "title");
+                    if (ttl != "") wh = FindWindowByTitle(ttl);
+                    if (wh == IntPtr.Zero) return McpText("{\"ok\":false,\"error\":\"window not found\"}", true);
+                    if (verb == "activate") return McpText(WinActivate(wh), false);
+                    if (verb == "max") return McpText(WinShow(wh, SW_MAXIMIZE, "maximized"), false);
+                    if (verb == "min") return McpText(WinShow(wh, SW_MINIMIZE, "minimized"), false);
+                    if (verb == "restore") return McpText(WinShow(wh, SW_RESTORE, "restored"), false);
+                    if (verb == "close") return McpText(WinClose(wh), false);
+                    if (verb == "move") return McpText(WinMove(wh, McpParamInt(a, "x"), McpParamInt(a, "y"), McpParamInt(a, "w"), McpParamInt(a, "h")), false);
+                    return McpText("unknown verb (activate/max/min/restore/close/move/wait/list)", true);
+                }
+                case "mouse_down": return McpText(MouseDownUp(McpParam(a, "button") == "" ? "left" : McpParam(a, "button"), true), false);
+                case "mouse_up": return McpText(MouseDownUp(McpParam(a, "button") == "" ? "left" : McpParam(a, "button"), false), false);
+                case "mouse_drag":
+                    return McpText(MouseDrag(McpParamInt(a, "x1"), McpParamInt(a, "y1"), McpParamInt(a, "x2"), McpParamInt(a, "y2"),
+                        McpParam(a, "ms") == "" ? 300 : McpParamInt(a, "ms")), false);
+                case "mouse_pos": return McpText(MousePos(), false);
+                case "keyboard_hold":
+                {
+                    int ms = McpParam(a, "ms") == "" ? 300 : McpParamInt(a, "ms");
+                    return McpText(KeyHold(McpParam(a, "keys"), ms), false);
+                }
+                case "clipboard_set": return McpText(ClipboardSetText(McpParam(a, "text")), false);
+                case "ui_tree":
+                {
+                    Dictionary<string, string> q2 = new Dictionary<string, string>();
+                    foreach (var kv in new[] { "title", "hwnd", "max" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    return McpText(UiTree(q2), false);
+                }
+                case "ui_click":
+                {
+                    Dictionary<string, string> q2 = new Dictionary<string, string>();
+                    foreach (var kv in new[] { "title", "hwnd", "i" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    return McpText(UiClick(q2), false);
+                }
+                case "ui_set":
+                {
+                    Dictionary<string, string> q2 = new Dictionary<string, string>();
+                    foreach (var kv in new[] { "title", "hwnd", "i", "value" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    return McpText(UiSet(q2), false);
+                }
+                case "ui_read":
+                {
+                    Dictionary<string, string> q2 = new Dictionary<string, string>();
+                    foreach (var kv in new[] { "title", "hwnd", "i" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    return McpText(UiRead(q2), false);
+                }
                 default: return McpText("unknown tool: " + name, true);
             }
         }
@@ -1705,6 +1912,17 @@ public partial class ShotService
             "{\"name\":\"app_run\",\"description\":\"运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"path\"]}}," +
             "{\"name\":\"taskbar_volume\",\"description\":\"任务栏滚轮调音量（常驻功能）。enabled=0/1 开关，step=每次滚轮音量变化百分比(1-20,默认2)，reverse=1 反向(滚轮上=减小)。不带参返回当前状态。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"enabled\":{\"type\":\"number\"},\"step\":{\"type\":\"number\"},\"reverse\":{\"type\":\"number\"}}}}," +
             "{\"name\":\"clipboard_history\",\"description\":\"读取剪贴板历史（常驻监听，最多50条，最新在前）。limit=返回条数(可选)。给AI复用刚复制的内容。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"limit\":{\"type\":\"number\"}}}}," +
+            "{\"name\":\"win_manage\",\"description\":\"窗口管理。verb=activate|max|min|restore|close|move|wait|list。activate置前台(先解除最小化)；move需x,y,w,h；wait轮询等title窗口出现(timeout毫秒,上限60s)；list按pid列窗口\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"verb\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"pid\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"timeout\":{\"type\":\"number\"}},\"required\":[\"verb\"]}," +
+            "{\"name\":\"mouse_down\",\"description\":\"按住鼠标键不松。button=left(默认)/right/middle。与mouse_up配对可自定义拖拽\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"button\":{\"type\":\"string\"}}}," +
+            "{\"name\":\"mouse_up\",\"description\":\"松开鼠标键。button=left(默认)/right/middle\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"button\":{\"type\":\"string\"}}}," +
+            "{\"name\":\"mouse_drag\",\"description\":\"左键拖拽一条龙: 从x1,y1按住平滑拖到x2,y2再松开。ms=总时长毫秒(默认300)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x1\":{\"type\":\"number\"},\"y1\":{\"type\":\"number\"},\"x2\":{\"type\":\"number\"},\"y2\":{\"type\":\"number\"},\"ms\":{\"type\":\"number\"}},\"required\":[\"x1\",\"y1\",\"x2\",\"y2\"]}," +
+            "{\"name\":\"mouse_pos\",\"description\":\"查当前鼠标光标物理像素坐标\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}," +
+            "{\"name\":\"keyboard_hold\",\"description\":\"按住组合键ms毫秒再松开(如按住win拖窗口)。keys格式同keyboard_press\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"},\"ms\":{\"type\":\"number\"}},\"required\":[\"keys\"]}," +
+            "{\"name\":\"clipboard_set\",\"description\":\"写文本到剪贴板(替代手动复制)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}," +
+            "{\"name\":\"ui_tree\",\"description\":\"【语义操作核心】枚举窗口内UI Automation元素(按钮/输入框/菜单): 每项含 i(索引用于ui_click/ui_set/ui_read)、type、name、enabled、rect、patterns。先activate窗口再列元素。max=最大元素数(默认400)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"max\":{\"type\":\"number\"}}}," +
+            "{\"name\":\"ui_click\",\"description\":\"按ui_tree索引语义点击元素(Invoke/Toggle/Expand/Select优先,无模式退坐标中心)。title=窗口标题,i=元素索引\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"}},\"required\":[\"i\"]}," +
+            "{\"name\":\"ui_set\",\"description\":\"按索引直接写输入框值(ValuePattern,不走键盘输入法)。title=窗口标题,i=索引,value=文本\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"},\"value\":{\"type\":\"string\"}},\"required\":[\"i\",\"value\"]}," +
+            "{\"name\":\"ui_read\",\"description\":\"按索引读元素Name/Value/类名/类型(比OCR准)。title=窗口标题,i=索引\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"}},\"required\":[\"i\"]}," +
             "{\"name\":\"get_skill\",\"description\":\"【必须先调用】获取本服务 SKILL 操作手册（铁律/避坑/流程）。所有工具首次调用前强制先读本 SKILL，否则报错。踩坑必须 update_skill 写回，禁止只写记忆。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"update_skill\",\"description\":\"【踩坑必写】把新踩坑经验写回共享 SKILL.md（全体 agent 共享，立即生效）。title=小节标题，entry=markdown 正文\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"entry\":{\"type\":\"string\"}},\"required\":[\"title\",\"entry\"]}}" +
             "]";
