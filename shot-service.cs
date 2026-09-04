@@ -1193,6 +1193,23 @@ public partial class ShotService
         }
         catch (Exception ex) { Log("mutex err: " + ex.Message); }
 
+        // 全局异常兜底: 托盘常驻程序任何 UI 异常只记日志+气泡, 绝不弹 .NET 崩溃框 (双击复制时序曾触发 ObjectDisposedException)
+        try
+        {
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) =>
+            {
+                Log("ui exception (caught): " + e.Exception.GetType().Name + ": " + e.Exception.Message + "\r\n" + e.Exception.StackTrace);
+                try { TrayNotify("出错了(已拦截)", e.Exception.Message); } catch { }
+            };
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                Exception ex = e.ExceptionObject as Exception;
+                Log("fatal exception: " + (ex != null ? ex.GetType().Name + ": " + ex.Message : e.ExceptionObject));
+            };
+        }
+        catch { }
+
         try { SetProcessDPIAware(); } catch { }
         // .NET 4.8 默认 TLS1.0, GitHub API 需 TLS1.2 (否则更新检测失败)
         try { System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12; } catch { }

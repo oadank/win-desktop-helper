@@ -141,6 +141,7 @@ partial class ShotService
         public int Kind;
         public int Style = S_ARROW;  // 箭头样式
         public float Width = 3f;     // 线宽
+        public int FontPt = 14;      // 文字/序号字号
         public Rectangle Rect;      // rect/ellipse/arrow 的包围盒; seq/text 的定位点在 Rect.Location
         public List<Point> Pts;     // 画笔折线 (屏坐标)
         public string Text;         // 文字内容
@@ -171,7 +172,17 @@ partial class ShotService
         Point textPt;
         bool caretOn = true;
         Timer caretTimer;
-        static readonly Font annotFont = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold);
+        int curFontPt = 14; // 属性栏: 字号 (文字/序号)
+        static readonly Dictionary<int, Font> fontCache = new Dictionary<int, Font>();
+        static Font GetAnnotFont(int pt)
+        {
+            lock (fontCache)
+            {
+                Font f;
+                if (!fontCache.TryGetValue(pt, out f)) { f = new Font("Microsoft YaHei UI", pt, FontStyle.Bold); fontCache[pt] = f; }
+                return f;
+            }
+        }
 
         public CaptureOverlay(Bitmap preShot)
         {
@@ -202,8 +213,11 @@ partial class ShotService
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
+            if (IsDisposed) return;
             if (e.Button == MouseButtons.Right) { CancelAll(); return; }
+            if (e.Button == MouseButtons.Middle && hasSel) { ActPin(); return; } // 中键 = 贴图 (PixPin 同款)
             if (e.Button != MouseButtons.Left) return;
+            if (e.Clicks >= 2) return; // 双击的第二次按下不动作 (复制在 MouseUp 统一处理, 防重复框选+释放后访问)
             Point sp = PointToScreen(e.Location);
             if (!hasSel)
             {
@@ -229,12 +243,13 @@ partial class ShotService
                 cur = new Annot();
                 cur.Kind = tool == "rect" ? Annot.K_RECT : tool == "ellipse" ? Annot.K_ELLIPSE :
                            tool == "arrow" ? Annot.K_ARROW : tool == "seq" ? Annot.K_SEQ : Annot.K_PEN;
-                cur.Width = curWidth; cur.Color = curColor; cur.Style = curArrowStyle;
+                cur.Width = curWidth; cur.Color = curColor; cur.Style = curArrowStyle; cur.FontPt = curFontPt;
                 if (cur.Kind == Annot.K_SEQ)
                 {
                     cur.No = seqNext++;
-                    cur.Rect = new Rectangle(sp.X - 14, sp.Y - 14, 28, 28);
-                    cur.Width = curWidth; cur.Color = curColor;
+                    int dia = (int)(curFontPt * 2);
+                    cur.Rect = new Rectangle(sp.X - dia / 2, sp.Y - dia / 2, dia, dia);
+                    cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt;
                     PushAnnot(cur);
                     Log("capture: annot seq #" + cur.No);
                     cur = null; // 序号一笔即成
@@ -270,19 +285,16 @@ partial class ShotService
             }
         }
 
-        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        protected override void OnMouseUp(MouseEventArgs e)
         {
-            base.OnMouseDoubleClick(e);
-            // PixPin 同款: 双击选区 = 复制并完成 (拖框中/文字输入中/选了工具时不触发)
-            if (e.Button == MouseButtons.Left && hasSel && !dragging && cur == null && !textMode && tool == null)
+            if (IsDisposed) return;
+            // PixPin 同款: 双击选区 = 复制并完成 (第二次抬起统一处理, 按下已跳过故状态未被破坏)
+            if (e.Clicks == 2 && e.Button == MouseButtons.Left && hasSel && tool == null && !textMode && cur == null)
             {
                 Log("capture: dblclick = copy");
                 ActCopy();
+                return;
             }
-        }
-
-        protected override void OnMouseUp(MouseEventArgs e)
-        {
             Point sp = PointToScreen(e.Location);
             if (dragging)
             {
@@ -326,7 +338,7 @@ partial class ShotService
             }
             if (a.Kind == Annot.K_TEXT)
             {
-                Size ts = TextRenderer.MeasureText(a.Text, annotFont);
+                Size ts = TextRenderer.MeasureText(a.Text, GetAnnotFont(a.FontPt));
                 return new Rectangle(a.Rect.Location, new Size(ts.Width + 8, ts.Height + 8));
             }
             return a.Rect;
@@ -355,14 +367,15 @@ partial class ShotService
             {
                 // typing text + blinking caret, painted on overlay = transparent background
                 using (SolidBrush tb = new SolidBrush(curColor))
-                    g.DrawString(textBuf, annotFont, tb, new PointF(d.X + (textPt.X - sel.X), d.Y + (textPt.Y - sel.Y)));
+                using (Font pf = GetAnnotFont(curFontPt))
+                    g.DrawString(textBuf, pf, tb, new PointF(d.X + (textPt.X - sel.X), d.Y + (textPt.Y - sel.Y)));
                 if (caretOn)
                 {
-                    SizeF tw = g.MeasureString(textBuf, annotFont);
+                    SizeF tw = g.MeasureString(textBuf, GetAnnotFont(curFontPt));
                     float cx = d.X + (textPt.X - sel.X) + tw.Width * 0.92f;
                     float cy = d.Y + (textPt.Y - sel.Y);
                     using (Pen cp = new Pen(curColor, 2f))
-                        g.DrawLine(cp, cx, cy + 2, cx, cy + annotFont.Height - 2);
+                        g.DrawLine(cp, cx, cy + 2, cx, cy + GetAnnotFont(curFontPt).Height - 2);
                 }
             } // 选区内标注 (客户区即冻结图坐标, 偏移0)
             using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
@@ -416,7 +429,8 @@ partial class ShotService
                         break;
                     case Annot.K_TEXT:
                         using (Brush b = new SolidBrush(a.Color))
-                            g.DrawString(a.Text, annotFont, b, a.Rect.X - offset.X, a.Rect.Y - offset.Y);
+                        using (Font f = GetAnnotFont(a.FontPt))
+                            g.DrawString(a.Text, f, b, a.Rect.X - offset.X, a.Rect.Y - offset.Y);
                         break;
                     case Annot.K_SEQ:
                         Rectangle r = a.Rect; r.Offset(-offset.X, -offset.Y);
@@ -425,7 +439,8 @@ partial class ShotService
                         {
                             sf.Alignment = StringAlignment.Center; sf.LineAlignment = StringAlignment.Center;
                             using (Brush wb = new SolidBrush(Color.White))
-                                g.DrawString(a.No.ToString(), annotFont, wb, (RectangleF)r, sf);
+                            using (Font f = GetAnnotFont(a.FontPt))
+                                g.DrawString(a.No.ToString(), f, wb, (RectangleF)r, sf);
                         }
                         break;
                 }
@@ -498,7 +513,7 @@ partial class ShotService
 
         void InvalidateTextInput()
         {
-            Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "W", annotFont);
+            Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "W", GetAnnotFont(curFontPt));
             Rectangle r = new Rectangle(RectangleToClient(new Rectangle(textPt, Size.Empty)).Location,
                                         new Size(ts.Width + 40, ts.Height + 10));
             r.Intersect(ClientRectangle);
@@ -520,6 +535,7 @@ partial class ShotService
                 a.Kind = Annot.K_TEXT;
                 a.Text = t;
                 a.Color = curColor;
+                a.FontPt = curFontPt;
                 a.Rect = new Rectangle(pt, Size.Empty);
                 PushAnnot(a);
                 Log("capture: annot text (" + t.Length + " chars)");
@@ -589,10 +605,16 @@ partial class ShotService
         void ShowPropBar()
         {
             if (propBar == null) { BuildPropBar(); }
-            bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen";
+            bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen" || tool == "text" || tool == "seq";
             if (!need) { propBar.Visible = false; return; }
-            // 箭头样式组仅箭头工具可见
-            foreach (var b in propBar.Btns) if (b.ToolKey != null && b.ToolKey.StartsWith("sty")) b.Enabled = (tool == "arrow");
+            // 分组可用性: 箭头样式仅箭头; 粗细对文字/序号无意义禁用; 字号仅文字/序号
+            foreach (var b in propBar.Btns)
+            {
+                if (b.ToolKey == null) continue;
+                if (b.ToolKey.StartsWith("sty")) b.Enabled = (tool == "arrow");
+                else if (b.ToolKey.StartsWith("w_")) b.Enabled = (tool != "text" && tool != "seq");
+                else if (b.ToolKey.StartsWith("f_")) b.Enabled = (tool == "text" || tool == "seq");
+            }
             MarkProp();
             PlacePropBar();
             propBar.Visible = true;
@@ -609,6 +631,10 @@ partial class ShotService
             propBar.Add("w_thin", "细线", delegate { curWidth = 2f; MarkProp(); }).ToolKey = "w_thin";
             propBar.Add("w_mid", "中线", delegate { curWidth = 3.5f; MarkProp(); }).ToolKey = "w_mid";
             propBar.Add("w_bold", "粗线", delegate { curWidth = 6f; MarkProp(); }).ToolKey = "w_bold";
+            propBar.AddSep();
+            propBar.Add("f_small", "小字号 (文字/序号)", delegate { curFontPt = 11; MarkProp(); }).ToolKey = "f_small";
+            propBar.Add("f_mid", "中字号 (文字/序号)", delegate { curFontPt = 14; MarkProp(); }).ToolKey = "f_mid";
+            propBar.Add("f_big", "大字号 (文字/序号)", delegate { curFontPt = 20; MarkProp(); }).ToolKey = "f_big";
             propBar.AddSep();
             Color[] cols =
             {
@@ -642,6 +668,9 @@ partial class ShotService
                 else if (b.ToolKey.StartsWith("w_")) b.On = (b.ToolKey == "w_thin" && curWidth <= 2.5f) ||
                                                             (b.ToolKey == "w_mid" && curWidth > 2.5f && curWidth <= 4.5f) ||
                                                             (b.ToolKey == "w_bold" && curWidth > 4.5f);
+                else if (b.ToolKey.StartsWith("f_")) b.On = (b.ToolKey == "f_small" && curFontPt <= 12) ||
+                                                            (b.ToolKey == "f_mid" && curFontPt > 12 && curFontPt <= 16) ||
+                                                            (b.ToolKey == "f_big" && curFontPt > 16);
                 else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
             }
             propBar.Invalidate();
@@ -947,20 +976,20 @@ partial class ShotService
                         g.DrawLine(w, 6.5f, 6, 11.5f, 6);
                         g.DrawLine(w, 9, 6, 9, 13);
                         break;
-                    case "translate": // zh top-left, A bottom-right, two arcs forming a circle (mutual convert)
+                    case "translate": // 左上"中" 右下"A" 双弧围圆 — 中/A 用真实字体 (手画线条比例失衡)
                     {
-                        // "zh": box + through-vertical (top-left)
-                        g.DrawRectangle(w, 1.6f, 2.2f, 5f, 5f);
-                        g.DrawLine(w, 4.1f, 0.9f, 4.1f, 8.6f);
-                        // "A": two diagonals + bar (bottom-right)
-                        g.DrawLine(w, 10.4f, 17f, 12.8f, 9.6f);
-                        g.DrawLine(w, 12.8f, 9.6f, 15.2f, 17f);
-                        g.DrawLine(w, 11.3f, 14.6f, 14.3f, 14.6f);
-                        // arc top-right (zh -> A) + arrowhead
+                        using (Font fz = new Font("Microsoft YaHei UI", 7f, FontStyle.Bold))
+                        using (Font fa = new Font("Segoe UI", 7.5f, FontStyle.Bold))
+                        using (SolidBrush b = new SolidBrush(w.Color))
+                        {
+                            g.DrawString("中", fz, b, 0.5f, 0.5f);
+                            g.DrawString("A", fa, b, 10.5f, 9.5f);
+                        }
+                        // 右上弧 (中 -> A) + 箭头
                         g.DrawArc(w, 3.2f, 3.2f, 11.6f, 11.6f, -78, 62);
                         using (SolidBrush b = new SolidBrush(w.Color))
                             g.FillPolygon(b, new PointF[] { new PointF(14.6f, 4.4f), new PointF(12.2f, 4.2f), new PointF(13.9f, 6.4f) });
-                        // arc bottom-left (A -> zh) + arrowhead
+                        // 左下弧 (A -> 中) + 箭头
                         g.DrawArc(w, 3.2f, 3.2f, 11.6f, 11.6f, 102, 62);
                         using (SolidBrush b2 = new SolidBrush(w.Color))
                             g.FillPolygon(b2, new PointF[] { new PointF(3.4f, 13.6f), new PointF(5.8f, 13.8f), new PointF(4.1f, 11.6f) });
