@@ -90,7 +90,7 @@ partial class ShotService
         f.Text = "设置";
         f.FormBorderStyle = FormBorderStyle.None;
         f.StartPosition = FormStartPosition.CenterScreen;
-        f.Size = new Size(500, 446);
+        f.Size = new Size(500, 494);
         f.TopMost = true;
         f.BackColor = cBg;
         f.KeyPreview = true;
@@ -186,23 +186,34 @@ partial class ShotService
         prov.SelectedIndexChanged += (s, e) => { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; };
         { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; }
 
-        // ---- 操作行 ----
-        CheckBox chkShow = new CheckBox(); chkShow.Text = "显示密钥"; chkShow.Left = FX; chkShow.Top = 288; chkShow.AutoSize = true;
+        // ---- 测试区: 内置英文示例, 结果直接显示在界面 (不弹窗) ----
+        CheckBox chkShow = new CheckBox(); chkShow.Text = "显示密钥"; chkShow.Left = LX; chkShow.Top = 284; chkShow.AutoSize = true;
         chkShow.ForeColor = cDim; chkShow.Font = new Font("Microsoft YaHei UI", 9f); f.Controls.Add(chkShow);
         chkShow.CheckedChanged += (s, e) => { char pc = chkShow.Checked ? '\0' : '*'; key.PasswordChar = pc; lak.PasswordChar = pc; };
 
-        Button test = mkBtn(); test.Text = "测试连通"; test.SetBounds(FX, 322, 100, 32);
-        Button save = mkBtn(); save.Text = "保存"; save.BackColor = cAccent; save.SetBounds(FX + FW - 96, 322, 96, 32);
-        Button cancel = mkBtn(); cancel.Text = "取消"; cancel.SetBounds(FX + FW - 200, 322, 96, 32);
+        Label demoLabel = new Label(); demoLabel.Text = "示例: The quick brown fox jumps over the lazy dog.";
+        demoLabel.Left = LX + 110; demoLabel.Top = 287; demoLabel.AutoSize = true;
+        demoLabel.ForeColor = cDim; demoLabel.Font = new Font("Consolas", 9f); f.Controls.Add(demoLabel);
+
+        TextBox testResult = new TextBox(); testResult.Multiline = true; testResult.ReadOnly = true;
+        testResult.Left = LX; testResult.Top = 310; testResult.Width = 452; testResult.Height = 56;
+        testResult.BackColor = cField; testResult.ForeColor = cText; testResult.BorderStyle = BorderStyle.FixedSingle;
+        testResult.Font = new Font("Microsoft YaHei UI", 9f);
+        testResult.Text = "（点「测试」后, 上面这句英文翻译成中文的结果显示在这里）";
+        f.Controls.Add(testResult);
+
+        Button test = mkBtn(); test.Text = "测试"; test.SetBounds(FX, 374, 100, 32);
+        Button save = mkBtn(); save.Text = "保存"; save.BackColor = cAccent; save.SetBounds(FX + FW - 96, 374, 96, 32);
+        Button cancel = mkBtn(); cancel.Text = "取消"; cancel.SetBounds(FX + FW - 200, 374, 96, 32);
         save.Click += (s, e) => { f.DialogResult = DialogResult.OK; f.Close(); };
         cancel.Click += (s, e) => { f.DialogResult = DialogResult.Cancel; f.Close(); };
         f.AcceptButton = save;
 
         // ---- 底部: 配置文件路径 + 打开 ----
-        Label pl = new Label(); pl.Text = "配置文件: " + cfgPath; pl.Left = LX; pl.Top = 368; pl.AutoSize = false;
-        pl.Size = new Size(340, 34); pl.ForeColor = cDim; pl.Font = new Font("Microsoft YaHei UI", 8.5f);
+        Label pl = new Label(); pl.Text = "配置文件: " + cfgPath; pl.Left = LX; pl.Top = 418; pl.AutoSize = false;
+        pl.Size = new Size(340, 30); pl.ForeColor = cDim; pl.Font = new Font("Microsoft YaHei UI", 8.5f);
         pl.AutoEllipsis = true; f.Controls.Add(pl);
-        Button openCfg = mkBtn(); openCfg.Text = "打开配置"; openCfg.SetBounds(FX + FW - 96, 364, 96, 30);
+        Button openCfg = mkBtn(); openCfg.Text = "打开配置"; openCfg.SetBounds(FX + FW - 96, 414, 96, 30);
         openCfg.Click += (s, e) =>
         {
             try
@@ -216,7 +227,7 @@ partial class ShotService
         // Esc = 取消
         f.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { f.DialogResult = DialogResult.Cancel; f.Close(); } };
 
-        // ---- 测试连通: 按当前面板值实测一次翻译 (不依赖已保存) ----
+        // ---- 测试: 内置英文示例 -> 翻译成中文, 结果/错误直接写进界面结果框 (零弹窗) ----
         test.Click += (s, e) =>
         {
             bool isBaidu = prov.SelectedIndex == 1;
@@ -224,12 +235,13 @@ partial class ShotService
             string tEp = ep.Text.Trim(), tModel = model.Text.Trim(), tAk = lak.Text.Trim(), tTo = to.Text.Trim();
             if (isBaidu && (tAppid.Length == 0 || tKey.Length == 0))
             {
-                // 留空保护: 用已存密钥测
                 if (tAppid.Length == 0 && loadedBaiduKey.Length == 0)
-                { MessageBox.Show(f, "请先填 APP ID 和密钥", "翻译测试"); return; }
+                { testResult.ForeColor = Color.FromArgb(230, 120, 110); testResult.Text = "请先填 APP ID 和密钥"; return; }
                 if (tKey.Length == 0) tKey = loadedBaiduKey;
             }
             test.Enabled = false; test.Text = "测试中...";
+            testResult.ForeColor = cDim;
+            testResult.Text = "测试中, 请稍候...";
             Task.Run(() =>
             {
                 string okMsg = null, errMsg = null;
@@ -238,19 +250,26 @@ partial class ShotService
                     ITranslateProvider tp = isBaidu
                         ? (ITranslateProvider)new BaiduTranslateProvider(tAppid, tKey)
                         : (ITranslateProvider)new LocalLlmTranslateProvider(tEp, tModel, tAk);
-                    string r = tp.TranslateAsync("Hello, world", tTo).GetAwaiter().GetResult();
-                    okMsg = string.IsNullOrEmpty(r) ? "(返回为空)" : r;
+                    // 内置英文示例 -> 翻译成中文 (不看"目标语言"配置, 测试语义固定: 英译中)
+                    string r = tp.TranslateAsync("The quick brown fox jumps over the lazy dog.", "zh").GetAwaiter().GetResult();
+                    okMsg = string.IsNullOrEmpty(r) ? "(返回为空 — 检查引擎/地址/模型)" : r;
                 }
                 catch (Exception ex) { errMsg = ex.Message; }
                 try
                 {
                     f.BeginInvoke(new MethodInvoker(() =>
                     {
-                        test.Enabled = true; test.Text = "测试连通";
+                        test.Enabled = true; test.Text = "测试";
                         if (errMsg != null)
-                            MessageBox.Show(f, "❌ 测试失败:\n" + errMsg, "翻译测试 (" + (isBaidu ? "baidu" : "local") + ")", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        {
+                            testResult.ForeColor = Color.FromArgb(230, 120, 110);
+                            testResult.Text = "✗ 测试失败 (" + (isBaidu ? "baidu" : "local") + "): " + errMsg;
+                        }
                         else
-                            MessageBox.Show(f, "✅ 测试成功, 译文: " + okMsg, "翻译测试 (" + (isBaidu ? "baidu" : "local") + ")", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        {
+                            testResult.ForeColor = Color.FromArgb(120, 200, 140);
+                            testResult.Text = "✓ 测试成功 (" + (isBaidu ? "baidu" : "local") + "): " + okMsg;
+                        }
                     }));
                 }
                 catch { }

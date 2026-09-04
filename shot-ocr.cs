@@ -84,16 +84,15 @@ partial class ShotService
         if (i >= json.Length) return "";
         if (json[i] == '"')
         {
-            i++;
-            StringBuilder sb = new StringBuilder();
-            while (i < json.Length)
+            // 扫描到闭合引号 (跳过转义序列), 取原始串再整体解码
+            int end = i + 1;
+            while (end < json.Length)
             {
-                char c = json[i++];
-                if (c == '\\') { if (i < json.Length) sb.Append(UnescapeJson(json[i++])); }
-                else if (c == '"') break;
-                else sb.Append(c);
+                if (json[end] == '\\') { end += 2; continue; }
+                if (json[end] == '"') break;
+                end++;
             }
-            return sb.ToString();
+            return UnescapeJsonString(json.Substring(i + 1, end - i - 1));
         }
         // 非字符串(数字/bool/null)
         int j = i;
@@ -104,6 +103,34 @@ partial class ShotService
     static char UnescapeJson(char c)
     {
         switch (c) { case 'n': return '\n'; case 't': return '\t'; case 'r': return '\r'; case '"': return '"'; case '\\': return '\\'; default: return c; }
+    }
+
+    // JSON 字符串解码: \n \t \" \\ 及 4位十六进制转义(中文)。该转义必须整体拦截, 否则变成反斜杠+u 乱码 (实测踩坑)
+    static string UnescapeJsonString(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        StringBuilder sb = new StringBuilder(s.Length);
+        for (int i = 0; i < s.Length; i++)
+        {
+            char ch = s[i];
+            if (ch != '\\') { sb.Append(ch); continue; }
+            if (i + 1 >= s.Length) { sb.Append(ch); break; }
+            char n = s[i + 1];
+            if (n == 'u' && i + 5 < s.Length)
+            {
+                string hex = s.Substring(i + 2, 4);
+                int code;
+                if (int.TryParse(hex, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out code))
+                {
+                    sb.Append((char)code);
+                    i += 5;
+                    continue;
+                }
+            }
+            i++;
+            sb.Append(UnescapeJson(n));
+        }
+        return sb.ToString();
     }
 
     // 在 json 中定位 "key"(闭合引号) 后的第一个冒号, 返回冒号之后的位置; 找不到返回 -1。

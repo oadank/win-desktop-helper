@@ -874,7 +874,7 @@ partial class ShotService
                     Log("capture: ocr ok (" + (text == null ? 0 : text.Length) + " chars)");
                     bool empty = string.IsNullOrEmpty(text);
                     Close();
-                    if (!empty) { try { Clipboard.SetText(text); } catch { } ShowResult(text, "OCR 识别结果"); }
+                    if (!empty) { try { Clipboard.SetText(text); } catch { } new ResultForm("OCR 识别结果", text).Show(); }
                     else ShowTrayInfo("未识别到文字");
                 });
             });
@@ -885,34 +885,57 @@ partial class ShotService
             CommitTextInput();
             SetBusy("识别+翻译中...");
             Bitmap bmp = CropTaken();
-            string toLang = Cfg("translate.to", "zh");
             Task.Run(async () =>
             {
-                string tr = null, err = null;
+                string ocr = null, err = null;
                 try
                 {
-                    string text = await OcrProvider().RecognizeAsync(bmp);
-                    if (string.IsNullOrEmpty(text)) err = "未识别到文字, 无法翻译";
-                    else tr = await TranslateProvider().TranslateAsync(text, toLang);
+                    ocr = await OcrProvider().RecognizeAsync(bmp);
+                    if (string.IsNullOrWhiteSpace(ocr)) err = "未识别到文字, 无法翻译";
                 }
                 catch (Exception ex) { err = ex.Message; }
                 finally { try { bmp.Dispose(); } catch { } }
+                string got = ocr, e2 = err;
                 BeginOnUi(() =>
                 {
-                    if (err != null)
-                    {
-                        Log("translate err: " + err);
-                        SetBusy(null);
-                        ShowTrayInfo("翻译失败: " + err);
-                        return;
-                    }
-                    Log("capture: translate ok");
-                    bool empty = string.IsNullOrEmpty(tr);
-                    Close();
-                    if (!empty) { try { Clipboard.SetText(tr); } catch { } ShowResult(tr, "翻译结果"); }
-                    else ShowTrayInfo("翻译失败");
+                    SetBusy(null);
+                    if (e2 != null) { Log("translate err: " + e2); ShowTrayInfo("翻译失败: " + e2); return; }
+                    // 自动语言检测 -> 反向翻译; 混合则让用户选
+                    string lang = DetectLanguage(got);
+                    if (lang == "mixed") ShowLanguagePick(t => RunTranslation(got, t));
+                    else RunTranslation(got, (lang == "zh") ? "en" : "zh");
                 });
             });
+        }
+
+        void RunTranslation(string ocr, string target)
+        {
+            SetBusy("翻译中...");
+            string srcText = ocr, toLang = target;
+            Task.Run(async () =>
+            {
+                string tr = null, err = null;
+                try { tr = await TranslateProvider().TranslateAsync(srcText, toLang); }
+                catch (Exception ex) { err = ex.Message; }
+                string res = tr, ee = err;
+                BeginOnUi(() =>
+                {
+                    SetBusy(null);
+                    if (ee != null) { Log("translate err: " + ee); ShowTrayInfo("翻译失败: " + ee); return; }
+                    Log("capture: translate ok target=" + toLang);
+                    if (string.IsNullOrWhiteSpace(res)) { ShowTrayInfo("翻译结果为空"); return; }
+                    new ResultForm("翻译结果", res).Show(); // 非模态浮动面板
+                });
+            });
+        }
+
+        // 混合语言: 小菜单挑目标语言 (非模态)
+        void ShowLanguagePick(Action<string> onPick)
+        {
+            ContextMenuStrip m = DarkMenu();
+            m.Items.Add("翻译为中文", null, (s, ee) => { m.Dispose(); onPick("zh"); });
+            m.Items.Add("翻译为英文", null, (s, ee) => { m.Dispose(); onPick("en"); });
+            m.Show(Cursor.Position);
         }
 
         // 忙碌: 禁用全部按钮; 空参=恢复
@@ -1424,18 +1447,41 @@ partial class ShotService
         }
     }
 
-    // M2: OCR/翻译结果窗 (深色: 自绘标题栏 + 中文友好字体 + 复制内联反馈, 不弹系统 MessageBox)
+    // 语言检测: 按 CJK 占比判 zh/en/mixed —— 点翻译自动反向翻译 (中文→英, 英文→中), 混合让用户选
+    static string DetectLanguage(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "en";
+        int cjk = 0, latin = 0;
+        foreach (char c in s)
+        {
+            if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
+            else if (char.IsLetter(c)) latin++;
+        }
+        int total = cjk + latin;
+        if (total == 0) return "en";
+        double zhRatio = (double)cjk / total;
+        if (zhRatio >= 0.6) return "zh";
+        if (zhRatio <= 0.15) return "en";
+        return "mixed";
+    }
+
+    // M2: OCR/翻译结果浮动面板 (非模态: Show() 直接浮在屏幕, 不阻塞不弹框; 可拖动/复制/Esc关)
     class ResultForm : Form
     {
         readonly string text;
         readonly Button copyBtn;
+
+        protected override CreateParams CreateParams
+        {
+            get { CreateParams cp = base.CreateParams; cp.ClassStyle |= 0x20000; return cp; } // 阴影
+        }
 
         public ResultForm(string title, string text)
         {
             this.text = text;
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
-            Size = new Size(600, 440);
+            Size = new Size(560, 320);
             TopMost = true;
             BackColor = DarkUI.Bg;
             KeyPreview = true;
@@ -1446,7 +1492,7 @@ partial class ShotService
             tb.Multiline = true; tb.ReadOnly = true; tb.ScrollBars = ScrollBars.Vertical;
             tb.Dock = DockStyle.Fill;
             tb.BackColor = DarkUI.BgField; tb.ForeColor = DarkUI.Text; tb.BorderStyle = BorderStyle.None;
-            tb.Font = new Font("Microsoft YaHei UI", 10.5f);
+            tb.Font = new Font("Microsoft YaHei UI", 11f);
             tb.Text = text;
             tb.Margin = new Padding(10);
             tb.Padding = new Padding(10);
@@ -1454,23 +1500,25 @@ partial class ShotService
             Controls.Add(tb);
             tb.BringToFront();
 
-            Panel bottom = new Panel(); bottom.Dock = DockStyle.Bottom; bottom.Height = 52; bottom.BackColor = DarkUI.BgPanel;
-            Label info = new Label(); info.Text = text.Length + " 字符 · Ctrl+C 复制 · Esc 关闭"; info.Left = 14;
+            Panel bottom = new Panel(); bottom.Dock = DockStyle.Bottom; bottom.Height = 48; bottom.BackColor = DarkUI.BgPanel;
+            Label info = new Label(); info.Text = "已自动复制到剪贴板 · Ctrl+C 再复制 · Esc 关闭"; info.Left = 14;
             info.AutoSize = true; info.ForeColor = DarkUI.TextDim; info.Font = new Font("Microsoft YaHei UI", 9f);
-            info.TextAlign = ContentAlignment.MiddleLeft; info.Dock = DockStyle.Fill;
+            info.Dock = DockStyle.Fill;
             copyBtn = new Button(); copyBtn.Text = "复制"; copyBtn.FlatStyle = FlatStyle.Flat; copyBtn.FlatAppearance.BorderSize = 0;
             copyBtn.BackColor = DarkUI.Accent; copyBtn.ForeColor = DarkUI.Text;
             copyBtn.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
-            copyBtn.Size = new Size(120, 36); copyBtn.Cursor = Cursors.Hand;
-            copyBtn.Dock = DockStyle.Right; copyBtn.Margin = new Padding(8, 8, 10, 8);
-            copyBtn.Padding = new Padding(0, 8, 0, 0);
-            copyBtn.Click += delegate { CopyNow(); };
+            copyBtn.Size = new Size(110, 34); copyBtn.Cursor = Cursors.Hand;
+            copyBtn.Dock = DockStyle.Right;
+            copyBtn.Click += (s, e) => CopyNow();
             bottom.Controls.Add(info); bottom.Controls.Add(copyBtn);
             Controls.Add(bottom);
             bottom.BringToFront();
             copyBtn.BringToFront();
 
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+
+            // 打开即自动复制 (PixPin 语义: 翻译/识别结果直接可用)
+            CopyNow();
         }
 
         void CopyNow()
@@ -1478,9 +1526,6 @@ partial class ShotService
             try { Clipboard.SetText(text); } catch { }
             copyBtn.Text = "✓ 已复制";
             copyBtn.BackColor = Color.FromArgb(40, 130, 80);
-            Timer t = new Timer(); t.Interval = 900;
-            t.Tick += (s, e) => { t.Stop(); t.Dispose(); Close(); };
-            t.Start();
         }
     }
 }
