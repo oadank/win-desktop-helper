@@ -229,10 +229,30 @@ partial class ShotService
             base.OnMouseDoubleClick(e);
         }
 
+        // 右键: 有选区/工具时 = 清空重新框选 (PixPin 同款); 什么都没有才退出
+        void ResetSelection()
+        {
+            if (textMode) CancelTextInput();
+            tool = null;
+            if (cur != null) { var c = cur; cur = null; }
+            annots.Clear();
+            redoStack.Clear();
+            hasSel = false;
+            sel = Rectangle.Empty;
+            HideBar();
+            Invalidate(); // 暗层恢复全屏 (低频操作, 全屏重绘一次可接受)
+            Log("capture: reset selection (right-click)");
+        }
+
         protected override void OnMouseDown(MouseEventArgs e)
         {
             if (IsDisposed) return;
-            if (e.Button == MouseButtons.Right) { CancelAll(); return; }
+            if (e.Button == MouseButtons.Right)
+            {
+                if (hasSel || tool != null || textMode) ResetSelection();
+                else CancelAll();
+                return;
+            }
             if (e.Button == MouseButtons.Middle && hasSel) { ActPin(); return; } // 中键 = 贴图 (PixPin 同款)
             if (e.Button != MouseButtons.Left) return;
             if (e.Clicks >= 2) return; // 双击的第二次按下不动作 (Double 事件里复制, 防重复框选)
@@ -1074,23 +1094,23 @@ partial class ShotService
                         g.DrawLine(w, 6.5f, 6, 11.5f, 6);
                         g.DrawLine(w, 9, 6, 9, 13);
                         break;
-                    case "translate": // 左上"中" 右下"A" 双弧围圆 — 中/A 用真实字体 (手画线条比例失衡)
+                    case "translate": // "中"(左上) + "A"(右下) + 双弧围圆; 全矢量线条, 精确控制不裁切
                     {
-                        using (Font fz = new Font("Microsoft YaHei UI", 8f, FontStyle.Bold))
-                        using (Font fa = new Font("Segoe UI", 8f, FontStyle.Bold))
+                        // 中: 口(扁矩形) + 贯穿竖, 中心约(5,5)
+                        g.DrawRectangle(w, 2.8f, 3f, 4.4f, 4f);
+                        g.DrawLine(w, 5f, 1.2f, 5f, 9.2f);
+                        // A: 两斜 + 横, 中心约(13,13)
+                        g.DrawLine(w, 11f, 16.2f, 13f, 9.6f);
+                        g.DrawLine(w, 13f, 9.6f, 15f, 16.2f);
+                        g.DrawLine(w, 11.7f, 14f, 14.3f, 14f);
+                        // 右上弧 (中->A 方向) + 箭头
+                        g.DrawArc(w, 2.4f, 2.4f, 13.2f, 13.2f, -72, 58);
                         using (SolidBrush b = new SolidBrush(w.Color))
-                        {
-                            g.DrawString("中", fz, b, 0.2f, 0.2f);   // 左上 (18坐标系)
-                            g.DrawString("A", fa, b, 10f, 10f);      // 右下 (弧内侧)
-                        }
-                        // 右上弧 (中 -> A) + 箭头
-                        g.DrawArc(w, 2.6f, 2.6f, 12.8f, 12.8f, -80, 65);
-                        using (SolidBrush b = new SolidBrush(w.Color))
-                            g.FillPolygon(b, new PointF[] { new PointF(15.4f, 3.8f), new PointF(12.8f, 3.4f), new PointF(14.6f, 5.9f) });
-                        // 左下弧 (A -> 中) + 箭头
-                        g.DrawArc(w, 2.6f, 2.6f, 12.8f, 12.8f, 100, 65);
+                            g.FillPolygon(b, new PointF[] { new PointF(14.8f, 3.2f), new PointF(12.3f, 2.9f), new PointF(14f, 5.3f) });
+                        // 左下弧 (A->中 方向) + 箭头
+                        g.DrawArc(w, 2.4f, 2.4f, 13.2f, 13.2f, 108, 58);
                         using (SolidBrush b2 = new SolidBrush(w.Color))
-                            g.FillPolygon(b2, new PointF[] { new PointF(2.6f, 14.2f), new PointF(5.2f, 14.6f), new PointF(3.4f, 12.2f) });
+                            g.FillPolygon(b2, new PointF[] { new PointF(3.2f, 14.8f), new PointF(5.7f, 15.1f), new PointF(4f, 12.7f) });
                         break;
                     }
                     case "save": // 软盘
