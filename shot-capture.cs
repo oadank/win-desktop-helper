@@ -161,6 +161,8 @@ partial class ShotService
         Rectangle sel;
         bool dragging = false;
         bool hasSel = false;
+        int resizeHandle = -1;   // 拖拽中的选框手柄 0-7 (TL,T,TR,R,BR,B,BL,L); -1=无 — PixPin 同款四角四边拉区域
+        Rectangle resizeOrig;    // 拖拽开始时的选区 (固定对边法)
         readonly List<Annot> annots = new List<Annot>(); // 已提交标注 (屏坐标)
         readonly List<Annot> redoStack = new List<Annot>(); // 撤销弹出的标注 (重做用, 新笔画清空)
         Annot cur;               // 正在绘制的标注
@@ -261,10 +263,65 @@ partial class ShotService
             redoStack.Clear();
             hasSel = false;
             sel = Rectangle.Empty;
+            resizeHandle = -1;
             HideBar();
             InvalidateHover();
             Invalidate(); // 暗层恢复全屏 (低频操作, 全屏重绘一次可接受)
             Log("capture: reset selection (right-click)");
+        }
+
+        // ---- 选框 8 手柄 (PixPin 同款): 四角+四边中点, 拖拽调整选区 ----
+        static readonly Cursor[] HandleCursors = {
+            Cursors.SizeNWSE, Cursors.SizeNS, Cursors.SizeNESW, Cursors.SizeWE,
+            Cursors.SizeNWSE, Cursors.SizeNS, Cursors.SizeNESW, Cursors.SizeWE
+        };
+
+        Point[] HandlePts()
+        {
+            Rectangle c = RectangleToClient(sel);
+            int mx = c.X + c.Width / 2, my = c.Y + c.Height / 2;
+            return new Point[] {
+                new Point(c.Left, c.Top), new Point(mx, c.Top), new Point(c.Right, c.Top),
+                new Point(c.Right, my), new Point(c.Right, c.Bottom), new Point(mx, c.Bottom),
+                new Point(c.Left, c.Bottom), new Point(c.Left, my)
+            };
+        }
+
+        int HitHandle(Point clientPt)
+        {
+            if (!hasSel || textMode || dragging) return -1;
+            Point[] ps = HandlePts();
+            for (int i = 0; i < 8; i++)
+                if (Math.Abs(clientPt.X - ps[i].X) <= 7 && Math.Abs(clientPt.Y - ps[i].Y) <= 7) return i;
+            return -1;
+        }
+
+        // 手柄拖拽: 固定对边, 拖过对边自动翻转
+        Rectangle ResizeSelBy(Rectangle o, Point p, int h)
+        {
+            int l = o.Left, t = o.Top, r = o.Right, b = o.Bottom;
+            if (h == 0 || h == 6 || h == 7) l = p.X;
+            if (h == 0 || h == 1 || h == 2) t = p.Y;
+            if (h == 2 || h == 3 || h == 4) r = p.X;
+            if (h == 4 || h == 5 || h == 6) b = p.Y;
+            if (l > r) { int x = l; l = r; r = x; }
+            if (t > b) { int y = t; t = b; b = y; }
+            return new Rectangle(l, t, r - l, b - t);
+        }
+
+        void DrawSelHandles(Graphics g)
+        {
+            if (!hasSel || textMode || dragging || resizeHandle >= 0)
+            {
+                Log("handles skip: hasSel=" + hasSel + " textMode=" + textMode + " dragging=" + dragging + " rh=" + resizeHandle);
+                return;
+            }
+            foreach (Point pt in HandlePts())
+            {
+                Rectangle rc = new Rectangle(pt.X - 5, pt.Y - 5, 10, 10);
+                using (SolidBrush wb = new SolidBrush(Color.White)) g.FillRectangle(wb, rc);
+                using (Pen bp = new Pen(Color.FromArgb(70, 130, 220), 1.5f)) g.DrawRectangle(bp, rc);
+            }
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -280,6 +337,15 @@ partial class ShotService
             if (e.Button != MouseButtons.Left) return;
             if (e.Clicks >= 2) return; // 双击的第二次按下不动作 (Double 事件里复制, 防重复框选)
             Point sp = PointToScreen(e.Location);
+            if (hasSel && HitHandle(e.Location) >= 0)
+            {
+                // 手柄按下 = 调整选区 (优先于标注); 工具条临时收起, 松手回位
+                CommitTextInput();
+                resizeHandle = HitHandle(e.Location);
+                resizeOrig = sel;
+                HideBar();
+                return;
+            }
             if (!hasSel)
             {
                 // 未选区: 记 pending — 移动超阈值 = 手动拖框; 原地松开 = 选中悬停窗口 (自动检测)
@@ -350,8 +416,22 @@ partial class ShotService
         protected override void OnMouseMove(MouseEventArgs e)
         {
             Point sp = PointToScreen(e.Location);
+            if (resizeHandle >= 0)
+            {
+                // 手柄拖拽中: 固定对边调整选区
+                Rectangle old = sel;
+                sel = ResizeSelBy(resizeOrig, sp, resizeHandle);
+                hasSel = sel.Width > 2 && sel.Height > 2;
+                InvalidateSelArea(old);
+                return;
+            }
             // 文字工具悬停检测: 已提交文字 → 提示框 (其他工具不调用 = 文字当背景)
             UpdateTextHover(sp, e.Location);
+            if (hasSel && !pendingDown && !dragging && cur == null && !textMode)
+            {
+                int hh = HitHandle(e.Location);
+                Cursor = hh >= 0 ? HandleCursors[hh] : Cursors.Cross; // 手柄上换方向光标, 离开恢复十字
+            }
             if (pendingDown && !dragging)
             {
                 // 按下后移动超阈值 -> 转手动拖框 (自动检测让位)
@@ -497,6 +577,14 @@ partial class ShotService
             try
             {
             if (IsDisposed) return;
+            // 手柄拖拽结束: 工具条回位 + 补重绘 (拖拽中手柄隐藏, 松开显示)
+            if (resizeHandle >= 0 && e.Button == MouseButtons.Left)
+            {
+                resizeHandle = -1;
+                if (hasSel) { ShowBar(); InvalidateSelArea(sel); }
+                Log("capture: resized sel=" + sel.Width + "x" + sel.Height + " at " + sel.Location);
+                return;
+            }
             // pending 未拖动 = 选中悬停窗口 (自动检测完成, 等价框选)
             if (pendingDown && e.Button == MouseButtons.Left && !dragging && !hasSel)
             {
@@ -507,6 +595,7 @@ partial class ShotService
                     hasSel = true;
                     Log("capture: window picked (auto-detect) " + sel.Width + "x" + sel.Height);
                     ShowBar();
+                    InvalidateSelArea(sel); // 补重绘画手柄
                 }
                 InvalidateHover();
                 return;
@@ -517,7 +606,7 @@ partial class ShotService
             {
                 dragging = false;
                 Log("capture: mouseup sel=" + sel.Width + "x" + sel.Height + " at " + sel.Location);
-                if (hasSel) ShowBar(); // 遮罩与选区保持, 工具条贴上来 (PixPin 同款)
+                if (hasSel) { ShowBar(); InvalidateSelArea(sel); } // 补一次重绘: 手柄在"松开"状态才画 (拖拽中 skip)
                 return;
             }
             if (cur != null)
@@ -660,6 +749,7 @@ partial class ShotService
                 g.Restore(hs);
             }
             using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
+            DrawSelHandles(g); // 选框 8 手柄 (PixPin 同款)
             using (Font f = new Font("Consolas", 11))
             using (Brush b = new SolidBrush(Color.Yellow))
             using (Brush bg = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
@@ -2079,13 +2169,14 @@ partial class ShotService
     }
 
     // 语言检测: 按 CJK 占比判 zh/en/mixed —— 点翻译自动反向翻译 (中文→英, 英文→中), 混合让用户选
-    // 序号徽章矩形: 宽度随文字自适应 (PixPin 同款, "10"/"XII"完整显示), 高度=创建直径, 以 a.Rect 中心水平展开
+    // 序号徽章矩形: 宽度随文字微调 (PixPin 同款, 一位数近圆 两位数约1.35比例), 以 a.Rect 中心水平展开
     static Rectangle SeqBadgeRect(Annot a)
     {
         string s = SeqText(a.No, a.SeqFmt);
-        int w = a.Rect.Width;
-        try { using (Font f = new Font(a.FontFamily, a.FontPt, FontStyle.Bold)) w = Math.Max(a.Rect.Height, TextRenderer.MeasureText(s, f).Width + 26); } catch { }
-        return new Rectangle(a.Rect.X + (a.Rect.Width - w) / 2, a.Rect.Y, w, a.Rect.Height);
+        int h = a.Rect.Height + 6;
+        int w = a.Rect.Width + 8;
+        try { using (Font f = new Font(a.FontFamily, a.FontPt, FontStyle.Bold)) w = Math.Max(h * 4 / 3, TextRenderer.MeasureText(s, f).Width + 16); } catch { }
+        return new Rectangle(a.Rect.X + (a.Rect.Width - w) / 2, a.Rect.Y - 3, w, h);
     }
 
     static string SeqText(int n, string fmt)
