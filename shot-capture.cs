@@ -143,6 +143,7 @@ partial class ShotService
         public float Width = 3f;     // 线宽
         public int FontPt = 14;      // 文字/序号字号
         public int Angle = 0;        // 文字旋转角 (度, 顺时针)
+        public string SeqFmt = "1";  // 序号格式: 1=1.2.3  I=I.II.III  a=a.b.c  A=A.B.C
         public string FontFamily = "Microsoft YaHei UI"; // 文字字体
         public Rectangle Rect;      // rect/ellipse/arrow 的包围盒; seq/text 的定位点在 Rect.Location
         public List<Point> Pts;     // 画笔折线 (屏坐标)
@@ -176,6 +177,10 @@ partial class ShotService
         int textDragMode = 0;        // 1=移动 2=缩放 (左下/右下按钮拖动)
         Point textDragStart;
         int textDragFont0;
+        int textDragDist0;
+        Point textRotCenter;
+        int textRotStartAng;
+        int textRotBase;
         bool caretOn = true;
         Timer caretTimer;            // 自绘插入符闪烁 (500ms)
         Point textDragPt0;
@@ -187,6 +192,7 @@ partial class ShotService
         Rectangle pendingWin = Rectangle.Empty;       // 文字标注的行内输入框
         Point textPt;
         int curFontPt = 14; // 属性栏: 字号 (文字/序号)
+        string curSeqFmt = "1"; // 属性栏: 序号格式 (1/I/a/A)
         string curFontFamily = "Microsoft YaHei UI"; // 属性栏: 字体
         static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
         static Font GetAnnotFont(int pt) { return GetAnnotFont("Microsoft YaHei UI", pt); }
@@ -316,7 +322,7 @@ partial class ShotService
                         cur.No = seqNext++;
                         int dia = (int)(curFontPt * 2);
                         cur.Rect = new Rectangle(sp.X - dia / 2, sp.Y - dia / 2, dia, dia);
-                        cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
+                        cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily; cur.SeqFmt = curSeqFmt;
                         PushAnnot(cur);
                         Log("capture: annot seq #" + cur.No);
                     }
@@ -378,6 +384,20 @@ partial class ShotService
             {
                 UpdateHoverDetect(sp); // 自动窗口检测
             }
+        }
+
+        // 只刷文字字形 (caret 闪烁用: 不带动四角按钮重绘, 按钮不闪)
+        void InvalidateTextGlyph()
+        {
+            try
+            {
+                Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
+                Rectangle r = new Rectangle(RectangleToClient(new Rectangle(textPt, Size.Empty)).Location,
+                                            new Size(ts.Width + 40, ts.Height + 40));
+                r.Intersect(ClientRectangle);
+                Invalidate(r);
+            }
+            catch (Exception ex) { Log("invalglyph err: " + ex.Message); }
         }
 
         void InvalidateTextInput()
@@ -488,10 +508,16 @@ partial class ShotService
         }
 
         // 背景 = 冻结原图 blit 脏区 (1:1 无缩放走 fast path, 只处理脏区)
+        // 性能关键: NearestNeighbor + Half 让 1:1 blit 走 GDI fast path
+        // (DPI 125% 下 Graphics 带 1.25 变换, 默认 Bilinear 走慢速插值管线 = 拖动卡顿真凶)
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             if (frozen != null)
+            {
+                e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
                 e.Graphics.DrawImage(frozen, e.ClipRectangle, e.ClipRectangle, GraphicsUnit.Pixel);
+            }
             else
                 base.OnPaintBackground(e);
         }
@@ -553,6 +579,7 @@ partial class ShotService
                     hd.Intersect(ClientRectangle);
                     if (hd.Width > 4 && hd.Height > 4)
                     {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
                         g.SetClip(hd);
                         g.DrawImage(frozen, hd, hd, GraphicsUnit.Pixel);
                         g.ResetClip();
@@ -673,7 +700,7 @@ partial class ShotService
                             using (Brush wb = new SolidBrush(Color.White))
                             {
                                 Font f = GetAnnotFont(a.FontFamily, a.FontPt); // 缓存字体不可 Dispose
-                                g.DrawString(a.No.ToString(), f, wb, (RectangleF)r, sf);
+                                g.DrawString(SeqText(a.No, a.SeqFmt), f, wb, (RectangleF)r, sf);
                             }
                         }
                         break;
@@ -786,10 +813,39 @@ partial class ShotService
                 b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderSize = 0;
                 b.Size = new Size(22, 22); b.Cursor = Cursors.Hand;
                 b.Tag = i;
-                if (i == 0) b.Click += delegate { textAngle = (textAngle + 90) % 360; InvalidateTextInput(); Log("capture: text rotate " + textAngle); };
+                if (i == 0)
+                {
+                    b.MouseDown += (s, ev) =>
+                    {
+                        if (ev.Button == MouseButtons.Left)
+                        {
+                            textDragMode = 3; // 旋转 (拖动实时任意角度)
+                            Size tsz = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
+                            textRotCenter = new Point(textPt.X + tsz.Width / 2, textPt.Y + tsz.Height / 2);
+                            textRotStartAng = (int)(Math.Atan2(Cursor.Position.Y - textRotCenter.Y, Cursor.Position.X - textRotCenter.X) * 180 / Math.PI);
+                            textRotBase = textAngle;
+                            b.Capture = true;
+                        }
+                    };
+                }
                 if (i == 1) b.Click += delegate { CancelTextInput(); };
-                if (i == 2) { b.MouseDown += (s, ev) => { if (ev.Button == MouseButtons.Left) { textDragMode = 1; textDragStart = Cursor.Position; textDragPt0 = textPt; } }; }
-                if (i == 3) { b.MouseDown += (s, ev) => { if (ev.Button == MouseButtons.Left) { textDragMode = 2; textDragStart = Cursor.Position; textDragFont0 = curFontPt; } }; }
+                if (i == 2) { b.MouseDown += (s, ev) => { if (ev.Button == MouseButtons.Left) { textDragMode = 1; textDragStart = Cursor.Position; textDragPt0 = textPt; b.Capture = true; } }; }
+                if (i == 3)
+                {
+                    b.MouseDown += (s, ev) =>
+                    {
+                        if (ev.Button == MouseButtons.Left)
+                        {
+                            textDragMode = 2;
+                            textDragStart = Cursor.Position;
+                            textDragFont0 = curFontPt;
+                            Size tsz0 = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
+                            Point ctr0 = new Point(textPt.X + tsz0.Width / 2, textPt.Y + tsz0.Height / 2);
+                            textDragDist0 = Math.Abs(Cursor.Position.X - ctr0.X) + Math.Abs(Cursor.Position.Y - ctr0.Y); // 初始距离基准 (差分防反向)
+                            b.Capture = true;
+                        }
+                    };
+                }
                 b.MouseMove += (s, ev) =>
                 {
                     if (textDragMode == 0 || ev.Button != MouseButtons.Left) return;
@@ -799,15 +855,24 @@ partial class ShotService
                         RelocateTextUI();
                         InvalidateTextInput();
                     }
-                    else
+                    else if (textDragMode == 2)
                     {
-                        int dist = Math.Abs(Cursor.Position.X - textDragStart.X) + Math.Abs(Cursor.Position.Y - textDragStart.Y);
-                        curFontPt = Math.Max(8, Math.Min(72, textDragFont0 + dist / 4));
+                        Size tsz = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
+                        Point ctr = new Point(textPt.X + tsz.Width / 2, textPt.Y + tsz.Height / 2);
+                        int dist = Math.Abs(Cursor.Position.X - ctr.X) + Math.Abs(Cursor.Position.Y - ctr.Y);
+                        curFontPt = Math.Max(8, Math.Min(72, textDragFont0 + (dist - textDragDist0) / 4)); // 差分: 拉远放大/拉近缩小, 不反向
+                        RelocateTextUI();
+                        InvalidateTextInput();
+                    }
+                    else if (textDragMode == 3)
+                    {
+                        int ang = (int)(Math.Atan2(Cursor.Position.Y - textRotCenter.Y, Cursor.Position.X - textRotCenter.X) * 180 / Math.PI);
+                        textAngle = (textRotBase + ang - textRotStartAng + 360 * 4) % 360; // 实时任意角度
                         RelocateTextUI();
                         InvalidateTextInput();
                     }
                 };
-                b.MouseUp += (s, ev) => { textDragMode = 0; };
+                b.MouseUp += (s, ev) => { textDragMode = 0; b.Capture = false; };
                 editPanel.Controls.Add(b);
             }
 
@@ -832,7 +897,7 @@ partial class ShotService
             if (caretTimer == null)
             {
                 caretTimer = new Timer { Interval = 450 };
-                caretTimer.Tick += (s, ev) => { caretOn = !caretOn; InvalidateTextInput(); };
+                caretTimer.Tick += (s, ev) => { caretOn = !caretOn; InvalidateTextGlyph(); };
             }
             caretOn = true;
             caretTimer.Start();
@@ -922,8 +987,8 @@ partial class ShotService
             textMode = false;
             textBuf = "";
             if (caretTimer != null) caretTimer.Stop();
-            if (editPanel != null) { try { editPanel.Dispose(); } catch { } editPanel = null; } // 连带销毁 1x1 宿主 (残留会一直闪插入符)
-            textInput = null;
+            if (textInput != null) { try { Controls.Remove(textInput); textInput.Dispose(); } catch { } textInput = null; } // 宿主在遮罩上, 单独销毁 (残留=插入符一直闪)
+            if (editPanel != null) { try { editPanel.Dispose(); } catch { } editPanel = null; }
             InvalidateTextInput();
             Focus();
         }
@@ -1893,6 +1958,18 @@ partial class ShotService
     }
 
     // 语言检测: 按 CJK 占比判 zh/en/mixed —— 点翻译自动反向翻译 (中文→英, 英文→中), 混合让用户选
+    static string SeqText(int n, string fmt)
+    {
+        if (fmt == "I") // 罗马大写
+        {
+            string[] R = { "", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX" };
+            return (n >= 1 && n <= 20) ? R[n] : n.ToString();
+        }
+        if (fmt == "a") return n >= 1 && n <= 26 ? ((char)('a' + n - 1)).ToString() : n.ToString();
+        if (fmt == "A") return n >= 1 && n <= 26 ? ((char)('A' + n - 1)).ToString() : n.ToString();
+        return n.ToString(); // "1"
+    }
+
     static string DetectLanguage(string s)
     {
         if (string.IsNullOrWhiteSpace(s)) return "en";
