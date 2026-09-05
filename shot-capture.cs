@@ -758,8 +758,8 @@ partial class ShotService
         static void DrawArrowEx(Graphics g, Pen p, float x1, float y1, float x2, float y2, int style)
         {
             float w = p.Width;
-            float hl = Math.Max(14, w * 6f);   // 头长
-            float half = Math.Max(6, w * 3f);  // 头底半宽
+            float hl = Math.Max(26, w * 8f);   // 头长 (PixPin 比例: 大醒目)
+            float half = Math.Max(12, w * 4f); // 头底半宽
             double ang = Math.Atan2(y2 - y1, x2 - x1);
             double dxc = Math.Cos(ang), dyc = Math.Sin(ang);
             double pxc = -dyc, pyc = dxc;
@@ -768,7 +768,7 @@ partial class ShotService
 
             if (style == Annot.S_CALLOUT)
             {
-                float bl = Math.Max(10, w * 3f);
+                float bl = Math.Max(14, w * 4f);
                 float ppx = (float)pxc, ppy = (float)pyc;
                 g.DrawLine(p, x1, y1, x2, y2);
                 g.DrawLine(p, x1 + bl * ppx, y1 + bl * ppy, x1 - bl * ppx, y1 - bl * ppy);
@@ -780,7 +780,7 @@ partial class ShotService
             {
                 // 细尾锥形: 尾尖 -> 头底渐宽 (填充) + 大实心头 (PixPin 特色款)
                 float bx = (float)(x2 - hl * 0.6 * dxc), by = (float)(y2 - hl * 0.6 * dyc);
-                float th = Math.Max(1.5f, w * 0.6f);
+                float th = Math.Max(2f, w * 0.8f);
                 using (SolidBrush b = new SolidBrush(p.Color))
                     g.FillPolygon(b, new PointF[] {
                         new PointF(x1, y1),
@@ -1285,7 +1285,7 @@ partial class ShotService
             startBtn = propBar.AddText("从" + seqNext, "起始数字", delegate
             {
                 ContextMenuStrip m = DarkMenu();
-                for (int v = 1; v <= 10; v++)
+                for (int v = 1; v <= 20; v++)
                 {
                     int captured = v;
                     ToolStripItem it = m.Items.Add(v.ToString(), null, delegate
@@ -2163,8 +2163,8 @@ partial class ShotService
     {
         if (fmt == "I") // 罗马大写
         {
-            string[] R = { "", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX" };
-            return (n >= 1 && n <= 20) ? R[n] : n.ToString();
+            string[] R = { "", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX", "XXI", "XXII", "XXIII", "XXIV", "XXV", "XXVI", "XXVII", "XXVIII", "XXIX", "XXX" };
+            return (n >= 1 && n <= 30) ? R[n] : n.ToString();
         }
         if (fmt == "a") return n >= 1 && n <= 26 ? ((char)('a' + n - 1)).ToString() : n.ToString();
         if (fmt == "A") return n >= 1 && n <= 26 ? ((char)('A' + n - 1)).ToString() : n.ToString();
