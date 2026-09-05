@@ -44,6 +44,11 @@ const TOOLS = [
     inputSchema: { type: 'object', additionalProperties: false, properties: {} }
   },
   {
+    name: 'list_apps',
+    description: '列出当前所有可见应用窗口 {hwnd,pid,process,title,front,rect}（Z 序，front=true 是前台）——找操作目标第一步',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} }
+  },
+  {
     name: 'monitors',
     description: '列出显示器元数据（分辨率/主屏/设备名）',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} }
@@ -51,7 +56,7 @@ const TOOLS = [
   // ---- 窗口管理 ----
   {
     name: 'win_manage',
-    description: '窗口管理: action=activate(置前)/maximize/minimize/restore/close/move(需x,y)/wait(等窗口出现,timeout毫秒)/list(按pid列窗口)。title=窗口标题关键词定位',
+    description: '窗口管理: action=activate(置前)/maximize/minimize/restore/close/move(需x,y)/wait(等窗口出现,timeout毫秒)/list(列窗口: 给title=按标题关键词列全部匹配, 给pid=按进程, 都不给=全部应用列表)',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -61,7 +66,7 @@ const TOOLS = [
         timeout: { type: 'number', description: 'wait 的超时毫秒(默认10000)' },
         pid: { type: 'number', description: 'list 时按进程过滤' }
       },
-      required: ['action', 'title']
+      required: ['action']
     }
   },
   // ---- 鼠标 (物理像素坐标) ----
@@ -322,6 +327,7 @@ function buildUrl(name, a) {
     }
     case 'window_info': return { path: '/window', qs: ['title=' + enc(a.title)] };
     case 'active_window': return { path: '/active', qs: [] };
+    case 'list_apps': return { path: '/apps', qs: [] };
     case 'monitors': return { path: '/monitors', qs: [] };
     case 'win_manage': {
       const act = a.action || 'activate';

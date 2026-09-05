@@ -131,6 +131,55 @@ partial class ShotService
         return "{\"ok\":true,\"found\":false,\"waitedMs\":" + timeoutMs + "}";
     }
 
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int val, int size); // attr 14 = DWMWA_CLOAKED
+
+    // 应用列表: 可见顶层窗口按 Z 序 (排除 cloaked UWP/工具窗/无标题), front=是否前台 — 对标 computer-use list_apps
+    static string AppList()
+    {
+        IntPtr fg = GetForegroundWindow();
+        var list = new List<string>();
+        EnumWindows(delegate (IntPtr h, IntPtr lp)
+        {
+            if (!IsWindowVisible(h) || !IsWindow(h)) return true;
+            int cloaked;
+            if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return true; // 虚拟桌面隐藏/挂起的 UWP
+            if (((long)GetWindowLong(h, -20) & 0x80) != 0) return true; // WS_EX_TOOLWINDOW
+            StringBuilder sb = new StringBuilder(256); GetWindowTextW(h, sb, 256);
+            string title = sb.ToString(); if (title.Length == 0) return true;
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            string proc = "";
+            try { proc = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; } catch { }
+            RECT rc; GetWindowRect(h, out rc);
+            list.Add("{\"hwnd\":" + h.ToInt64() + ",\"pid\":" + pid + ",\"process\":\"" + JsonEscape(proc) +
+                     "\",\"title\":\"" + JsonEscape(title) + "\",\"front\":" + (h == fg ? "true" : "false") +
+                     ",\"rect\":{\"x\":" + rc.Left + ",\"y\":" + rc.Top + ",\"w\":" + (rc.Right - rc.Left) + ",\"h\":" + (rc.Bottom - rc.Top) + "}}");
+            return true;
+        }, IntPtr.Zero);
+        return "{\"ok\":true,\"count\":" + list.Count + ",\"apps\":[" + string.Join(",", list.ToArray()) + "]}";
+    }
+
+    // 按标题关键词枚举全部匹配窗口 (window_info 只回第一个, 这个回全部 — 对标 list_windows)
+    static string WinListByTitle(string keyword)
+    {
+        var list = new List<string>();
+        EnumWindows(delegate (IntPtr h, IntPtr lp)
+        {
+            if (!IsWindowVisible(h) || !IsWindow(h)) return true;
+            StringBuilder sb = new StringBuilder(256); GetWindowTextW(h, sb, 256);
+            string title = sb.ToString();
+            if (title.Length == 0 || title.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) < 0) return true;
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            string proc = "";
+            try { proc = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; } catch { }
+            RECT rc; GetWindowRect(h, out rc);
+            list.Add("{\"hwnd\":" + h.ToInt64() + ",\"pid\":" + pid + ",\"process\":\"" + JsonEscape(proc) +
+                     "\",\"title\":\"" + JsonEscape(title) +
+                     "\",\"rect\":{\"x\":" + rc.Left + ",\"y\":" + rc.Top + ",\"w\":" + (rc.Right - rc.Left) + ",\"h\":" + (rc.Bottom - rc.Top) + "}}");
+            return true;
+        }, IntPtr.Zero);
+        return "{\"ok\":true,\"title\":\"" + JsonEscape(keyword) + "\",\"count\":" + list.Count + ",\"windows\":[" + string.Join(",", list.ToArray()) + "]}";
+    }
+
     // 按进程枚举可见窗口 (EnumWindows 过滤 pid)
     static string WinListByPid(int pid)
     {
@@ -279,6 +328,13 @@ partial class ShotService
                 try { en = e.Current.IsEnabled; } catch { }
                 try { r2 = e.Current.BoundingRectangle; } catch { }
                 if (r2.X < -30000 || r2.Width < 0) r2 = new System.Windows.Rect(0, 0, 0, 0); // 最小化/无矩形元素返回 -21亿, 归零
+                // value: 编辑类控件读当前内容 (Edit/Document/ComboBox); focused: 是否持有键盘焦点
+                string val = null; bool focused = false;
+                if (ctl == "Edit" || ctl == "Document" || ctl == "ComboBox")
+                {
+                    try { object vp; if (e.TryGetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern, out vp)) { val = ((System.Windows.Automation.ValuePattern)vp).Current.Value; if (val != null && val.Length > 200) val = val.Substring(0, 200); } } catch { }
+                }
+                try { focused = e.Current.HasKeyboardFocus; } catch { }
                 var pats = new List<string>();
                 try
                 {
@@ -293,7 +349,8 @@ partial class ShotService
                 catch { }
                 if (name.Length > 80) name = name.Substring(0, 80);
                 items.Add("{\"i\":" + i + ",\"type\":\"" + JsonEscape(ctl) + "\",\"name\":\"" + JsonEscape(name) +
-                          "\",\"enabled\":" + (en ? "true" : "false") +
+                          "\",\"enabled\":" + (en ? "true" : "false") + ",\"focused\":" + (focused ? "true" : "false") +
+                          ",\"value\":" + (val == null ? "null" : "\"" + JsonEscape(val) + "\"") +
                           ",\"rect\":{\"x\":" + (int)r2.X + ",\"y\":" + (int)r2.Y + ",\"w\":" + (int)r2.Width + ",\"h\":" + (int)r2.Height + "}" +
                           ",\"patterns\":\"" + JsonEscape(string.Join(",", pats.ToArray())) + "\"}");
             }

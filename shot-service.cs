@@ -969,7 +969,7 @@ public partial class ShotService
         for (int i = mods.Count - 1; i >= 0; i--) KeyEvent(mods[i], 0, KEYEVENTF_KEYUP);
     }
 
-    static string JsonEscape(string s) { return s.Replace("\\", "\\\\").Replace("\"", "\\\""); }
+    static string JsonEscape(string s) { return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t"); }
 
     // 从 query 读 int, 失败返回 false
     static bool TryInt(Dictionary<string, string> q, string key, out int v) { return int.TryParse((q.ContainsKey(key) ? q[key] : ""), out v); }
@@ -1063,6 +1063,7 @@ public partial class ShotService
                     body = sb.ToString();
                 }
                 else if (path == "/active") { body = ActiveWindowJson(); }
+                else if (path == "/apps") { body = AppList(); Log("[apps] list"); }
                 else if (path.StartsWith("/img/"))
                 {
                     // 托管 Screenshots 目录下的图片: /img/<文件名> → PNG 字节
@@ -1227,7 +1228,9 @@ public partial class ShotService
                     else if (verb == "list")
                     {
                         int lp = 0; TryInt(q, "pid", out lp);
-                        body = WinListByPid(lp);
+                        if (lp > 0) body = WinListByPid(lp);
+                        else if (q.ContainsKey("title")) body = WinListByTitle(q["title"]);
+                        else body = AppList();
                     }
                     else
                     {
@@ -1955,7 +1958,14 @@ public partial class ShotService
                         int tmo = McpParamInt(a, "timeout"); if (tmo <= 0) tmo = 10000;
                         return McpText(WinWait(McpParam(a, "title"), tmo), false);
                     }
-                    if (verb == "list") return McpText(WinListByPid(McpParamInt(a, "pid")), false);
+                    if (verb == "list")
+                    {
+                        int lp = McpParamInt(a, "pid");
+                        if (lp > 0) return McpText(WinListByPid(lp), false);
+                        string kw = McpParam(a, "title");
+                        if (kw != "") return McpText(WinListByTitle(kw), false);
+                        return McpText(AppList(), false);
+                    }
                     IntPtr wh = IntPtr.Zero;
                     string ttl = McpParam(a, "title");
                     if (ttl != "") wh = FindWindowByTitle(ttl);
