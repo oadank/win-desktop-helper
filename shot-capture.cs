@@ -416,6 +416,8 @@ partial class ShotService
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
+            try
+            {
             if (IsDisposed) return;
             // pending 未拖动 = 选中悬停窗口 (自动检测完成, 等价框选)
             if (pendingDown && e.Button == MouseButtons.Left && !dragging && !hasSel)
@@ -447,6 +449,8 @@ partial class ShotService
                 else if (cur.Rect.Width > 2 && cur.Rect.Height > 2) PushAnnot(cur);
                 cur = null;
             }
+            }
+            catch (Exception ex) { Log("mouseup err: " + ex.Message); }
         }
 
         // 只重绘「旧框∪新框」外扩区域 — 全屏 blit 由 BackgroundImage 系统完成
