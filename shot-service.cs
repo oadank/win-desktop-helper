@@ -1350,6 +1350,8 @@ public partial class ShotService
                 }
                 else if (path == "/ui/tree") { body = UiTree(q); Log("[ui] tree " + target); }
                 else if (path == "/ui/click") { body = UiClick(q); Log("[ui] click " + target); }
+                else if (path == "/ui/find") { body = UiFind(q); Log("[ui] find " + target); }
+                else if (path == "/ui/select") { body = UiSelect(q); Log("[ui] select " + target); }
                 else if (path == "/ui/set") { body = UiSet(q); Log("[ui] set " + target); }
                 else if (path == "/ui/read") { body = UiRead(q); Log("[ui] read " + target); }
                 else if (path == "/ui/readall") { body = UiReadAll(q); Log("[ui] readall " + target); }
@@ -2073,19 +2075,31 @@ public partial class ShotService
                 case "ui_click":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
-                    foreach (var kv in new[] { "title", "hwnd", "i" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    foreach (var kv in new[] { "title", "hwnd", "i", "name", "type" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
                     return McpText(UiClick(q2), false);
+                }
+                case "ui_find":
+                {
+                    Dictionary<string, string> q2 = new Dictionary<string, string>();
+                    foreach (var kv in new[] { "title", "hwnd", "name", "type" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    return McpText(UiFind(q2), false);
+                }
+                case "ui_select":
+                {
+                    Dictionary<string, string> q2 = new Dictionary<string, string>();
+                    foreach (var kv in new[] { "title", "hwnd", "i", "name", "start", "end" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    return McpText(UiSelect(q2), false);
                 }
                 case "ui_set":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
-                    foreach (var kv in new[] { "title", "hwnd", "i", "value" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    foreach (var kv in new[] { "title", "hwnd", "i", "name", "value" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
                     return McpText(UiSet(q2), false);
                 }
                 case "ui_read":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
-                    foreach (var kv in new[] { "title", "hwnd", "i" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    foreach (var kv in new[] { "title", "hwnd", "i", "name" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
                     return McpText(UiRead(q2), false);
                 }
                 case "ui_readall":

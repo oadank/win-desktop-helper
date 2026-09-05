@@ -415,11 +415,93 @@ partial class ShotService
         if (hwndStr == null) return null;
         IntPtr h = new IntPtr(long.Parse(hwndStr));
         var root = System.Windows.Automation.AutomationElement.FromHandle(h);
+        // 按名称定位 (name= 优先于 i=): 一条命令直达 "点'保存'按钮" — 精确匹配优先, 否则包含匹配(忽略大小写)
+        string nm = q.ContainsKey("name") ? q["name"] : "";
+        if (nm != "")
+        {
+            string typeFilter = q.ContainsKey("type") ? q["type"] : "";
+            var all = root.FindAll(System.Windows.Automation.TreeScope.Descendants, System.Windows.Automation.Condition.TrueCondition);
+            System.Windows.Automation.AutomationElement exact = null, contains = null;
+            for (int i = 0; i < all.Count; i++)
+            {
+                var e = all[i];
+                string en = "";
+                try { en = e.Current.Name ?? ""; } catch { }
+                if (en.Length == 0) continue;
+                if (typeFilter != "")
+                {
+                    string ct = "";
+                    try { ct = e.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); } catch { }
+                    if (!ct.Equals(typeFilter, StringComparison.OrdinalIgnoreCase)) continue;
+                }
+                if (en.Equals(nm, StringComparison.OrdinalIgnoreCase)) { exact = e; break; }
+                if (contains == null && en.IndexOf(nm, StringComparison.OrdinalIgnoreCase) >= 0) contains = e;
+            }
+            return exact ?? contains;
+        }
         int idx;
         if (!TryInt(q, "i", out idx)) return null;
-        var all = root.FindAll(System.Windows.Automation.TreeScope.Descendants, System.Windows.Automation.Condition.TrueCondition);
-        if (idx < 0 || idx >= all.Count) return null;
-        return all[idx];
+        var list = root.FindAll(System.Windows.Automation.TreeScope.Descendants, System.Windows.Automation.Condition.TrueCondition);
+        if (idx < 0 || idx >= list.Count) return null;
+        return list[idx];
+    }
+
+    // 按名称查元素 (只查不点): name= 必填, type= 可选过滤; 返回全部匹配 {i,name,type,rect,enabled}
+    static string UiFind(Dictionary<string, string> q)
+    {
+        try
+        {
+            string hwndStr = UiResolveHwnd(q);
+            if (hwndStr == null) return "{\"ok\":false,\"error\":\"window not found\"}";
+            IntPtr h = new IntPtr(long.Parse(hwndStr));
+            var root = System.Windows.Automation.AutomationElement.FromHandle(h);
+            string nm = q.ContainsKey("name") ? q["name"] : "";
+            if (nm == "") return "{\"ok\":false,\"error\":\"need name\"}";
+            string typeFilter = q.ContainsKey("type") ? q["type"] : "";
+            var all = root.FindAll(System.Windows.Automation.TreeScope.Descendants, System.Windows.Automation.Condition.TrueCondition);
+            var items = new List<string>();
+            for (int i = 0; i < all.Count; i++)
+            {
+                var e = all[i];
+                string en = "";
+                try { en = e.Current.Name ?? ""; } catch { }
+                if (en.Length == 0 || en.IndexOf(nm, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                string ct = "";
+                try { ct = e.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); } catch { ct = "?"; }
+                if (typeFilter != "" && !ct.Equals(typeFilter, StringComparison.OrdinalIgnoreCase)) continue;
+                bool enb = true; System.Windows.Rect r2 = new System.Windows.Rect(0, 0, 0, 0);
+                try { enb = e.Current.IsEnabled; } catch { }
+                try { r2 = e.Current.BoundingRectangle; } catch { }
+                if (r2.X < -30000 || r2.Width < 0) r2 = new System.Windows.Rect(0, 0, 0, 0);
+                items.Add("{\"i\":" + i + ",\"name\":\"" + JsonEscape(en) + "\",\"type\":\"" + JsonEscape(ct) +
+                          "\",\"enabled\":" + (enb ? "true" : "false") +
+                          ",\"rect\":{\"x\":" + (int)r2.X + ",\"y\":" + (int)r2.Y + ",\"w\":" + (int)r2.Width + ",\"h\":" + (int)r2.Height + "}}");
+            }
+            return "{\"ok\":true,\"name\":\"" + JsonEscape(nm) + "\",\"count\":" + items.Count + ",\"elements\":[" + string.Join(",", items.ToArray()) + "]}";
+        }
+        catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; }
+    }
+
+    // 设置编辑控件选区 (EM_SETSEL): title/name/i 定位控件, start/end=字符范围; 仅 Win32 Edit/RichEdit 系支持
+    static string UiSelect(Dictionary<string, string> q)
+    {
+        try
+        {
+            var e = UiElement(q);
+            if (e == null) return "{\"ok\":false,\"error\":\"element not found (bad i/name/window)\"}";
+            int start = 0, end = 0;
+            TryInt(q, "start", out start); TryInt(q, "end", out end);
+            IntPtr ch = IntPtr.Zero;
+            try { ch = new IntPtr(e.Current.NativeWindowHandle); } catch { }
+            if (ch == IntPtr.Zero) return "{\"ok\":false,\"error\":\"element has no native handle (用 click 定起点 + keyboard_press shift+end 代替)\"}";
+            SendMessage(ch, 0x00B1, (IntPtr)start, (IntPtr)end); // EM_SETSEL
+            SendMessage(ch, 0x00B7, IntPtr.Zero, IntPtr.Zero);   // EM_SCROLLCARET 滚到光标可见
+            string nm = "";
+            try { nm = e.Current.Name ?? ""; } catch { }
+            Log("ui select [" + start + "," + end + ") " + nm);
+            return "{\"ok\":true,\"start\":" + start + ",\"end\":" + end + ",\"name\":\"" + JsonEscape(nm) + "\"}";
+        }
+        catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; }
     }
 
     static string UiClick(Dictionary<string, string> q)

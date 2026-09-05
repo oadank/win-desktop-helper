@@ -207,26 +207,51 @@ const TOOLS = [
   },
   {
     name: 'ui_click',
-    description: '语义点击控件（invoke/toggle 模式优先，失败回退坐标点击）。title=窗口标题, i=ui_tree 给出的元素下标',
+    description: '语义点击控件。定位二选一: i=ui_tree 下标, 或 name=控件名(如 "保存"/"确定", 一条命令直达, 精确优先模糊兜底, 可加 type=Button 过滤)。invoke/toggle/expand/select 模式优先, 失败回退坐标点击',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         title: { type: 'string' }, hwnd: { type: 'number' },
-        i: { type: 'number', description: 'ui_tree 元素下标' }
+        i: { type: 'number', description: 'ui_tree 元素下标' },
+        name: { type: 'string', description: '按控件名定位 (推荐)' },
+        type: { type: 'string', description: '配合 name 过滤类型, 如 Button/MenuItem' }
+      }
+    }
+  },
+  {
+    name: 'ui_find',
+    description: '按名称查控件(只查不点): 返回全部匹配 {i,name,type,rect,enabled}。name= 必填(模糊), type= 可选。先 find 确认再 click/set',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        title: { type: 'string' }, hwnd: { type: 'number' },
+        name: { type: 'string' }, type: { type: 'string' }
       },
-      required: ['i']
+      required: ['name']
+    }
+  },
+  {
+    name: 'ui_select',
+    description: '设置编辑控件选区 (EM_SETSEL, Win32 Edit/RichEdit 系): 定位控件(i 或 name), start/end=字符范围。配合 ctrl+c 读选中文本',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        title: { type: 'string' }, hwnd: { type: 'number' },
+        i: { type: 'number' }, name: { type: 'string' },
+        start: { type: 'number', description: '起始字符(默认0)' },
+        end: { type: 'number', description: '结束字符(默认0=不选)' }
+      }
     }
   },
   {
     name: 'ui_read',
-    description: '读单个控件详情（名称/值/类型/矩形）。title=窗口标题, i=元素下标',
+    description: '读单个控件详情（名称/值/类型/矩形）。定位: i=ui_tree 下标 或 name=控件名',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         title: { type: 'string' }, hwnd: { type: 'number' },
-        i: { type: 'number' }
-      },
-      required: ['i']
+        i: { type: 'number' }, name: { type: 'string' }
+      }
     }
   },
   {
@@ -239,14 +264,15 @@ const TOOLS = [
   },
   {
     name: 'ui_set',
-    description: '语义写值到输入控件（ValuePattern 直写，不模拟键盘，稳且快）。title=窗口标题, i=元素下标, value=要写入的文本',
+    description: '语义写值到输入控件（ValuePattern 直写，不模拟键盘，稳且快）。定位: i=ui_tree 下标 或 name=控件名',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         title: { type: 'string' }, hwnd: { type: 'number' },
-        i: { type: 'number' }, value: { type: 'string' }
+        i: { type: 'number' }, name: { type: 'string' },
+        value: { type: 'string' }
       },
-      required: ['i', 'value']
+      required: ['value']
     }
   },
   // ---- 录屏 ----
@@ -389,14 +415,34 @@ function buildUrl(name, a) {
       let qs = [];
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
-      qs.push('i=' + a.i);
+      if (a.i !== undefined) qs.push('i=' + a.i);
+      if (a.name) qs.push('name=' + enc(a.name));
+      if (a.type) qs.push('type=' + enc(a.type));
       return { path: '/ui/click', qs };
+    }
+    case 'ui_find': {
+      let qs = [];
+      if (a.title !== undefined) qs.push('title=' + enc(a.title));
+      if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
+      if (a.name) qs.push('name=' + enc(a.name));
+      if (a.type) qs.push('type=' + enc(a.type));
+      return { path: '/ui/find', qs };
+    }
+    case 'ui_select': {
+      let qs = [];
+      if (a.title !== undefined) qs.push('title=' + enc(a.title));
+      if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
+      if (a.i !== undefined) qs.push('i=' + a.i);
+      if (a.name) qs.push('name=' + enc(a.name));
+      qs.push('start=' + (a.start || 0), 'end=' + (a.end || 0));
+      return { path: '/ui/select', qs };
     }
     case 'ui_read': {
       let qs = [];
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
-      qs.push('i=' + a.i);
+      if (a.i !== undefined) qs.push('i=' + a.i);
+      if (a.name) qs.push('name=' + enc(a.name));
       return { path: '/ui/read', qs };
     }
     case 'ui_readall': {
@@ -409,7 +455,9 @@ function buildUrl(name, a) {
       let qs = [];
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
-      qs.push('i=' + a.i, 'value=' + enc(String(a.value)));
+      if (a.i !== undefined) qs.push('i=' + a.i);
+      if (a.name) qs.push('name=' + enc(a.name));
+      qs.push('value=' + enc(String(a.value)));
       return { path: '/ui/set', qs };
     }
     case 'record_start': {
