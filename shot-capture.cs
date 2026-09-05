@@ -1193,7 +1193,7 @@ partial class ShotService
             if (FontGlyphs.ContainsKey(kind))
             {
                 string s = char.ConvertFromUtf32(Convert.ToInt32(FontGlyphs[kind], 16));
-                using (Font f = new Font("Segoe MDL2 Assets", size * 0.66f))
+                using (Font f = new Font("Segoe MDL2 Assets", size * 0.58f))
                     TextRenderer.DrawText(g, s, f, new Rectangle(0, 0, size, size), Color.FromArgb(232, 234, 240),
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                 return bmp;
@@ -1310,13 +1310,13 @@ partial class ShotService
 
         void Relayout()
         {
-            int x = 5;
+            int x = 6;
             foreach (Btn b in Btns)
             {
-                if (b.Icon == "|") { b.Rect = new Rectangle(x, 10, 1, 20); x += 11; }
-                else { b.Rect = new Rectangle(x, 4, 32, 32); x += 32; }
+                if (b.Icon == "|") { b.Rect = new Rectangle(x, 12, 1, 24); x += 13; }
+                else { b.Rect = new Rectangle(x, 4, 40, 40); x += 40; }
             }
-            Width = x + 5; Height = 40;
+            Width = x + 6; Height = 48;
         }
 
         public void SetEnabledAll(bool en)
@@ -1363,30 +1363,30 @@ partial class ShotService
                 if (i == hoverIdx || b.On)
                 {
                     using (SolidBrush br = new SolidBrush(b.On ? Color.FromArgb(58, 62, 74) : (i == hoverIdx ? Color.FromArgb(64, 68, 80) : Color.Transparent)))
-                        RoundFill(g, br, b.Rect, 6);
+                        RoundFill(g, br, b.Rect, 8);
                     if (b.On && b.Swatch != Color.Empty)
                     { // 色块选中: 白圈描边 (主色高亮底会吃掉色块对比)
                         using (Pen ring = new Pen(Color.FromArgb(235, 238, 244), 2f))
-                            g.DrawEllipse(ring, b.Rect.X + 6, b.Rect.Y + 6, 20, 20);
+                            g.DrawEllipse(ring, b.Rect.X + 7, b.Rect.Y + 7, 26, 26);
                     }
                 }
                 if (b.Swatch != Color.Empty)
                 {
                     using (SolidBrush sb = new SolidBrush(b.Swatch))
-                        g.FillEllipse(sb, b.Rect.X + 8, b.Rect.Y + 8, 16, 16);
+                        g.FillEllipse(sb, b.Rect.X + 10, b.Rect.Y + 10, 20, 20);
                     if (!b.Enabled)
                         using (SolidBrush dim = new SolidBrush(Color.FromArgb(140, 26, 27, 31)))
-                            g.FillEllipse(dim, b.Rect.X + 8, b.Rect.Y + 8, 16, 16);
+                            g.FillEllipse(dim, b.Rect.X + 10, b.Rect.Y + 10, 20, 20);
                     continue;
                 }
                 if (b.DrawStr != null)
                 {
-                    TextRenderer.DrawText(g, b.DrawStr, new Font("Microsoft YaHei UI", 9f, FontStyle.Bold), b.Rect,
+                    TextRenderer.DrawText(g, b.DrawStr, new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold), b.Rect,
                                           b.Enabled ? Color.FromArgb(232, 234, 240) : Color.FromArgb(110, 114, 120),
                                           TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                     continue;
                 }
-                using (Bitmap ic = MakeIcon(b.Icon, 22))
+                using (Bitmap ic = MakeIcon(b.Icon, 28))
                 {
                     if (!b.Enabled)
                     {
@@ -1394,11 +1394,11 @@ partial class ShotService
                         using (System.Drawing.Imaging.ImageAttributes ia = new System.Drawing.Imaging.ImageAttributes())
                         {
                             ia.SetColorMatrix(cm);
-                            g.DrawImage(ic, new Rectangle(b.Rect.X + 5, b.Rect.Y + 5, 22, 22), 0, 0, 22, 22, GraphicsUnit.Pixel, ia);
+                            g.DrawImage(ic, new Rectangle(b.Rect.X + 6, b.Rect.Y + 6, 28, 28), 0, 0, 28, 28, GraphicsUnit.Pixel, ia);
                         }
                     }
                     else
-                        g.DrawImage(ic, b.Rect.X + 5, b.Rect.Y + 5, 22, 22);
+                        g.DrawImage(ic, b.Rect.X + 6, b.Rect.Y + 6, 28, 28);
                 }
             }
         }

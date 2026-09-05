@@ -212,7 +212,7 @@ partial class ShotService
         demoLabel.ForeColor = cDim; demoLabel.Font = new Font("Consolas", 9f); pgTr.Controls.Add(demoLabel);
         Button test = new Button(); test.Text = "测试"; test.FlatStyle = FlatStyle.Flat; test.FlatAppearance.BorderSize = 0;
         test.BackColor = cBtn; test.ForeColor = cText; test.Font = new Font("Microsoft YaHei UI", 9.5f);
-        test.Cursor = Cursors.Hand; test.SetBounds(PX + PW - 100, 256, 94, 28); pgTr.Controls.Add(test); test.BringToFront();
+        test.Cursor = Cursors.Hand; test.SetBounds(PW - LX - 100, 256, 96, 28); pgTr.Controls.Add(test); test.BringToFront();
         TextBox testResult = new TextBox(); testResult.Multiline = true; testResult.ReadOnly = true;
         testResult.Left = LX; testResult.Top = 284; testResult.Width = PW - LX * 2; testResult.Height = 52;
         testResult.BackColor = cField; testResult.ForeColor = cText; testResult.BorderStyle = BorderStyle.FixedSingle;
