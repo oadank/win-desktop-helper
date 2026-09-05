@@ -733,14 +733,14 @@ partial class ShotService
             editPanel = new Panel();
             editPanel.BackColor = Color.Transparent;
             int[] dxs = { -26, 26, -26, 26 }, dys = { -26, -26, 26, 26 };
-            string[] icons = { "\uE7AD", "\uE711", "\uE7C2", "\uE71F" }; // 旋转/关闭/移动/缩放 (MDL2)
+            int[] iconCodes = { 0xE7AD, 0xE711, 0xE7C2, 0xE71F }; // 旋转/关闭/移动/缩放 (MDL2 码点) // 旋转/关闭/移动/缩放 (MDL2)
             string[] tips = { "旋转 (每次90度)", "关闭 (取消输入)", "拖动移动文字", "拖动缩放文字" };
             Action<int> clickAct = null;
             for (int i = 0; i < 4; i++)
             {
                 int idx = i;
                 Button b = new Button();
-                b.Text = char.ConvertFromUtf32(Convert.ToInt32(icons[i].Substring(2), 16));
+                b.Text = char.ConvertFromUtf32(iconCodes[idx]);
                 b.Font = new Font("Segoe MDL2 Assets", 9f);
                 b.ForeColor = Color.White; b.BackColor = Color.FromArgb(50, 110, 200);
                 b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderSize = 0;
