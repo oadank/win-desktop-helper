@@ -298,7 +298,9 @@ partial class ShotService
                 cur = new Annot();
                 cur.Kind = tool == "rect" ? Annot.K_RECT : tool == "ellipse" ? Annot.K_ELLIPSE :
                            tool == "arrow" ? Annot.K_ARROW : tool == "seq" ? Annot.K_SEQ : Annot.K_PEN;
-                cur.Width = curWidth; cur.Color = curColor; cur.Style = curArrowStyle; cur.FontPt = curFontPt;
+                cur.Width = curWidth; cur.Color = curColor; cur.Style = curArrowStyle; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
+                downPt = sp; // 形状基准点 = 按下处 (漂移修复: 旧版用上一次 Rect.Location, 越拖越飘)
+                if (cur.Kind == Annot.K_ARROW) cur.Pts = new List<Point> { sp, sp }; // 箭头存真实起终点
                 if (cur.Kind == Annot.K_SEQ)
                 {
                     try
@@ -348,10 +350,18 @@ partial class ShotService
             else if (cur != null)
             {
                 if (cur.Kind == Annot.K_PEN) { cur.Pts.Add(sp); InvalidateAnnot(cur); }
+                else if (cur.Kind == Annot.K_ARROW)
+                {
+                    cur.Pts[1] = sp; // 终点跟手 (方向 = 起点->鼠标)
+                    Rectangle old = cur.Rect;
+                    cur.Rect = Normalize(cur.Pts[0], sp);
+                    InvalidateAnnot(old);
+                    InvalidateAnnot(cur);
+                }
                 else
                 {
                     Rectangle old = cur.Rect;
-                    cur.Rect = Normalize(cur.Rect.Location, sp);
+                    cur.Rect = Normalize(downPt, sp); // 基准 = 按下起点 (漂移修复)
                     InvalidateAnnot(old);
                     InvalidateAnnot(cur);
                 }
@@ -433,6 +443,7 @@ partial class ShotService
             if (cur != null)
             {
                 if (cur.Kind == Annot.K_PEN) { if (cur.Pts.Count > 1) PushAnnot(cur); }
+                else if (cur.Kind == Annot.K_ARROW) { if (cur.Pts.Count >= 2 && cur.Pts[0] != cur.Pts[1]) PushAnnot(cur); }
                 else if (cur.Rect.Width > 2 && cur.Rect.Height > 2) PushAnnot(cur);
                 cur = null;
             }
@@ -467,6 +478,13 @@ partial class ShotService
             {
                 Size ts = TextRenderer.MeasureText(a.Text, GetAnnotFont(a.FontFamily, a.FontPt));
                 return new Rectangle(a.Rect.Location, new Size(ts.Width + 8, ts.Height + 8));
+            }
+            if (a.Kind == Annot.K_ARROW && a.Pts != null && a.Pts.Count >= 2)
+            {
+                Rectangle r = new Rectangle(a.Pts[0], Size.Empty);
+                r = Rectangle.Union(r, new Rectangle(a.Pts[1], Size.Empty));
+                r.Inflate(14, 14); // 箭头头/线宽余量
+                return r;
             }
             return a.Rect;
         }
@@ -560,8 +578,12 @@ partial class ShotService
                         g.DrawEllipse(p, a.Rect.X - offset.X, a.Rect.Y - offset.Y, a.Rect.Width, a.Rect.Height);
                         break;
                     case Annot.K_ARROW:
-                        DrawArrowEx(g, p, a.Rect.X - offset.X, a.Rect.Y - offset.Y,
-                                    a.Rect.Right - offset.X, a.Rect.Bottom - offset.Y, a.Style);
+                        if (a.Pts != null && a.Pts.Count >= 2)
+                            DrawArrowEx(g, p, a.Pts[0].X - offset.X, a.Pts[0].Y - offset.Y,
+                                        a.Pts[1].X - offset.X, a.Pts[1].Y - offset.Y, a.Style);
+                        else
+                            DrawArrowEx(g, p, a.Rect.X - offset.X, a.Rect.Y - offset.Y,
+                                        a.Rect.Right - offset.X, a.Rect.Bottom - offset.Y, a.Style);
                         break;
                     case Annot.K_PEN:
                         if (a.Pts != null && a.Pts.Count > 1)
