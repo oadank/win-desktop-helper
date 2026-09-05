@@ -1,5 +1,11 @@
 # ZCODE 接手：win-desktop-helper 项目上下文 + 待解决问题
 
+> **状态刷新 2026-09-05 14:40（agents-to-feishu 会话的 ZCode，接了串台消息）**：
+> - **文字旋转跟随已修**（shot-capture.cs）：根因 = `TextBoxBounds()` 忽略 textAngle（轴对齐框），线框和四角按钮全锚在未旋转的框上。新增 `RotatedTextCorners()`（文字框四角按 textAngle 旋转到客户区，测量口径与 TextBoxBounds 一致 ±4/+10）；OnPaint 编辑线框改为 `DrawPolygon(旋转后四角)`；`RelocateTextUI()` 容器=旋转四角包围盒、四按钮贴旋转后角点（TL/TR/BL/BR 一一对应 旋转/关闭/移动/缩放）、确认/取消在旋转包围盒下方。
+> - **已提交文字悬停编辑已加**：`HitTextAnnot()`（点逆旋转到文字局部坐标判定，最上层命中）+ `UpdateTextHover()`（OnMouseMove 里调，仅 tool=="text" 时检测——**其他工具不调用 = 文字当背景**）+ OnPaint 悬停蓝框（随文字旋转）+ `EditTextInput()`（点击载入原文/角度/字号/颜色/字体，`textEditIdx` 提交时原位替换 annots[idx] 不新增一笔；清空提交=保留原文）。`CloseTextInput` 复位 hoverTextIdx/textEditIdx。
+> - **已编译并上线**：csc 零错误（新 exe 196608B），服务已重启。**待实测**：①文字工具→输入→旋转拖动：线框+四角按钮应跟文字同转；②提交后文字工具悬停文字出蓝框、点击改字原位替换；③箭头/序号工具下点文字区域应直接画箭头/落序号（文字不被命中）。
+> - 已知遗留：重编辑载入会把 curColor/curFontPt/curFontFamily 覆盖为原标注值（提交后属性栏显示值不同步回——如需同步再补一行）。
+
 > **状态刷新 2026-09-05 01:05（ZCode 会话）**：
 > - **P0-1 已修并实测通过**：根因不是交接文档猜的那些——是 `TransparencyKey=BackColor` 把遮罩抠成完全不可见+鼠标穿透（复现证据：遮罩窗口存在但屏幕上看不见、拖拽落不到它）。已照 PixPin/ShareX 重写：预合成暗化背景（BackgroundImage）+ 脏区重绘 + 松手不关遮罩 + 图标工具条（矩形/椭圆/箭头/画笔/文字/序号标注+撤销+OCR+翻译+保存/复制/另存）。用户亲手实测：标注全工具✓ OCR✓ 保存✓。
 > - **P0-2 已修**：新实例自动顶替旧实例（日志 `take-over`）；build 指纹（exe mtime+大小）进启动日志/托盘菜单/启动气泡/`/health`，肉眼可验。

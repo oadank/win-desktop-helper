@@ -185,6 +185,8 @@ partial class ShotService
         Timer caretTimer;            // 自绘插入符闪烁 (500ms)
         Point textDragPt0;
         Panel editPanel;             // 透明容器: 只含四角按钮+确认/取消
+        int hoverTextIdx = -1;       // 文字工具悬停的已提交文字标注 (显示可编辑提示框; 其他工具不检测=文字当背景)
+        int textEditIdx = -1;        // 正在重编辑的 annots 下标 (-1 = 新建文字)
         // 自动窗口检测 (PixPin 同款): 未按下时高亮光标下的窗口, 单击即选中; 拖动则转手动框选
         Rectangle hoverWin = Rectangle.Empty;
         bool pendingDown = false;
@@ -306,6 +308,9 @@ partial class ShotService
                 CommitTextInput(); // 若有未提交文字先落字
                 if (tool == "text")
                 {
+                    // 点到已提交文字 = 重编辑 (载入原文/角度/字体原位替换); 否则在此处开新文字
+                    int hit = HitTextAnnot(sp);
+                    if (hit >= 0) { EditTextInput(hit); return; }
                     OpenTextInput(sp);
                     return;
                 }
@@ -344,6 +349,8 @@ partial class ShotService
         protected override void OnMouseMove(MouseEventArgs e)
         {
             Point sp = PointToScreen(e.Location);
+            // 文字工具悬停检测: 已提交文字 → 提示框 (其他工具不调用 = 文字当背景)
+            UpdateTextHover(sp, e.Location);
             if (pendingDown && !dragging)
             {
                 // 按下后移动超阈值 -> 转手动拖框 (自动检测让位)
@@ -418,6 +425,22 @@ partial class ShotService
 
         // 自动窗口检测节流 (EnumWindows 全枚举, 50ms 一次)
         DateTime lastHoverCheck = DateTime.MinValue;
+
+        // 文字工具悬停: 鼠标下有已提交文字 → hoverTextIdx (提示框刷新); 其他工具强制无
+        void UpdateTextHover(Point sp, Point clientPt)
+        {
+            try
+            {
+                int hit = (tool == "text" && hasSel && !textMode && !dragging && sel.Contains(sp))
+                    ? HitTextAnnot(sp) : -1;
+                if (hit == hoverTextIdx) return;
+                if (hoverTextIdx >= 0 && hoverTextIdx < annots.Count && annots[hoverTextIdx].Kind == Annot.K_TEXT)
+                    Invalidate(TextAnnotBounds(annots[hoverTextIdx]));
+                hoverTextIdx = hit;
+                if (hoverTextIdx >= 0) Invalidate(TextAnnotBounds(annots[hoverTextIdx]));
+            }
+            catch (Exception ex) { Log("texthover err: " + ex.Message); }
+        }
 
         void UpdateHoverDetect(Point sp)
         {
@@ -616,12 +639,25 @@ partial class ShotService
                     }
                 }
                 g.Restore(st);
-                // 编辑线框 (文字范围边界, 蓝 1.5px; textAngle=0 时与四角按钮对齐)
-                Rectangle box = TextBoxBounds();
+                // 编辑线框 (文字范围边界, 蓝 1.5px) — 跟随 textAngle 旋转 (旋转后四角连线, 与文字同转)
                 using (Pen bp = new Pen(Color.FromArgb(60, 110, 200), 1.5f))
-                    g.DrawRectangle(bp, box);
+                    g.DrawPolygon(bp, RotatedTextCorners());
             }
             DrawAnnots(g, Point.Empty); // 选区内标注 (客户区即冻结图坐标, 偏移0)
+            // 文字工具悬停已提交文字: 蓝框提示可点击重编辑 (随文字旋转; 其他工具不出现)
+            if (tool == "text" && !textMode && hoverTextIdx >= 0 && hoverTextIdx < annots.Count
+                && annots[hoverTextIdx].Kind == Annot.K_TEXT)
+            {
+                Annot ha = annots[hoverTextIdx];
+                Size hts = TextRenderer.MeasureText(ha.Text.Length > 0 ? ha.Text : "测", GetAnnotFont(ha.FontFamily, ha.FontPt));
+                Point hc = RectangleToClient(new Rectangle(ha.Rect.Location, Size.Empty)).Location;
+                var hs = g.Save();
+                g.TranslateTransform(hc.X, hc.Y);
+                g.RotateTransform(ha.Angle);
+                using (Pen hp = new Pen(Color.FromArgb(60, 110, 200), 1.5f))
+                    g.DrawRectangle(hp, -4, -4, hts.Width + 10, hts.Height + 10);
+                g.Restore(hs);
+            }
             using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
             using (Font f = new Font("Consolas", 11))
             using (Brush b = new SolidBrush(Color.Yellow))
@@ -754,13 +790,34 @@ partial class ShotService
         // ---- 行内文字输入 (PixPin 同款: 点击处直接打字, 回车落字 Esc 取消) ----
         // ---- text input (self-drawn): click inside selection, type directly, Enter commits, Esc cancels ----
         // ---- 文字输入 (PixPin 四角按钮式): 透明背景自绘文字 + 1x1 IME 宿主 + 四角功能按钮 ----
-        void OpenTextInput(Point sp)
+        void OpenTextInput(Point sp) { OpenTextInputCore(sp, null, -1); }
+
+        // 重编辑已提交文字: 载入原标注的内容/角度/字号/颜色/字体, 提交时原位替换 (不新增一笔)
+        void EditTextInput(int idx)
+        {
+            if (idx < 0 || idx >= annots.Count || annots[idx].Kind != Annot.K_TEXT) return;
+            Annot a = annots[idx];
+            OpenTextInputCore(a.Rect.Location, a, idx);
+        }
+
+        void OpenTextInputCore(Point sp, Annot seed, int editIdx)
         {
             CommitTextInput();
             textMode = true;
-            textBuf = "";
-            textPt = sp;
-            textAngle = 0;
+            if (seed != null)
+            {
+                // 重编辑: 载入原标注属性 (颜色/字号/字体随属性栏当前值会被覆盖, 这里以原标注为准)
+                textBuf = seed.Text; textPt = seed.Rect.Location; textAngle = seed.Angle;
+                curColor = seed.Color; curFontPt = seed.FontPt; curFontFamily = seed.FontFamily;
+                textEditIdx = editIdx;
+            }
+            else
+            {
+                textBuf = "";
+                textPt = sp;
+                textAngle = 0;
+                textEditIdx = -1;
+            }
 
             // 1x1 输入宿主: 定位在文字插入点 (IME 候选窗跟随到文字位置, 不再跑角落)
             textInput = new TextBox();
@@ -768,6 +825,7 @@ partial class ShotService
                                 RectangleToClient(new Rectangle(sp, Size.Empty)).Y, 2, 2);
             textInput.BorderStyle = BorderStyle.None;
             textInput.TabIndex = 98;
+            textInput.Text = textBuf; // 重编辑: 宿主载入原文 (IME/退格从原文续算)
             textInput.KeyDown += (s, ev) =>
             {
                 if (ev.KeyCode == Keys.Enter) { ev.SuppressKeyPress = true; CommitTextInput(); }
@@ -913,40 +971,98 @@ partial class ShotService
             return new Rectangle(c.X - 4, c.Y - 4, ts.Width + 10, ts.Height + 10);
         }
 
+        // 文字框四角旋转到客户区 (textPt 为旋转中心; 测量口径与 TextBoxBounds 一致: ±4 边距)
+        // 顺序 = 文字自身坐标系 TL/TR/BL/BR —— 旋转后仍一一对应四角按钮 (旋转/关闭/移动/缩放)
+        // 修复: 此前线框/按钮锚在未旋转的轴对齐框上, 文字转了框不跟 (老大实测 bug)
+        PointF[] RotatedTextCorners()
+        {
+            Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
+            Point c = RectangleToClient(new Rectangle(textPt, Size.Empty)).Location;
+            float x0 = -4f, y0 = -4f, x1 = ts.Width + 6f, y1 = ts.Height + 6f;
+            float ang = textAngle * (float)Math.PI / 180f;
+            float cos = (float)Math.Cos(ang), sin = (float)Math.Sin(ang);
+            PointF[] local = { new PointF(x0, y0), new PointF(x1, y0), new PointF(x0, y1), new PointF(x1, y1) };
+            PointF[] res = new PointF[4];
+            for (int i = 0; i < 4; i++)
+                res[i] = new PointF(c.X + local[i].X * cos - local[i].Y * sin,
+                                    c.Y + local[i].X * sin + local[i].Y * cos);
+            return res;
+        }
+
+        // 文字工具专用命中: 已提交文字标注 (点逆旋转到文字局部坐标判定), 返回最上层命中下标
+        // 其他工具不调用此函数 → 文字不参与命中, 当背景图 (老大要求)
+        int HitTextAnnot(Point sp)
+        {
+            for (int i = annots.Count - 1; i >= 0; i--)
+            {
+                Annot a = annots[i];
+                if (a.Kind != Annot.K_TEXT) continue;
+                Size ts = TextRenderer.MeasureText(a.Text.Length > 0 ? a.Text : "测", GetAnnotFont(a.FontFamily, a.FontPt));
+                double ang = -a.Angle * Math.PI / 180.0;
+                double dx = sp.X - a.Rect.X, dy = sp.Y - a.Rect.Y;
+                double lx = dx * Math.Cos(ang) - dy * Math.Sin(ang);
+                double ly = dx * Math.Sin(ang) + dy * Math.Cos(ang);
+                if (lx >= -4 && lx <= ts.Width + 6 && ly >= -4 && ly <= ts.Height + 6) return i;
+            }
+            return -1;
+        }
+
+        // 已提交文字的屏幕包围盒 (客户区, 含旋转范围; Invalidate 提示框刷新用)
+        Rectangle TextAnnotBounds(Annot a)
+        {
+            Size ts = TextRenderer.MeasureText(a.Text.Length > 0 ? a.Text : "测", GetAnnotFont(a.FontFamily, a.FontPt));
+            Point c = RectangleToClient(new Rectangle(a.Rect.Location, Size.Empty)).Location;
+            float x0 = -4f, y0 = -4f, x1 = ts.Width + 6f, y1 = ts.Height + 6f;
+            float ang = a.Angle * (float)Math.PI / 180f;
+            float cos = (float)Math.Cos(ang), sin = (float)Math.Sin(ang);
+            PointF[] local = { new PointF(x0, y0), new PointF(x1, y0), new PointF(x0, y1), new PointF(x1, y1) };
+            float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
+            for (int i = 0; i < 4; i++)
+            {
+                float rx = local[i].X * cos - local[i].Y * sin, ry = local[i].X * sin + local[i].Y * cos;
+                minX = Math.Min(minX, rx); maxX = Math.Max(maxX, rx);
+                minY = Math.Min(minY, ry); maxY = Math.Max(maxY, ry);
+            }
+            Rectangle r = Rectangle.Round(new RectangleF(c.X + minX, c.Y + minY, maxX - minX, maxY - minY));
+            r.Inflate(24, 24);
+            r.Intersect(ClientRectangle);
+            return r;
+        }
+
         void RelocateTextUI()
         {
             if (editPanel == null) return;
             try
             {
-                Rectangle box = TextBoxBounds(); // 编辑线框 (客户区)
-                // 容器原点 = 线框左上 - 30 (容纳四角按钮)
-                Point org = new Point(box.Left - 30, box.Top - 30);
-                editPanel.Location = org;
-                editPanel.Size = new Size(box.Width + 60 + 8, box.Height + 60 + 44);
-                // 四角按钮贴线框四角 (容器内坐标 = 角点 - 容器原点 - 半宽)
-                Point[] corners =
+                PointF[] corners = RotatedTextCorners(); // 旋转后四角 (TL/TR/BL/BR 一一对应四按钮)
+                // 容器 = 四角包围盒外扩 30 (容纳按钮), 底部再留 44 (确认/取消行)
+                float minX = corners[0].X, maxX = corners[0].X, minY = corners[0].Y, maxY = corners[0].Y;
+                for (int i = 1; i < 4; i++)
                 {
-                    new Point(box.Left, box.Top),      // 左上 旋转
-                    new Point(box.Right, box.Top),     // 右上 关闭
-                    new Point(box.Left, box.Bottom),   // 左下 移动
-                    new Point(box.Right, box.Bottom),  // 右下 缩放
-                };
+                    minX = Math.Min(minX, corners[i].X); maxX = Math.Max(maxX, corners[i].X);
+                    minY = Math.Min(minY, corners[i].Y); maxY = Math.Max(maxY, corners[i].Y);
+                }
+                Point org = new Point((int)minX - 30, (int)minY - 30);
+                editPanel.Location = org;
+                editPanel.Size = new Size((int)(maxX - minX) + 60 + 8, (int)(maxY - minY) + 60 + 44);
+                // 四角按钮贴旋转后四角 (容器内坐标 = 角点 - 容器原点 - 半宽)
                 int ci = 0;
                 foreach (Control ctl in editPanel.Controls)
                 {
                     Button b = ctl as Button;
                     if (b == null || b.Size.Width != 22) continue;
-                    b.Location = new Point(corners[ci].X - org.X - 11, corners[ci].Y - org.Y - 11);
+                    PointF c0 = corners[ci % 4];
+                    b.Location = new Point((int)(c0.X - org.X - 11), (int)(c0.Y - org.Y - 11));
                     ci++;
                 }
-                // 确认/取消 线框下方横排 (容器内)
+                // 确认/取消 旋转后包围盒下方横排 (容器内)
                 foreach (Control ctl in editPanel.Controls)
                 {
                     Button b = ctl as Button;
                     if (b != null && (b.Text == "确认" || b.Text == "取消"))
                     {
                         int ix = (b.Text == "确认") ? 8 : 86;
-                        b.Location = new Point(box.Left - org.X + ix, box.Bottom - org.Y + 14);
+                        b.Location = new Point((int)minX - org.X + ix, (int)maxY - org.Y + 14);
                     }
                 }
             }
@@ -959,7 +1075,8 @@ partial class ShotService
             string t = textBuf;
             Point pt = textPt;
             int ang = textAngle;
-            CloseTextInput();
+            int editIdx = textEditIdx;
+            CloseTextInput(); // 复位 textEditIdx/hoverTextIdx
             if (!string.IsNullOrEmpty(t))
             {
                 Annot a = new Annot();
@@ -970,8 +1087,19 @@ partial class ShotService
                 a.FontFamily = curFontFamily;
                 a.Angle = ang;
                 a.Rect = new Rectangle(pt, Size.Empty);
-                PushAnnot(a);
-                Log("capture: annot text (" + t.Length + " chars, angle=" + ang + ")");
+                if (editIdx >= 0 && editIdx < annots.Count && annots[editIdx].Kind == Annot.K_TEXT)
+                {
+                    Rectangle oldB = TextAnnotBounds(annots[editIdx]); // 旧位置 (可能被拖走)
+                    annots[editIdx] = a;                               // 重编辑: 原位替换
+                    Invalidate(oldB);
+                    Invalidate(TextAnnotBounds(a));
+                    Log("capture: annot text edited (#" + editIdx + ", " + t.Length + " chars, angle=" + ang + ")");
+                }
+                else
+                {
+                    PushAnnot(a);
+                    Log("capture: annot text (" + t.Length + " chars, angle=" + ang + ")");
+                }
             }
         }
 
@@ -989,6 +1117,11 @@ partial class ShotService
             if (caretTimer != null) caretTimer.Stop();
             if (textInput != null) { try { Controls.Remove(textInput); textInput.Dispose(); } catch { } textInput = null; } // 宿主在遮罩上, 单独销毁 (残留=插入符一直闪)
             if (editPanel != null) { try { editPanel.Dispose(); } catch { } editPanel = null; }
+            // 复位悬停/重编辑状态 (悬停提示框区域刷掉, 下次移动重算)
+            if (hoverTextIdx >= 0 && hoverTextIdx < annots.Count && annots[hoverTextIdx].Kind == Annot.K_TEXT)
+                Invalidate(TextAnnotBounds(annots[hoverTextIdx]));
+            hoverTextIdx = -1;
+            textEditIdx = -1;
             InvalidateTextInput();
             Focus();
         }
