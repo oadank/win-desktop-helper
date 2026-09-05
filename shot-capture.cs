@@ -569,6 +569,10 @@ partial class ShotService
                 using (Font pf = GetAnnotFont(curFontFamily, curFontPt))
                     g.DrawString(textBuf, pf, tb, 0, 0);
                 g.Restore(st);
+                // 编辑线框 (文字范围边界, 蓝 1.5px; textAngle=0 时与四角按钮对齐)
+                Rectangle box = TextBoxBounds();
+                using (Pen bp = new Pen(Color.FromArgb(60, 110, 200), 1.5f))
+                    g.DrawRectangle(bp, box);
             }
             DrawAnnots(g, Point.Empty); // 选区内标注 (客户区即冻结图坐标, 偏移0)
             using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
@@ -789,37 +793,50 @@ partial class ShotService
         }
 
         // 四角按钮+确认取消 重定位 (文字区域四角 + 下方横排)
+        // 文字编辑线框 (客户区): 输入文字的范围边界, OnPaint 画线 + 四角按钮定位 共用
+        Rectangle TextBoxBounds()
+        {
+            Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
+            Point c = RectangleToClient(new Rectangle(textPt, Size.Empty)).Location;
+            return new Rectangle(c.X - 4, c.Y - 4, ts.Width + 10, ts.Height + 10);
+        }
+
         void RelocateTextUI()
         {
             if (editPanel == null) return;
             try
             {
-                Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
-                int tw = Math.Max(40, ts.Width + 16), th = ts.Height + 10;
-                Point c = RectangleToClient(new Rectangle(textPt, Size.Empty)).Location;
-                int bx = c.X, by = c.Y;
-                // 四角按钮: 左上旋转 右上关闭 左下移动 右下缩放 (容器坐标 0,0 = 文字区左上角)
+                Rectangle box = TextBoxBounds(); // 编辑线框 (客户区)
+                // 四角按钮贴线框四角 (中心对齐角点)
+                Point[] corners =
+                {
+                    new Point(box.Left, box.Top),      // 左上 旋转
+                    new Point(box.Right, box.Top),     // 右上 关闭
+                    new Point(box.Left, box.Bottom),   // 左下 移动
+                    new Point(box.Right, box.Bottom),  // 右下 缩放
+                };
                 int ci = 0;
                 foreach (Control ctl in editPanel.Controls)
                 {
                     Button b = ctl as Button;
                     if (b == null || b.Size.Width != 22) continue;
-                    int qx = (ci % 2 == 0) ? -26 : tw + 4;
-                    int qy = (ci < 2) ? -26 : th + 4;
-                    b.Location = new Point(qx, qy);
+                    b.Location = new Point(corners[ci].X - 11, corners[ci].Y - 11);
                     ci++;
                 }
-                // 容器大小覆盖: 按钮区 + 文字区 + 下方确认取消
-                editPanel.Size = new Size(Math.Max(tw + 70, 120), th + 76);
-                editPanel.Location = new Point(bx - 30, by - 30);
-                // 确认/取消 底部横排
+                // 容器: 覆盖线框 + 按钮 + 下方确认取消
+                int minX = Math.Min(box.Left - 26, box.Left - 11), minY = box.Top - 26;
+                int maxX = Math.Max(box.Right + 26, box.Right + 11);
+                int maxBottonY = Math.Max(box.Bottom + 26, box.Bottom + 11);
+                editPanel.Size = new Size(maxX - minX + 4, maxBottonY - minY + 44);
+                editPanel.Location = new Point(minX - 2, minY - 2);
+                // 确认/取消 线框下方横排
                 foreach (Control ctl in editPanel.Controls)
                 {
                     Button b = ctl as Button;
                     if (b != null && (b.Text == "确认" || b.Text == "取消"))
                     {
-                        int i2 = (b.Text == "确认") ? 6 : 70;
-                        b.Location = new Point(i2, th + 36);
+                        int ix = (b.Text == "确认") ? 8 : 80;
+                        b.Location = new Point(box.Left - minX + ix, box.Bottom - minY + 14);
                     }
                 }
             }
@@ -853,6 +870,16 @@ partial class ShotService
             if (!textMode) return;
             CloseTextInput();
             Log("capture: text input cancelled");
+        }
+
+        void CloseTextInput()
+        {
+            textMode = false;
+            textBuf = "";
+            if (editPanel != null) { try { editPanel.Dispose(); } catch { } editPanel = null; }
+            textInput = null;
+            InvalidateTextInput();
+            Focus();
         }
 
 
