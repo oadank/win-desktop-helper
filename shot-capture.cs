@@ -566,8 +566,10 @@ partial class ShotService
                 g.TranslateTransform(d.X + (textPt.X - sel.X), d.Y + (textPt.Y - sel.Y));
                 g.RotateTransform(textAngle);
                 using (SolidBrush tb = new SolidBrush(curColor))
-                using (Font pf = GetAnnotFont(curFontFamily, curFontPt))
+                {
+                    Font pf = GetAnnotFont(curFontFamily, curFontPt); // 缓存字体不可 Dispose (第4处, 漏修导致全局崩溃)
                     g.DrawString(textBuf, pf, tb, 0, 0);
+                }
                 g.Restore(st);
                 // 编辑线框 (文字范围边界, 蓝 1.5px; textAngle=0 时与四角按钮对齐)
                 Rectangle box = TextBoxBounds();
@@ -807,7 +809,11 @@ partial class ShotService
             try
             {
                 Rectangle box = TextBoxBounds(); // 编辑线框 (客户区)
-                // 四角按钮贴线框四角 (中心对齐角点)
+                // 容器原点 = 线框左上 - 30 (容纳四角按钮)
+                Point org = new Point(box.Left - 30, box.Top - 30);
+                editPanel.Location = org;
+                editPanel.Size = new Size(box.Width + 60 + 8, box.Height + 60 + 44);
+                // 四角按钮贴线框四角 (容器内坐标 = 角点 - 容器原点 - 半宽)
                 Point[] corners =
                 {
                     new Point(box.Left, box.Top),      // 左上 旋转
@@ -820,23 +826,17 @@ partial class ShotService
                 {
                     Button b = ctl as Button;
                     if (b == null || b.Size.Width != 22) continue;
-                    b.Location = new Point(corners[ci].X - 11, corners[ci].Y - 11);
+                    b.Location = new Point(corners[ci].X - org.X - 11, corners[ci].Y - org.Y - 11);
                     ci++;
                 }
-                // 容器: 覆盖线框 + 按钮 + 下方确认取消
-                int minX = Math.Min(box.Left - 26, box.Left - 11), minY = box.Top - 26;
-                int maxX = Math.Max(box.Right + 26, box.Right + 11);
-                int maxBottonY = Math.Max(box.Bottom + 26, box.Bottom + 11);
-                editPanel.Size = new Size(maxX - minX + 4, maxBottonY - minY + 44);
-                editPanel.Location = new Point(minX - 2, minY - 2);
-                // 确认/取消 线框下方横排
+                // 确认/取消 线框下方横排 (容器内)
                 foreach (Control ctl in editPanel.Controls)
                 {
                     Button b = ctl as Button;
                     if (b != null && (b.Text == "确认" || b.Text == "取消"))
                     {
-                        int ix = (b.Text == "确认") ? 8 : 80;
-                        b.Location = new Point(box.Left - minX + ix, box.Bottom - minY + 14);
+                        int ix = (b.Text == "确认") ? 8 : 86;
+                        b.Location = new Point(box.Left - org.X + ix, box.Bottom - org.Y + 14);
                     }
                 }
             }
