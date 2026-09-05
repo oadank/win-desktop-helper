@@ -533,8 +533,10 @@ partial class ShotService
             {
                 // typing text + blinking caret, painted on overlay = transparent background
                 using (SolidBrush tb = new SolidBrush(curColor))
-                using (Font pf = GetAnnotFont(curFontFamily, curFontPt))
+                {
+                    Font pf = GetAnnotFont(curFontFamily, curFontPt); // 缓存字体不可 Dispose (using 会销毁共享实例)
                     g.DrawString(textBuf, pf, tb, new PointF(d.X + (textPt.X - sel.X), d.Y + (textPt.Y - sel.Y)));
+                }
                 if (caretOn)
                 {
                     SizeF tw = g.MeasureString(textBuf, GetAnnotFont(curFontFamily, curFontPt));
@@ -599,8 +601,10 @@ partial class ShotService
                         break;
                     case Annot.K_TEXT:
                         using (Brush b = new SolidBrush(a.Color))
-                        using (Font f = GetAnnotFont(a.FontFamily, a.FontPt))
+                        {
+                            Font f = GetAnnotFont(a.FontFamily, a.FontPt); // 缓存字体不可 Dispose
                             g.DrawString(a.Text, f, b, a.Rect.X - offset.X, a.Rect.Y - offset.Y);
+                        }
                         break;
                     case Annot.K_SEQ:
                         Rectangle r = a.Rect; r.Offset(-offset.X, -offset.Y);
@@ -609,8 +613,10 @@ partial class ShotService
                         {
                             sf.Alignment = StringAlignment.Center; sf.LineAlignment = StringAlignment.Center;
                             using (Brush wb = new SolidBrush(Color.White))
-                            using (Font f = GetAnnotFont(a.FontFamily, a.FontPt))
+                            {
+                                Font f = GetAnnotFont(a.FontFamily, a.FontPt); // 缓存字体不可 Dispose
                                 g.DrawString(a.No.ToString(), f, wb, (RectangleF)r, sf);
+                            }
                         }
                         break;
                 }
