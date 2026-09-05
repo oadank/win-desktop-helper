@@ -729,7 +729,7 @@ partial class ShotService
                         }
                         break;
                     case Annot.K_SEQ:
-                        Rectangle r = a.Rect; r.Offset(-offset.X, -offset.Y);
+                        Rectangle r = SeqBadgeRect(a); r.Offset(-offset.X, -offset.Y); // 宽度随文字自适应, "10"/"XII"不裁
                         using (SolidBrush b = new SolidBrush(a.Color)) g.FillEllipse(b, r);
                         using (StringFormat sf = new StringFormat())
                         {
@@ -1281,25 +1281,16 @@ partial class ShotService
                 m.Show(propBar, fmtBtn.Rect.X, fmtBtn.Rect.Bottom + 2);
             });
             fmtBtn.ToolKey = "seqfmt";
-            // PixPin 同款: "从N" 显示 + ▲▼ 步进按钮 (20项长菜单在屏幕边缘会被裁到只剩1项, 弃用)
-            ToolbarPanel.Btn startBtn = propBar.AddText("从" + seqNext, "序号起始数字", delegate { });
+            // PixPin 同款一体化微调框: 左半当前值 右半上▲下▼ (点击上半+1 下半-1); 防独立按钮被重排推出屏幕
+            ToolbarPanel.Btn startBtn = null;
+            startBtn = propBar.AddSpinner("从" + seqNext, "序号起始数字 (▲+1 / ▼-1)", delegate(bool up)
+            {
+                if (up) { if (seqNext < 99) seqNext++; }
+                else { if (seqNext > 1) seqNext--; }
+                startBtn.DrawStr = "从" + seqNext; propBar.RelayoutNow();
+                Log("capture: seq start=" + seqNext);
+            });
             startBtn.ToolKey = "seqstart";
-            ToolbarPanel.Btn seqUp = propBar.AddText("▲", "起始数字 +1", delegate
-            {
-                if (seqNext >= 99) return;
-                seqNext++;
-                startBtn.DrawStr = "从" + seqNext; propBar.RelayoutNow();
-                Log("capture: seq start=" + seqNext);
-            });
-            seqUp.ToolKey = "sequp";
-            ToolbarPanel.Btn seqDown = propBar.AddText("▼", "起始数字 -1", delegate
-            {
-                if (seqNext <= 1) return;
-                seqNext--;
-                startBtn.DrawStr = "从" + seqNext; propBar.RelayoutNow();
-                Log("capture: seq start=" + seqNext);
-            });
-            seqDown.ToolKey = "seqdown";
             Controls.Add(propBar);
             propBar.Visible = false;
         }
@@ -1861,7 +1852,9 @@ partial class ShotService
         {
             public string Icon, Tip, ToolKey;
             public Action OnClick;
+            public Action<bool> OnSpin;        // 一体化微调框: true=上三角(+1) false=下三角(-1)
             public bool IsToggle, On, Enabled = true;
+            public bool IsSpinner;             // PixPin 同款: 左半当前值文字 + 右半上▲下▼三角
             public Rectangle Rect;
             public Color Swatch = Color.Empty; // 颜色圆点按钮 (非空时画色块而非图标)
             public string DrawStr;             // 文字按钮 (非空时画文字而非图标, 如字号/字体当前值)
@@ -1870,6 +1863,13 @@ partial class ShotService
         public Btn AddText(string str, string tipText, Action onClick)
         {
             Btn b = new Btn { Icon = "#text", DrawStr = str, Tip = tipText, OnClick = onClick };
+            Btns.Add(b); Relayout(); Invalidate(); return b;
+        }
+
+        // PixPin 同款一体化微调框: 左半显示当前值, 右半上▲/下▼三角 (点击上半+1 下半-1)
+        public Btn AddSpinner(string str, string tipText, Action<bool> onSpin)
+        {
+            Btn b = new Btn { Icon = "#text", DrawStr = str, Tip = tipText, IsSpinner = true, OnSpin = onSpin };
             Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
@@ -1915,7 +1915,7 @@ partial class ShotService
                     // 文字按钮按实际文字宽布局, 否则"从12"/"I.II.III"被裁成"从1"/"I.II"
                     if (tf == null) tf = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
                     int w;
-                    try { w = Math.Max(40, TextRenderer.MeasureText(b.DrawStr, tf).Width + 16); }
+                    try { w = Math.Max(40, TextRenderer.MeasureText(b.DrawStr, tf).Width + 16 + (b.IsSpinner ? 26 : 0)); }
                     catch { w = 40; }
                     b.Rect = new Rectangle(x, 4, w, 40); x += w;
                 }
@@ -1923,6 +1923,12 @@ partial class ShotService
             }
             if (tf != null) try { tf.Dispose(); } catch { }
             Width = x + 6; Height = 48;
+            // 宽度变化后钳回父窗内, 防右端按钮(从N/▲▼)被推出屏幕 — 用户实测"10显示不出来"的真凶
+            if (Parent != null)
+            {
+                if (Left + Width > Parent.ClientSize.Width) Left = Parent.ClientSize.Width - Width;
+                if (Left < 0) Left = 0;
+            }
         }
 
         public void RelayoutNow() { Relayout(); Invalidate(); }
@@ -1985,6 +1991,21 @@ partial class ShotService
                     if (!b.Enabled)
                         using (SolidBrush dim = new SolidBrush(Color.FromArgb(140, 26, 27, 31)))
                             g.FillEllipse(dim, b.Rect.X + 10, b.Rect.Y + 10, 20, 20);
+                    continue;
+                }
+                if (b.IsSpinner)
+                {
+                    // PixPin 同款: 左半当前值文字 + 右半上▲下▼实心三角
+                    Color tc = b.Enabled ? Color.FromArgb(232, 234, 240) : Color.FromArgb(110, 114, 120);
+                    Rectangle textR = new Rectangle(b.Rect.X + 2, b.Rect.Y, b.Rect.Width - 28, b.Rect.Height);
+                    TextRenderer.DrawText(g, b.DrawStr, new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold), textR, tc,
+                                          TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    int cx = b.Rect.Right - 15;
+                    using (SolidBrush tb = new SolidBrush(tc))
+                    {
+                        g.FillPolygon(tb, new Point[] { new Point(cx - 6, b.Rect.Y + 15), new Point(cx + 6, b.Rect.Y + 15), new Point(cx, b.Rect.Y + 7) });
+                        g.FillPolygon(tb, new Point[] { new Point(cx - 6, b.Rect.Bottom - 15), new Point(cx + 6, b.Rect.Bottom - 15), new Point(cx, b.Rect.Bottom - 7) });
+                    }
                     continue;
                 }
                 if (b.DrawStr != null)
@@ -2050,12 +2071,23 @@ partial class ShotService
             if (e.Button == MouseButtons.Left && h >= 0 && h == hoverIdx)
             {
                 Btn b = Btns[h];
-                if (b.Enabled && b.OnClick != null) b.OnClick();
+                if (b.Enabled && b.IsSpinner && b.OnSpin != null)
+                    b.OnSpin(e.Y < b.Rect.Top + b.Rect.Height / 2); // 上半=+1 下半=-1
+                else if (b.Enabled && b.OnClick != null) b.OnClick();
             }
         }
     }
 
     // 语言检测: 按 CJK 占比判 zh/en/mixed —— 点翻译自动反向翻译 (中文→英, 英文→中), 混合让用户选
+    // 序号徽章矩形: 宽度随文字自适应 (PixPin 同款, "10"/"XII"完整显示), 高度=创建直径, 以 a.Rect 中心水平展开
+    static Rectangle SeqBadgeRect(Annot a)
+    {
+        string s = SeqText(a.No, a.SeqFmt);
+        int w = a.Rect.Width;
+        try { using (Font f = new Font(a.FontFamily, a.FontPt, FontStyle.Bold)) w = Math.Max(a.Rect.Height, TextRenderer.MeasureText(s, f).Width + 26); } catch { }
+        return new Rectangle(a.Rect.X + (a.Rect.Width - w) / 2, a.Rect.Y, w, a.Rect.Height);
+    }
+
     static string SeqText(int n, string fmt)
     {
         if (fmt == "I") // 罗马大写
