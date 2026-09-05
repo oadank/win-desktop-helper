@@ -2041,9 +2041,42 @@ partial class ShotService
         }
     }
 
+    // 语言检测: 按 CJK 占比判 zh/en/mixed —— 点翻译自动反向翻译 (中文→英, 英文→中), 混合让用户选
+    static string SeqText(int n, string fmt)
+    {
+        if (fmt == "I") // 罗马大写
+        {
+            string[] R = { "", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX", "XXI", "XXII", "XXIII", "XXIV", "XXV", "XXVI", "XXVII", "XXVIII", "XXIX", "XXX" };
+            return (n >= 1 && n <= 30) ? R[n] : n.ToString();
+        }
+        if (fmt == "a") return n >= 1 && n <= 26 ? ((char)('a' + n - 1)).ToString() : n.ToString();
+        if (fmt == "A") return n >= 1 && n <= 26 ? ((char)('A' + n - 1)).ToString() : n.ToString();
+        return n.ToString(); // "1"
+    }
+
+    static string DetectLanguage(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "en";
+        int cjk = 0, latin = 0;
+        foreach (char c in s)
+        {
+            if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
+            else if (char.IsLetter(c)) latin++;
+        }
+        int total = cjk + latin;
+        if (total == 0) return "en";
+        double zhRatio = (double)cjk / total;
+        if (zhRatio >= 0.6) return "zh";
+        if (zhRatio <= 0.15) return "en";
+        return "mixed";
+    }
+}
+
     // ---- 深色 UI 主题 (全窗体统一色板; 设置窗/剪贴板历史窗/结果窗/贴图窗共用) ----
     static class DarkUI
     {
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ReleaseCapture();
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
         public static readonly Color Bg = Color.FromArgb(35, 36, 40);      // 窗体底
         public static readonly Color BgPanel = Color.FromArgb(28, 29, 33); // 面板
         public static readonly Color BgField = Color.FromArgb(22, 23, 27); // 输入框
@@ -2079,6 +2112,8 @@ partial class ShotService
     // 贴图窗 (PixPin 同款): 选区图钉在桌面原位置, 左键拖动 / 滚轮缩放 / 双击关闭 / 右键深色菜单
     class PinForm : Form
     {
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ReleaseCapture();
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
         readonly Bitmap img;
         readonly float ratio;
 
@@ -2158,35 +2193,6 @@ partial class ShotService
         }
     }
 
-    // 语言检测: 按 CJK 占比判 zh/en/mixed —— 点翻译自动反向翻译 (中文→英, 英文→中), 混合让用户选
-    static string SeqText(int n, string fmt)
-    {
-        if (fmt == "I") // 罗马大写
-        {
-            string[] R = { "", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX", "XXI", "XXII", "XXIII", "XXIV", "XXV", "XXVI", "XXVII", "XXVIII", "XXIX", "XXX" };
-            return (n >= 1 && n <= 30) ? R[n] : n.ToString();
-        }
-        if (fmt == "a") return n >= 1 && n <= 26 ? ((char)('a' + n - 1)).ToString() : n.ToString();
-        if (fmt == "A") return n >= 1 && n <= 26 ? ((char)('A' + n - 1)).ToString() : n.ToString();
-        return n.ToString(); // "1"
-    }
-
-    static string DetectLanguage(string s)
-    {
-        if (string.IsNullOrWhiteSpace(s)) return "en";
-        int cjk = 0, latin = 0;
-        foreach (char c in s)
-        {
-            if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
-            else if (char.IsLetter(c)) latin++;
-        }
-        int total = cjk + latin;
-        if (total == 0) return "en";
-        double zhRatio = (double)cjk / total;
-        if (zhRatio >= 0.6) return "zh";
-        if (zhRatio <= 0.15) return "en";
-        return "mixed";
-    }
 
     // M2: OCR/翻译结果浮动面板 (非模态: Show() 直接浮在屏幕, 不阻塞不弹框; 可拖动/复制/Esc关)
     class ResultForm : Form
@@ -2251,4 +2257,3 @@ partial class ShotService
             copyBtn.BackColor = Color.FromArgb(40, 130, 80);
         }
     }
-}
