@@ -79,3 +79,8 @@
   ```
   ⚠️ 文件作为**位置参数**传（gh 无 `--attach` flag）；新 release 自动成为 Latest，已装用户自动更新即可拉到。
 - **完整发版顺序**：改源码 → commit 源码 + 打 tag → push(main+tag) → 用户手动 csc 编译 → Agent 跑 ISCC 打包 → 静默安装验证(`/health` 看版本) → Agent 建 gh release 上传 exe。
+## 2026-09-05 MCP 实测三坑
+
+1. **窗口截图拍不到 DirectWrite 内容**：Win11 记事本正文区（RichEditD2DPT 硬件层）在 /shot 截图里是黑的，只有状态栏等 GDI 部分可见。验证写入是否成功改用 **ui_read 读 value** 或看状态栏字符计数，别靠截图。修复方向：PrintWindow+PW_RENDERFULLCONTENT 或 DXGI 桌面复制。
+2. **app_run 返回的 pid 不是窗口进程**：Store 应用（记事本/计算器）启动器进程即刻退出，真实 UI 是 spawn 出的新进程（pid 不同、标题可能英文如 "无标题 - Notepad"）。定位一律用 window_info/active 看真实标题，别信 app_run 的 pid。
+3. **keyboard_type 盲打危险**：activate 失败后打字会打进用户正在用的前台窗口（实测打进了用户的终端）。铁律：active_window 确认前台 == 目标窗口后才许 type/press。
