@@ -968,7 +968,8 @@ partial class ShotService
             float x0 = -4f, y0 = -4f, x1 = ts.Width + 6f, y1 = ts.Height + 6f;
             float ang = textAngle * (float)Math.PI / 180f;
             float cos = (float)Math.Cos(ang), sin = (float)Math.Sin(ang);
-            PointF[] local = { new PointF(x0, y0), new PointF(x1, y0), new PointF(x0, y1), new PointF(x1, y1) };
+            // 环形顺序 TL->TR->BR->BL (DrawPolygon 按序连线; Z字序会连出 X 交叉线)
+            PointF[] local = { new PointF(x0, y0), new PointF(x1, y0), new PointF(x1, y1), new PointF(x0, y1) };
             PointF[] res = new PointF[4];
             for (int i = 0; i < 4; i++)
                 res[i] = new PointF(c.X + local[i].X * cos - local[i].Y * sin,
@@ -1002,7 +1003,8 @@ partial class ShotService
             float x0 = -4f, y0 = -4f, x1 = ts.Width + 6f, y1 = ts.Height + 6f;
             float ang = a.Angle * (float)Math.PI / 180f;
             float cos = (float)Math.Cos(ang), sin = (float)Math.Sin(ang);
-            PointF[] local = { new PointF(x0, y0), new PointF(x1, y0), new PointF(x0, y1), new PointF(x1, y1) };
+            // 环形顺序 TL->TR->BR->BL (DrawPolygon 按序连线; Z字序会连出 X 交叉线)
+            PointF[] local = { new PointF(x0, y0), new PointF(x1, y0), new PointF(x1, y1), new PointF(x0, y1) };
             float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
             for (int i = 0; i < 4; i++)
             {
@@ -1032,15 +1034,17 @@ partial class ShotService
                 Point org = new Point((int)minX - 30, (int)minY - 30);
                 editPanel.Location = org;
                 editPanel.Size = new Size((int)(maxX - minX) + 60 + 8, (int)(maxY - minY) + 60 + 8);
-                // 四角按钮贴旋转后四角 (容器内坐标 = 角点 - 容器原点 - 半宽)
-                int ci = 0;
+                // 四角按钮贴旋转后四角: Tag 0=旋转(TL) 1=关闭(TR) 2=移动(BL) 3=缩放(BR)
+                // corners 环形序 [0]=TL [1]=TR [2]=BR [3]=BL
+                int[] tagToCorner = { 0, 1, 3, 2 };
                 foreach (Control ctl in editPanel.Controls)
                 {
                     Button b = ctl as Button;
                     if (b == null || b.Size.Width != 22) continue;
-                    PointF c0 = corners[ci % 4];
+                    int tag = (b.Tag is int) ? (int)b.Tag : -1;
+                    if (tag < 0 || tag > 3) continue;
+                    PointF c0 = corners[tagToCorner[tag]];
                     b.Location = new Point((int)(c0.X - org.X - 11), (int)(c0.Y - org.Y - 11));
-                    ci++;
                 }
 
             }
