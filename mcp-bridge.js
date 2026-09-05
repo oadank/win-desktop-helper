@@ -180,8 +180,13 @@ const TOOLS = [
     }
   },
   {
+    name: 'clipboard_get',
+    description: '直读当前剪贴板(多格式): type=text 返回文本; type=image 返回 PNG 文件路径(用 Read 看图/OCR/传多模态——用户截屏后 agent 即可读图); type=files 返回复制的文件路径列表。读选中文字 = 先 keyboard_press ctrl+c 再调本工具',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} }
+  },
+  {
     name: 'clipboard_history',
-    description: '读取剪贴板历史（常驻监听，最多50条，最新在前）。给 AI 读取用户刚复制的内容。limit=返回条数(可选)',
+    description: '读取剪贴板历史（常驻监听，最多50条，最新在前，含 "[图片] 路径" 条目）。给 AI 读取用户刚复制的内容。limit=返回条数(可选)',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: { limit: { type: 'number', description: '返回条数' } }
@@ -371,6 +376,7 @@ function buildUrl(name, a) {
     case 'keyboard_press': return { path: '/keyboard/press', qs: ['keys=' + enc(a.keys)] };
     case 'keyboard_hold': return { path: '/keyboard/hold', qs: ['keys=' + enc(a.keys), 'ms=' + (a.ms || 500)] };
     case 'clipboard_set': return { path: '/clipboard/set', qs: ['text=' + enc(String(a.text))] };
+    case 'clipboard_get': return { path: '/clipboard/get', qs: [] };
     case 'clipboard_history': return { path: '/clipboard/history', qs: a.limit !== undefined ? ['limit=' + a.limit] : [] };
     case 'ui_tree': {
       let qs = [];

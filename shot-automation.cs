@@ -286,6 +286,52 @@ partial class ShotService
         return "{\"ok\":true,\"chars\":" + text.Length + "}";
     }
 
+    // 直读当前剪贴板 (多格式): text / image(存PNG返回路径, AI用Read看图) / files(复制的文件路径列表)
+    static string ClipboardGet()
+    {
+        string result = null;
+        Thread t = new Thread(new ThreadStart(delegate
+        {
+            try
+            {
+                if (System.Windows.Forms.Clipboard.ContainsImage())
+                {
+                    Image img = System.Windows.Forms.Clipboard.GetImage();
+                    if (img != null)
+                    {
+                        string name = "clip_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
+                        string path = System.IO.Path.Combine(ShotDir, name);
+                        img.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                        long bytes = new System.IO.FileInfo(path).Length;
+                        result = "{\"ok\":true,\"type\":\"image\",\"file\":\"" + JsonEscape(path) +
+                                 "\",\"url\":\"http://127.0.0.1:" + 18800 + "/img/" + JsonEscape(name) +
+                                 "\",\"w\":" + img.Width + ",\"h\":" + img.Height + ",\"bytes\":" + bytes + "}";
+                        img.Dispose();
+                    }
+                }
+                else if (System.Windows.Forms.Clipboard.ContainsFileDropList())
+                {
+                    var files = System.Windows.Forms.Clipboard.GetFileDropList();
+                    var arr = new List<string>();
+                    foreach (string f in files) arr.Add("\"" + JsonEscape(f) + "\"");
+                    result = "{\"ok\":true,\"type\":\"files\",\"count\":" + arr.Count + ",\"files\":[" + string.Join(",", arr.ToArray()) + "]}";
+                }
+                else if (System.Windows.Forms.Clipboard.ContainsText())
+                {
+                    string txt = System.Windows.Forms.Clipboard.GetText();
+                    result = "{\"ok\":true,\"type\":\"text\",\"chars\":" + txt.Length + ",\"text\":\"" + JsonEscape(txt) + "\"}";
+                }
+                else result = "{\"ok\":true,\"type\":\"empty\"}";
+            }
+            catch (Exception ex) { result = "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
+        }));
+        t.SetApartmentState(ApartmentState.STA);
+        t.IsBackground = true;
+        t.Start();
+        t.Join(3000);
+        return result ?? "{\"ok\":false,\"error\":\"clipboard read timeout\"}";
+    }
+
     // ==================== UI Automation 元素树 ====================
     // 端点:
     //   /ui/tree?title=记事本[&max=400]  -> [{i,type,name,enabled,rect,patterns}]

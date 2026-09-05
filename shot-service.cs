@@ -488,6 +488,7 @@ public partial class ShotService
     static readonly List<string> clipHist = new List<string>();
     static readonly object clipLock = new object();
     static string lastClipText = "";
+    static long lastClipImgFp = 0; // 剪贴板图片指纹 (去重: 轮询会反复读到同一张)
     static string clipHotkeyName = "";   // 实际注册成功的组合(候选自动降级)
     static Form clipHistWin;             // 当前打开的剪贴板历史窗(单例: 再按热键=关闭, 不叠窗)
     static readonly string ClipStorePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "clipboard-history.json");
@@ -565,7 +566,38 @@ public partial class ShotService
         {
             try
             {
-                if (clipEnabled == 1 && Clipboard.ContainsText())
+                if (clipEnabled == 1 && Clipboard.ContainsImage())
+                {
+                    // 图片入历史: 存 PNG 落盘, 历史条目 "[图片] 路径" (AI 可 Read 该图/OCR/传多模态); 指纹去重
+                    Image img = Clipboard.GetImage();
+                    if (img != null)
+                    {
+                        long fp = img.Width * 1000003L + img.Height;
+                        using (Bitmap b = new Bitmap(img))
+                        {
+                            fp += b.GetPixel(5, 5).ToArgb();
+                            fp += b.GetPixel(b.Width / 2, b.Height / 2).ToArgb();
+                            fp += b.GetPixel(b.Width - 6, b.Height - 6).ToArgb();
+                        }
+                        if (fp != lastClipImgFp)
+                        {
+                            lastClipImgFp = fp;
+                            string name = "clip_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
+                            string path = Path.Combine(ShotDir, name);
+                            img.Save(path, ImageFormat.Png);
+                            string entry = "[图片] " + path;
+                            lock (clipLock)
+                            {
+                                clipHist.Remove(entry);
+                                clipHist.Insert(0, entry);
+                                while (clipHist.Count > clipMax) clipHist.RemoveAt(clipHist.Count - 1);
+                            }
+                            Log("clip image captured " + img.Width + "x" + img.Height + " -> " + name);
+                        }
+                        img.Dispose();
+                    }
+                }
+                else if (clipEnabled == 1 && Clipboard.ContainsText())
                 {
                     string t = Clipboard.GetText();
                     if (!string.IsNullOrEmpty(t) && t != lastClipText)
@@ -1310,6 +1342,7 @@ public partial class ShotService
                         Log("[ctrl] hold " + q["keys"] + " " + ms + "ms");
                     }
                 }
+                else if (path == "/clipboard/get") { body = ClipboardGet(); Log("[ctrl] clipboard get"); }
                 else if (path == "/clipboard/set")
                 {
                     if (!q.ContainsKey("text")) { code = 400; body = "{\"ok\":false,\"error\":\"need text\"}"; }
@@ -1973,6 +2006,7 @@ public partial class ShotService
                     if (McpParam(a, "reverse") == "0") volReverse = 0;
                     return McpText("{\"ok\":true,\"enabled\":" + volEnabled + ",\"reverse\":" + volReverse + ",\"step\":" + volStep + ",\"taskbarWnds\":" + taskbarWnds.Length + "}", false);
                 }
+                case "clipboard_get": return McpText(ClipboardGet(), false);
                 case "clipboard_history":
                 {
                     int lim = McpParamInt(a, "limit");
