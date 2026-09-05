@@ -142,6 +142,7 @@ partial class ShotService
         public int Style = S_ARROW;  // 箭头样式
         public float Width = 3f;     // 线宽
         public int FontPt = 14;      // 文字/序号字号
+        public int Angle = 0;        // 文字旋转角 (度, 顺时针)
         public string FontFamily = "Microsoft YaHei UI"; // 文字字体
         public Rectangle Rect;      // rect/ellipse/arrow 的包围盒; seq/text 的定位点在 Rect.Location
         public List<Point> Pts;     // 画笔折线 (屏坐标)
@@ -169,8 +170,14 @@ partial class ShotService
         // text annotation: self-drawn input (TextBox white opaque bg; BackgroundImage ignored by system EDIT control)
         // focus stays on overlay; chars arrive via WM_CHAR/KeyPress (IME works); text+caret painted in OnPaint = truly transparent
         bool textMode = false;
-        TextBox textInput;       // PixPin 式编辑框 (白底清晰, IME 候选窗跟随输入框)
-        Panel editPanel;
+        string textBuf = "";         // 编辑中文字 (自绘渲染, 背景即截图=真透明)
+        TextBox textInput;           // 1x1 隐形输入宿主 (IME 候选窗跟随到文字位置)
+        int textAngle = 0;           // 旋转角 (0/90/180/270, 左上按钮步进)
+        int textDragMode = 0;        // 1=移动 2=缩放 (左下/右下按钮拖动)
+        Point textDragStart;
+        int textDragFont0;
+        Point textDragPt0;
+        Panel editPanel;             // 透明容器: 只含四角按钮+确认/取消
         // 自动窗口检测 (PixPin 同款): 未按下时高亮光标下的窗口, 单击即选中; 拖动则转手动框选
         Rectangle hoverWin = Rectangle.Empty;
         bool pendingDown = false;
@@ -371,6 +378,20 @@ partial class ShotService
             }
         }
 
+        void InvalidateTextInput()
+        {
+            try
+            {
+                Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
+                Rectangle r = new Rectangle(RectangleToClient(new Rectangle(textPt, Size.Empty)).Location,
+                                            new Size(ts.Width + 60, ts.Height + 60));
+                r.Intersect(ClientRectangle);
+                Invalidate(r);
+                if (editPanel != null) editPanel.Invalidate();
+            }
+            catch (Exception ex) { Log("invaltext err: " + ex.Message); }
+        }
+
         // 自动窗口检测节流 (EnumWindows 全枚举, 50ms 一次)
         DateTime lastHoverCheck = DateTime.MinValue;
 
@@ -411,6 +432,16 @@ partial class ShotService
             c.Inflate(40, 30);
             Invalidate(c);
             hoverWin = Rectangle.Empty;
+        }
+
+        // 文字输入: 宿主 TextBox 的字符经 KeyPreview 抬升到 Form (IME 确认后的中文照常)
+        protected override void OnKeyPress(KeyPressEventArgs e)
+        {
+            base.OnKeyPress(e);
+            if (!textMode) return;
+            if (e.KeyChar == '\r') { CommitTextInput(); e.Handled = true; return; }
+            if (e.KeyChar == '\b') { if (textBuf.Length > 0) { textBuf = textBuf.Remove(textBuf.Length - 1); textInput.Text = textBuf; } e.Handled = true; return; }
+            if (e.KeyChar >= ' ') { textBuf += e.KeyChar; if (textInput != null) textInput.Text = textBuf; InvalidateTextInput(); e.Handled = true; }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -528,7 +559,18 @@ partial class ShotService
                 g.FillRectangle(dim, d.Right, d.Top, Math.Max(0, W - d.Right), d.Height);       // 右
             }
             DrawAnnots(g, Point.Empty);
-            // 选区内标注 (客户区即冻结图坐标, 偏移0) — 编辑中的文字在白底编辑框内
+            if (textMode)
+            {
+                // 编辑中文字: 自绘在截图上 (真透明), 支持旋转角
+                var st = g.Save();
+                g.TranslateTransform(d.X + (textPt.X - sel.X), d.Y + (textPt.Y - sel.Y));
+                g.RotateTransform(textAngle);
+                using (SolidBrush tb = new SolidBrush(curColor))
+                using (Font pf = GetAnnotFont(curFontFamily, curFontPt))
+                    g.DrawString(textBuf, pf, tb, 0, 0);
+                g.Restore(st);
+            }
+            DrawAnnots(g, Point.Empty); // 选区内标注 (客户区即冻结图坐标, 偏移0)
             using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
             using (Font f = new Font("Consolas", 11))
             using (Brush b = new SolidBrush(Color.Yellow))
@@ -586,7 +628,16 @@ partial class ShotService
                         using (Brush b = new SolidBrush(a.Color))
                         {
                             Font f = GetAnnotFont(a.FontFamily, a.FontPt); // 缓存字体不可 Dispose
-                            g.DrawString(a.Text, f, b, a.Rect.X - offset.X, a.Rect.Y - offset.Y);
+                            if (a.Angle == 0)
+                                g.DrawString(a.Text, f, b, a.Rect.X - offset.X, a.Rect.Y - offset.Y);
+                            else
+                            {
+                                var st = g.Save();
+                                g.TranslateTransform(a.Rect.X - offset.X, a.Rect.Y - offset.Y);
+                                g.RotateTransform(a.Angle);
+                                g.DrawString(a.Text, f, b, 0, 0);
+                                g.Restore(st);
+                            }
                         }
                         break;
                     case Annot.K_SEQ:
@@ -651,68 +702,136 @@ partial class ShotService
 
         // ---- 行内文字输入 (PixPin 同款: 点击处直接打字, 回车落字 Esc 取消) ----
         // ---- text input (self-drawn): click inside selection, type directly, Enter commits, Esc cancels ----
-        // ---- 文字输入 (PixPin 式): 白底编辑框 + 确认/取消按钮, IME 候选窗跟随输入框 ----
+        // ---- 文字输入 (PixPin 四角按钮式): 透明背景自绘文字 + 1x1 IME 宿主 + 四角功能按钮 ----
         void OpenTextInput(Point sp)
         {
             CommitTextInput();
             textMode = true;
+            textBuf = "";
             textPt = sp;
-            Point c = RectangleToClient(new Rectangle(sp, Size.Empty)).Location;
-            if (c.X + 290 > ClientSize.Width - 4) c.X = ClientSize.Width - 294;
-            if (c.Y + 80 > ClientSize.Height - 4) c.Y = ClientSize.Height - 84;
+            textAngle = 0;
 
-            editPanel = new Panel();
-            editPanel.BackColor = Color.White;
-            editPanel.SetBounds(c.X, c.Y, 284, 72);
-
+            // 1x1 输入宿主: 定位在文字插入点 (IME 候选窗跟随到文字位置, 不再跑角落)
             textInput = new TextBox();
-            textInput.Font = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold);
-            textInput.ForeColor = Color.FromArgb(230, 60, 50);
-            textInput.BackColor = Color.White;
+            textInput.SetBounds(RectangleToClient(new Rectangle(sp, Size.Empty)).X,
+                                RectangleToClient(new Rectangle(sp, Size.Empty)).Y, 2, 2);
             textInput.BorderStyle = BorderStyle.None;
-            textInput.SetBounds(8, 8, 268, 30);
+            textInput.TabIndex = 98;
             textInput.KeyDown += (s, ev) =>
             {
-                if (ev.KeyCode == Keys.Enter) { ev.SuppressKeyPress = true; CommitTextInput(); Focus(); }
-                else if (ev.KeyCode == Keys.Escape) { ev.SuppressKeyPress = true; CancelTextInput(); Focus(); }
+                if (ev.KeyCode == Keys.Enter) { ev.SuppressKeyPress = true; CommitTextInput(); }
+                else if (ev.KeyCode == Keys.Escape) { ev.SuppressKeyPress = true; CancelTextInput(); }
             };
-            editPanel.Controls.Add(textInput);
+            textInput.TextChanged += (s, ev) => { textBuf = textInput.Text; InvalidateTextInput(); };
+            Controls.Add(textInput);
 
+            // 四角功能按钮 (透明容器内, 20x20, 深底白符号)
+            editPanel = new Panel();
+            editPanel.BackColor = Color.Transparent;
+            int[] dxs = { -26, 26, -26, 26 }, dys = { -26, -26, 26, 26 };
+            string[] icons = { "\uE7AD", "\uE711", "\uE7C2", "\uE71F" }; // 旋转/关闭/移动/缩放 (MDL2)
+            string[] tips = { "旋转 (每次90度)", "关闭 (取消输入)", "拖动移动文字", "拖动缩放文字" };
+            Action<int> clickAct = null;
+            for (int i = 0; i < 4; i++)
+            {
+                int idx = i;
+                Button b = new Button();
+                b.Text = char.ConvertFromUtf32(Convert.ToInt32(icons[i].Substring(2), 16));
+                b.Font = new Font("Segoe MDL2 Assets", 9f);
+                b.ForeColor = Color.White; b.BackColor = Color.FromArgb(50, 110, 200);
+                b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderSize = 0;
+                b.Size = new Size(22, 22); b.Cursor = Cursors.Hand;
+                b.Tag = i;
+                if (i == 0) b.Click += delegate { textAngle = (textAngle + 90) % 360; InvalidateTextInput(); Log("capture: text rotate " + textAngle); };
+                if (i == 1) b.Click += delegate { CancelTextInput(); };
+                if (i == 2) { b.MouseDown += (s, ev) => { if (ev.Button == MouseButtons.Left) { textDragMode = 1; textDragStart = Cursor.Position; textDragPt0 = textPt; } }; }
+                if (i == 3) { b.MouseDown += (s, ev) => { if (ev.Button == MouseButtons.Left) { textDragMode = 2; textDragStart = Cursor.Position; textDragFont0 = curFontPt; } }; }
+                b.MouseMove += (s, ev) =>
+                {
+                    if (textDragMode == 0 || ev.Button != MouseButtons.Left) return;
+                    if (textDragMode == 1)
+                    {
+                        textPt = new Point(textDragPt0.X + Cursor.Position.X - textDragStart.X, textDragPt0.Y + Cursor.Position.Y - textDragStart.Y);
+                        RelocateTextUI();
+                        InvalidateTextInput();
+                    }
+                    else
+                    {
+                        int dist = Math.Abs(Cursor.Position.X - textDragStart.X) + Math.Abs(Cursor.Position.Y - textDragStart.Y);
+                        curFontPt = Math.Max(8, Math.Min(72, textDragFont0 + dist / 4));
+                        RelocateTextUI();
+                        InvalidateTextInput();
+                    }
+                };
+                b.MouseUp += (s, ev) => { textDragMode = 0; };
+                editPanel.Controls.Add(b);
+            }
+
+            // 下方 确认/取消 (用户示意)
             Button okB = new Button(); okB.Text = "确认"; okB.FlatStyle = FlatStyle.Flat; okB.FlatAppearance.BorderSize = 0;
             okB.BackColor = Color.FromArgb(60, 140, 80); okB.ForeColor = Color.White;
             okB.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold); okB.Cursor = Cursors.Hand;
-            okB.SetBounds(8, 42, 66, 24);
+            okB.Size = new Size(58, 22);
             okB.Click += delegate { CommitTextInput(); };
             editPanel.Controls.Add(okB);
-
             Button cancelB = new Button(); cancelB.Text = "取消"; cancelB.FlatStyle = FlatStyle.Flat; cancelB.FlatAppearance.BorderSize = 0;
             cancelB.BackColor = Color.FromArgb(190, 60, 55); cancelB.ForeColor = Color.White;
             cancelB.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold); cancelB.Cursor = Cursors.Hand;
-            cancelB.SetBounds(80, 42, 66, 24);
+            cancelB.Size = new Size(58, 22);
             cancelB.Click += delegate { CancelTextInput(); };
             editPanel.Controls.Add(cancelB);
 
-            // 四角手柄 (PixPin 观感)
-            editPanel.Paint += (s, ev) =>
-            {
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(60, 110, 200)))
-                {
-                    foreach (Point pt in new Point[] { new Point(0, 0), new Point(editPanel.Width - 7, 0), new Point(0, editPanel.Height - 7), new Point(editPanel.Width - 7, editPanel.Height - 7) })
-                        ev.Graphics.FillRectangle(b, pt.X, pt.Y, 7, 7);
-                }
-            };
-
+            RelocateTextUI();
             Controls.Add(editPanel);
             editPanel.BringToFront();
             textInput.Focus();
-            Log("capture: text input opened at " + sp);
+            Log("capture: text input opened at " + sp + " (transparent, 4-corner buttons)");
+        }
+
+        // 四角按钮+确认取消 重定位 (文字区域四角 + 下方横排)
+        void RelocateTextUI()
+        {
+            if (editPanel == null) return;
+            try
+            {
+                Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
+                int tw = Math.Max(40, ts.Width + 16), th = ts.Height + 10;
+                Point c = RectangleToClient(new Rectangle(textPt, Size.Empty)).Location;
+                int bx = c.X, by = c.Y;
+                // 四角按钮: 左上旋转 右上关闭 左下移动 右下缩放 (容器坐标 0,0 = 文字区左上角)
+                int ci = 0;
+                foreach (Control ctl in editPanel.Controls)
+                {
+                    Button b = ctl as Button;
+                    if (b == null || b.Size.Width != 22) continue;
+                    int qx = (ci % 2 == 0) ? -26 : tw + 4;
+                    int qy = (ci < 2) ? -26 : th + 4;
+                    b.Location = new Point(qx, qy);
+                    ci++;
+                }
+                // 容器大小覆盖: 按钮区 + 文字区 + 下方确认取消
+                editPanel.Size = new Size(Math.Max(tw + 70, 120), th + 76);
+                editPanel.Location = new Point(bx - 30, by - 30);
+                // 确认/取消 底部横排
+                foreach (Control ctl in editPanel.Controls)
+                {
+                    Button b = ctl as Button;
+                    if (b != null && (b.Text == "确认" || b.Text == "取消"))
+                    {
+                        int i2 = (b.Text == "确认") ? 6 : 70;
+                        b.Location = new Point(i2, th + 36);
+                    }
+                }
+            }
+            catch (Exception ex) { Log("relocatetextui err: " + ex.Message); }
         }
 
         void CommitTextInput()
         {
-            if (!textMode || textInput == null) return;
-            string t = textInput.Text;
+            if (!textMode) return;
+            string t = textBuf;
             Point pt = textPt;
+            int ang = textAngle;
             CloseTextInput();
             if (!string.IsNullOrEmpty(t))
             {
@@ -722,9 +841,10 @@ partial class ShotService
                 a.Color = curColor;
                 a.FontPt = curFontPt;
                 a.FontFamily = curFontFamily;
+                a.Angle = ang;
                 a.Rect = new Rectangle(pt, Size.Empty);
                 PushAnnot(a);
-                Log("capture: annot text (" + t.Length + " chars)");
+                Log("capture: annot text (" + t.Length + " chars, angle=" + ang + ")");
             }
         }
 
@@ -735,13 +855,7 @@ partial class ShotService
             Log("capture: text input cancelled");
         }
 
-        void CloseTextInput()
-        {
-            textMode = false;
-            if (editPanel != null) { try { editPanel.Dispose(); } catch { } editPanel = null; }
-            textInput = null;
-            Focus();
-        }
+
 
 
 
