@@ -67,6 +67,7 @@ public partial class ShotService
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags); // flags=2 PW_RENDERFULLCONTENT: 拍 DirectComposition/D2D 硬件层 (Win8.1+)
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     static extern int GetWindowTextW(IntPtr h, StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern bool EnumWindows(Callback cb, IntPtr lp);
@@ -187,6 +188,39 @@ public partial class ShotService
         }
     }
 
+    // 窗口截图: PrintWindow+PW_RENDERFULLCONTENT 让窗口自绘进 DC (能拍到 DirectComposition/D2D 内容,
+    // CopyFromScreen 拍不到 — 实测 Win11 记事本正文区黑屏)。中心区若全黑(某些应用 PrintWindow 黑屏)回退 CopyFromScreen
+    static string DoShotWindow(IntPtr h)
+    {
+        RECT rc; GetWindowRect(h, out rc);
+        int w = rc.Right - rc.Left, ht = rc.Bottom - rc.Top;
+        if (w <= 0 || ht <= 0) return null;
+        using (Bitmap bmp = new Bitmap(w, ht, PixelFormat.Format32bppArgb))
+        {
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                IntPtr hdc = g.GetHdc();
+                try { PrintWindow(h, hdc, 2); }
+                finally { g.ReleaseHdc(hdc); }
+            }
+            // 中心 5 点采样: 全黑 → PrintWindow 没画出内容, 回退桌面拷贝
+            bool allBlack = true;
+            int[] sx = { w / 2, w / 3, w * 2 / 3, w / 4, w * 3 / 4 };
+            int[] sy = { ht / 2, ht / 3, ht * 2 / 3, ht / 4, ht * 3 / 4 };
+            foreach (int px in sx) { foreach (int py in sy) { if (bmp.GetPixel(px, py).GetBrightness() > 0.05f) { allBlack = false; break; } } if (!allBlack) break; }
+            if (allBlack && IsWindowVisible(h))
+            {
+                using (Graphics g = Graphics.FromImage(bmp))
+                    g.CopyFromScreen(rc.Left, rc.Top, 0, 0, new Size(w, ht));
+                Log("shot window: printwindow black, fallback copyfromscreen");
+            }
+            string name = "shot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
+            string path = Path.Combine(ShotDir, name);
+            bmp.Save(path, ImageFormat.Png);
+            return path;
+        }
+    }
+
     static string WindowJsonByTitle(string keyword)
     {
         IntPtr h = FindWindowByTitle(keyword);
@@ -252,12 +286,55 @@ public partial class ShotService
     // 运行程序/打开(ShellExecute: 支持 exe/快捷方式/URL); 须在 Session 1 才有用户可见界面
     static string AppRun(string path, string args)
     {
+        // 启动前快照可见顶级窗口; 启动后轮询找新窗口 — Store 应用启动器 pid ≠ 窗口进程, 必须按窗口 diff 找 (实测坑)
+        HashSet<long> before = new HashSet<long>();
+        EnumWindows(delegate(IntPtr h, IntPtr lp) { if (IsWindowVisible(h) && IsWindow(h)) before.Add(h.ToInt64()); return true; }, IntPtr.Zero);
         ProcessStartInfo psi = new ProcessStartInfo();
         psi.FileName = path;
         if (!string.IsNullOrEmpty(args)) psi.Arguments = args;
         psi.UseShellExecute = true;
         Process p = Process.Start(psi);
-        return "{\"ok\":true,\"pid\":" + p.Id + ",\"name\":\"" + JsonEscape(p.ProcessName) + "\",\"session\":" + Process.GetCurrentProcess().SessionId + "}";
+        string runPid, runName;
+        try { runPid = p.Id.ToString(); runName = JsonEscape(p.ProcessName); }
+        catch { runPid = "0"; runName = ""; } // 启动器秒退 (Store 应用)
+        string winJson = "null";
+        for (int t = 0; t < 25; t++) // 最多等 2.5s, 找到新窗口提前结束
+        {
+            System.Threading.Thread.Sleep(100);
+            IntPtr found = IntPtr.Zero; string ftitle = ""; uint fpid = 0;
+            EnumWindows(delegate(IntPtr h, IntPtr lp)
+            {
+                if (IsWindowVisible(h) && IsWindow(h) && !before.Contains(h.ToInt64()))
+                {
+                    StringBuilder sb = new StringBuilder(256); GetWindowTextW(h, sb, 256);
+                    if (sb.Length > 0)
+                    {
+                        ftitle = sb.ToString(); GetWindowThreadProcessId(h, out fpid); found = h; return false;
+                    }
+                }
+                return true;
+            }, IntPtr.Zero);
+            if (found != IntPtr.Zero)
+            {
+                string proc = "";
+                try { proc = Process.GetProcessById((int)fpid).ProcessName; } catch { }
+                winJson = "{\"hwnd\":" + found.ToInt64() + ",\"pid\":" + fpid + ",\"title\":\"" + JsonEscape(ftitle) + "\",\"process\":\"" + JsonEscape(proc) + "\"}";
+                break;
+            }
+        }
+        return "{\"ok\":true,\"pid\":" + runPid + ",\"name\":\"" + runName + "\",\"session\":" + Process.GetCurrentProcess().SessionId + ",\"window\":" + winJson + "}";
+    }
+
+    // 当前前台窗口简报 (type/press 响应附带, 让调用方自查打到了哪个窗口 — 盲打事故防线)
+    static string FrontBriefJson()
+    {
+        IntPtr h = GetForegroundWindow();
+        if (h == IntPtr.Zero) return "{\"title\":\"\",\"process\":\"\"}";
+        uint pid; GetWindowThreadProcessId(h, out pid);
+        string proc = "";
+        try { proc = Process.GetProcessById((int)pid).ProcessName; } catch { }
+        StringBuilder sb = new StringBuilder(256); GetWindowTextW(h, sb, 256);
+        return "{\"title\":\"" + JsonEscape(sb.ToString()) + "\",\"process\":\"" + JsonEscape(proc) + "\"}";
     }
 
     // ---- 任务栏滚轮调音量 (Taskbar Wheel Volume, 常驻) ----
@@ -1049,11 +1126,23 @@ public partial class ShotService
                 else if (path == "/shot")
                 {
                     Rectangle r = VirtualScreen();
+                    bool handled = false; // window 模式走 PrintWindow 专用路径
                     if (q.ContainsKey("window"))
                     {
                         IntPtr h = FindWindowByTitle(q["window"]);
                         if (h == IntPtr.Zero) { code = 404; body = "{\"ok\":false,\"error\":\"window not found\"}"; }
-                        else { RECT rc; GetWindowRect(h, out rc); r = new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top); }
+                        else
+                        {
+                            string fp = DoShotWindow(h); // PrintWindow 拍硬件层, 黑图回退桌面拷贝
+                            if (fp == null) { code = 500; body = "{\"ok\":false,\"error\":\"window rect invalid\"}"; }
+                            else
+                            {
+                                Interlocked.Increment(ref ShotCount);
+                                body = "{\"ok\":true,\"file\":\"" + JsonEscape(fp) + "\",\"url\":\"http://127.0.0.1:" + PORT + "/img/" + Uri.EscapeDataString(Path.GetFileName(fp)) + "\"}";
+                            }
+                            Log("[shot] window " + q["window"]);
+                        }
+                        handled = true;
                     }
                     else if (q.ContainsKey("x") && q.ContainsKey("y") && q.ContainsKey("w") && q.ContainsKey("h"))
                     {
@@ -1067,7 +1156,7 @@ public partial class ShotService
                         int idx; int.TryParse(q["screen"], out idx);
                         if (idx >= 0 && idx < Screen.AllScreens.Length) r = Screen.AllScreens[idx].Bounds;
                     }
-                    if (code == 200)
+                    if (!handled && code == 200)
                     {
                         string fp = DoShot(r);
                         FileInfo fi = new FileInfo(fp);
@@ -1108,13 +1197,13 @@ public partial class ShotService
                     {
                         string text = q["text"];
                         if (text.Length > 2000) { code = 400; body = "{\"ok\":false,\"error\":\"text too long (max 2000)\"}"; }
-                        else { TypeText(text); body = "{\"ok\":true,\"chars\":" + text.Length + "}"; Log("[ctrl] type " + text.Length + " chars"); }
+                        else { TypeText(text); body = "{\"ok\":true,\"chars\":" + text.Length + ",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] type " + text.Length + " chars"); }
                     }
                 }
                 else if (path == "/keyboard/press")
                 {
                     if (!q.ContainsKey("keys")) { code = 400; body = "{\"ok\":false,\"error\":\"need keys\"}"; }
-                    else { PressCombo(q["keys"]); body = "{\"ok\":true,\"keys\":\"" + JsonEscape(q["keys"]) + "\"}"; Log("[ctrl] press " + q["keys"]); }
+                    else { PressCombo(q["keys"]); body = "{\"ok\":true,\"keys\":\"" + JsonEscape(q["keys"]) + "\",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] press " + q["keys"]); }
                 }
                 else if (path == "/app/run")
                 {
