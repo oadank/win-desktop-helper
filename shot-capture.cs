@@ -1274,7 +1274,7 @@ partial class ShotService
                     ToolStripItem it = m.Items.Add(label, null, delegate
                     {
                         curSeqFmt = f;
-                        if (fmtBtn != null) { fmtBtn.DrawStr = label; propBar.Invalidate(); }
+                        if (fmtBtn != null) { fmtBtn.DrawStr = label; propBar.RelayoutNow(); }
                     });
                     if (f == curSeqFmt) it.Font = new Font(it.Font, FontStyle.Bold);
                 }
@@ -1288,7 +1288,7 @@ partial class ShotService
             {
                 if (seqNext >= 99) return;
                 seqNext++;
-                startBtn.DrawStr = "从" + seqNext; propBar.Invalidate();
+                startBtn.DrawStr = "从" + seqNext; propBar.RelayoutNow();
                 Log("capture: seq start=" + seqNext);
             });
             seqUp.ToolKey = "sequp";
@@ -1296,7 +1296,7 @@ partial class ShotService
             {
                 if (seqNext <= 1) return;
                 seqNext--;
-                startBtn.DrawStr = "从" + seqNext; propBar.Invalidate();
+                startBtn.DrawStr = "从" + seqNext; propBar.RelayoutNow();
                 Log("capture: seq start=" + seqNext);
             });
             seqDown.ToolKey = "seqdown";
@@ -1354,7 +1354,7 @@ partial class ShotService
                 ToolStripItem it = m.Items.Add(pt.ToString(), null, delegate
                 {
                     curFontPt = captured;
-                    if (fontBtn != null) { fontBtn.DrawStr = captured.ToString(); propBar.Invalidate(); }
+                    if (fontBtn != null) { fontBtn.DrawStr = captured.ToString(); propBar.RelayoutNow(); }
                     Log("capture: font pt=" + captured);
                 });
                 if (pt == curFontPt) it.Font = new Font(it.Font, FontStyle.Bold);
@@ -1379,7 +1379,7 @@ partial class ShotService
                 ToolStripItem it = m.Items.Add(label, null, delegate
                 {
                     curFontFamily = fam;
-                    if (familyBtn != null) { familyBtn.DrawStr = FamilyShort(fam); propBar.Invalidate(); }
+                    if (familyBtn != null) { familyBtn.DrawStr = FamilyShort(fam); propBar.RelayoutNow(); }
                     Log("capture: font family=" + fam);
                 });
                 if (fam == curFontFamily) it.Font = new Font(it.Font, FontStyle.Bold);
@@ -1906,13 +1906,26 @@ partial class ShotService
         void Relayout()
         {
             int x = 6;
+            Font tf = null;
             foreach (Btn b in Btns)
             {
                 if (b.Icon == "|") { b.Rect = new Rectangle(x, 12, 1, 24); x += 13; }
+                else if (b.Icon == "#text" && !string.IsNullOrEmpty(b.DrawStr))
+                {
+                    // 文字按钮按实际文字宽布局, 否则"从12"/"I.II.III"被裁成"从1"/"I.II"
+                    if (tf == null) tf = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
+                    int w;
+                    try { w = Math.Max(40, TextRenderer.MeasureText(b.DrawStr, tf).Width + 16); }
+                    catch { w = 40; }
+                    b.Rect = new Rectangle(x, 4, w, 40); x += w;
+                }
                 else { b.Rect = new Rectangle(x, 4, 40, 40); x += 40; }
             }
+            if (tf != null) try { tf.Dispose(); } catch { }
             Width = x + 6; Height = 48;
         }
+
+        public void RelayoutNow() { Relayout(); Invalidate(); }
 
         public void SetEnabledAll(bool en)
         {
