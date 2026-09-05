@@ -210,13 +210,16 @@ partial class ShotService
         Label demoLabel = new Label(); demoLabel.Text = "示例: The quick brown fox jumps over the lazy dog.";
         demoLabel.Left = LX; demoLabel.Top = 262; demoLabel.AutoSize = true;
         demoLabel.ForeColor = cDim; demoLabel.Font = new Font("Consolas", 9f); pgTr.Controls.Add(demoLabel);
+        Button test = new Button(); test.Text = "测试"; test.FlatStyle = FlatStyle.Flat; test.FlatAppearance.BorderSize = 0;
+        test.BackColor = cBtn; test.ForeColor = cText; test.Font = new Font("Microsoft YaHei UI", 9.5f);
+        test.Cursor = Cursors.Hand; test.SetBounds(PX + PW - 100, 256, 94, 28); pgTr.Controls.Add(test); test.BringToFront();
         TextBox testResult = new TextBox(); testResult.Multiline = true; testResult.ReadOnly = true;
         testResult.Left = LX; testResult.Top = 284; testResult.Width = PW - LX * 2; testResult.Height = 52;
         testResult.BackColor = cField; testResult.ForeColor = cText; testResult.BorderStyle = BorderStyle.FixedSingle;
         testResult.Font = new Font("Microsoft YaHei UI", 9f);
         testResult.Text = "（点「测试」后, 上面这句英文翻译成中文的结果显示在这里）";
         pgTr.Controls.Add(testResult);
-        Button test = mkBtn(f, cBtn, cText); test.Text = "测试"; test.SetBounds(PX + PW - 106, 340, 96, 30);
+
 
         // ==================== 页 2: OCR ====================
         mkL(pgOcr, "OCR 引擎:", LX, 14);
