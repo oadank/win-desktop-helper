@@ -308,10 +308,21 @@ public partial class ShotService
         psi.FileName = path;
         if (!string.IsNullOrEmpty(args)) psi.Arguments = args;
         psi.UseShellExecute = true;
-        Process p = Process.Start(psi);
+        // ShellExecute 必须在 STA 线程: MTA 线程无 message pump, DDE 等待超时把 Process.Start 挂 30s+ (实测 app_run 卡 40s, 连 cmd 都卡)
+        Process p = null; string startErr = null;
+        Thread st = new Thread(new ThreadStart(delegate
+        {
+            try { p = Process.Start(psi); }
+            catch (Exception ex) { startErr = ex.Message; }
+        }));
+        st.SetApartmentState(ApartmentState.STA);
+        st.IsBackground = true;
+        st.Start();
+        st.Join(5000);
+        if (startErr != null) return "{\"ok\":false,\"error\":\"" + JsonEscape(startErr) + "\"}";
         string runPid, runName;
         try { runPid = p.Id.ToString(); runName = JsonEscape(p.ProcessName); }
-        catch { runPid = "0"; runName = ""; } // 启动器秒退 (Store 应用)
+        catch { runPid = "0"; runName = ""; } // 启动器秒退 (Store 应用) 或启动超时
         string winJson = "null";
         for (int t = 0; t < 25; t++) // 最多等 2.5s, 找到新窗口提前结束
         {

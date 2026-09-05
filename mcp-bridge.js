@@ -60,9 +60,11 @@ const TOOLS = [
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
-        action: { type: 'string', description: 'activate|maximize|minimize|restore|close|move|wait|list' },
+        action: { type: 'string', description: 'activate|maximize|minimize|restore|close|move|wait|list (maximize/minimize 会自动映射为服务端的 max/min)' },
         title: { type: 'string', description: '窗口标题关键词' },
         x: { type: 'number' }, y: { type: 'number' },
+        w: { type: 'number', description: 'move 时的宽度(服务端必填)' },
+        h: { type: 'number', description: 'move 时的高度(服务端必填)' },
         timeout: { type: 'number', description: 'wait 的超时毫秒(默认10000)' },
         pid: { type: 'number', description: 'list 时按进程过滤' }
       },
@@ -366,11 +368,16 @@ function buildUrl(name, a) {
     case 'list_apps': return { path: '/apps', qs: [] };
     case 'monitors': return { path: '/monitors', qs: [] };
     case 'win_manage': {
-      const act = a.action || 'activate';
+      // 服务端 /win/ 分支只认 max|min (见 shot-service.cs), 这里做同义映射,
+      // 让 agent 写 maximize/minimize 也能正常用, 否则会 404 unknown verb
+      const VERB = { maximize: 'max', minimize: 'min' };
+      const act = VERB[a.action] || a.action || 'activate';
       let qs = [];
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.x !== undefined) qs.push('x=' + a.x);
       if (a.y !== undefined) qs.push('y=' + a.y);
+      if (a.w !== undefined) qs.push('w=' + a.w); // 服务端 move 必填 x,y,w,h, 不传会 400
+      if (a.h !== undefined) qs.push('h=' + a.h);
       if (a.timeout !== undefined) qs.push('timeout=' + a.timeout);
       if (a.pid !== undefined) qs.push('pid=' + a.pid);
       return { path: '/win/' + act, qs };

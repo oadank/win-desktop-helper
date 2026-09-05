@@ -21,7 +21,7 @@ partial class ShotService
     const uint WM_CLOSE = 0x0010;
 
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
-    [DllImport("user32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
 
     // 置前: Windows 前台锁会拒绝后台进程的 SetForegroundWindow —
@@ -96,11 +96,20 @@ partial class ShotService
         return "{\"ok\":true,\"" + name + "\":" + (ok ? "true" : "false") + "}";
     }
 
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
     static string WinClose(IntPtr h)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
-        SendMessage(h, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-        return "{\"ok\":true}";
+        // PostMessage 不等目标线程: SendMessage(WM_CLOSE) 同步等待, 遇未保存对话框/忙窗口把 HTTP 挂 35s (实测)
+        PostMessage(h, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        // 校验 2s 内窗口真消失, 返回值反映真实结果
+        for (int t = 0; t < 10; t++)
+        {
+            Thread.Sleep(200);
+            if (!IsWindow(h) || !IsWindowVisible(h)) return "{\"ok\":true,\"closed\":true}";
+        }
+        Log("win close: window still alive (可能未保存对话框)");
+        return "{\"ok\":true,\"closed\":false,\"hint\":\"window still alive - 可能有未保存对话框, 用 ui_find name=保存 定位处理\"}";
     }
 
     static string WinMove(IntPtr h, int x, int y, int w, int hh)
