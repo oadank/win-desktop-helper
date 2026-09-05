@@ -176,6 +176,8 @@ partial class ShotService
         int textDragMode = 0;        // 1=移动 2=缩放 (左下/右下按钮拖动)
         Point textDragStart;
         int textDragFont0;
+        bool caretOn = true;
+        Timer caretTimer;            // 自绘插入符闪烁 (500ms)
         Point textDragPt0;
         Panel editPanel;             // 透明容器: 只含四角按钮+确认/取消
         // 自动窗口检测 (PixPin 同款): 未按下时高亮光标下的窗口, 单击即选中; 拖动则转手动框选
@@ -385,9 +387,11 @@ partial class ShotService
                 Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "测", GetAnnotFont(curFontFamily, curFontPt));
                 Rectangle r = new Rectangle(RectangleToClient(new Rectangle(textPt, Size.Empty)).Location,
                                             new Size(ts.Width + 60, ts.Height + 60));
+                int m = Math.Max(r.Width, r.Height) + ts.Height + 80; // 旋转/缩放后范围
+                r.Inflate(m, m);
                 r.Intersect(ClientRectangle);
                 Invalidate(r);
-                if (editPanel != null) editPanel.Invalidate();
+                if (editPanel != null) { editPanel.Invalidate(); RelocateTextUI(); } // 按钮跟随文字范围
             }
             catch (Exception ex) { Log("invaltext err: " + ex.Message); }
         }
@@ -569,6 +573,11 @@ partial class ShotService
                 {
                     Font pf = GetAnnotFont(curFontFamily, curFontPt); // 缓存字体不可 Dispose (第4处, 漏修导致全局崩溃)
                     g.DrawString(textBuf, pf, tb, 0, 0);
+                    if (caretOn)
+                    {
+                        SizeF tw2 = g.MeasureString(textBuf.Length > 0 ? textBuf : "|", pf);
+                        using (Pen cp = new Pen(curColor, 2f)) g.DrawLine(cp, tw2.Width * 0.92f, 2, tw2.Width * 0.92f, pf.Height - 2);
+                    }
                 }
                 g.Restore(st);
                 // 编辑线框 (文字范围边界, 蓝 1.5px; textAngle=0 时与四角按钮对齐)
@@ -728,7 +737,7 @@ partial class ShotService
                 if (ev.KeyCode == Keys.Enter) { ev.SuppressKeyPress = true; CommitTextInput(); }
                 else if (ev.KeyCode == Keys.Escape) { ev.SuppressKeyPress = true; CancelTextInput(); }
             };
-            textInput.TextChanged += (s, ev) => { textBuf = textInput.Text; InvalidateTextInput(); };
+            textInput.TextChanged += (s, ev) => { textBuf = textInput.Text; RelocateTextUI(); InvalidateTextInput(); };
             Controls.Add(textInput);
 
             // 四角功能按钮 (透明容器内, 20x20, 深底白符号)
@@ -742,7 +751,27 @@ partial class ShotService
             {
                 int idx = i;
                 Button b = new Button();
-                b.Text = char.ConvertFromUtf32(iconCodes[idx]);
+                if (idx == 3)
+                {
+                    // 缩放 = 斜向双向箭头 (手画, PixPin 同款语义)
+                    b.Text = "";
+                    b.Paint += (s, ev) =>
+                    {
+                        Graphics g2 = ev.Graphics;
+                        g2.SmoothingMode = SmoothingMode.AntiAlias;
+                        using (Pen pp = new Pen(Color.White, 2f))
+                        {
+                            pp.StartCap = LineCap.Round; pp.EndCap = LineCap.Round;
+                            g2.DrawLine(pp, 5, 17, 15, 7);
+                            g2.DrawLine(pp, 5, 17, 5, 11);
+                            g2.DrawLine(pp, 5, 17, 11, 17);
+                            g2.DrawLine(pp, 15, 7, 9.5f, 7);
+                            g2.DrawLine(pp, 15, 7, 15, 12.5f);
+                        }
+                    };
+                }
+                else
+                    b.Text = char.ConvertFromUtf32(iconCodes[idx]);
                 b.Font = new Font("Segoe MDL2 Assets", 9f);
                 b.ForeColor = Color.White; b.BackColor = Color.FromArgb(50, 110, 200);
                 b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderSize = 0;
@@ -791,6 +820,13 @@ partial class ShotService
             Controls.Add(editPanel);
             editPanel.BringToFront();
             textInput.Focus();
+            if (caretTimer == null)
+            {
+                caretTimer = new Timer { Interval = 450 };
+                caretTimer.Tick += (s, ev) => { caretOn = !caretOn; InvalidateTextInput(); };
+            }
+            caretOn = true;
+            caretTimer.Start();
             Log("capture: text input opened at " + sp + " (transparent, 4-corner buttons)");
         }
 
@@ -876,7 +912,8 @@ partial class ShotService
         {
             textMode = false;
             textBuf = "";
-            if (editPanel != null) { try { editPanel.Dispose(); } catch { } editPanel = null; }
+            if (caretTimer != null) caretTimer.Stop();
+            if (editPanel != null) { try { editPanel.Dispose(); } catch { } editPanel = null; } // 连带销毁 1x1 宿主 (残留会一直闪插入符)
             textInput = null;
             InvalidateTextInput();
             Focus();
