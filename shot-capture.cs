@@ -144,6 +144,7 @@ partial class ShotService
         public int FontPt = 14;      // 文字/序号字号
         public int Angle = 0;        // 文字旋转角 (度, 顺时针)
         public string SeqFmt = "1";  // 序号格式: 1=1.2.3  I=I.II.III  a=a.b.c  A=A.B.C
+        public const int S_THIN = 4, S_HOLLOW = 5; // 箭头样式 (细尾/空心)
         public string FontFamily = "Microsoft YaHei UI"; // 文字字体
         public Rectangle Rect;      // rect/ellipse/arrow 的包围盒; seq/text 的定位点在 Rect.Location
         public List<Point> Pts;     // 画笔折线 (屏坐标)
@@ -752,25 +753,73 @@ partial class ShotService
                 g.FillPolygon(b, new PointF[] { new PointF(tipX, tipY), a1, a2 });
         }
 
-        // 箭头 4 样式 (PixPin 同款): 实线箭头 / 双向箭头 / 直线 / 标注线(两端竖杠)
+        // 箭头 6 样式 (照 PixPin): 实线 / 双向 / 细尾锥形 / 空心 / 标注线(双竖杠) / 直线
+        // 头部大小随线宽缩放: hl=max(14, width*6) — 粗线大箭头 (用户实测要求)
         static void DrawArrowEx(Graphics g, Pen p, float x1, float y1, float x2, float y2, int style)
         {
-            g.DrawLine(p, x1, y1, x2, y2);
-            float angA = (float)Math.Atan2(y2 - y1, x2 - x1);         // 指向终点
-            float angB = (float)Math.Atan2(y1 - y2, x1 - x2);         // 指向起点
-            if (style == Annot.S_LINE) return;
+            float w = p.Width;
+            float hl = Math.Max(14, w * 6f);   // 头长
+            float half = Math.Max(6, w * 3f);  // 头底半宽
+            double ang = Math.Atan2(y2 - y1, x2 - x1);
+            double dxc = Math.Cos(ang), dyc = Math.Sin(ang);
+            double pxc = -dyc, pyc = dxc;
+
+            if (style == Annot.S_LINE) { g.DrawLine(p, x1, y1, x2, y2); return; }
+
             if (style == Annot.S_CALLOUT)
             {
-                float barAng = angA + (float)Math.PI / 2;
-                float hl = 7;
-                g.DrawLine(p, x1 + hl * (float)Math.Cos(barAng), y1 + hl * (float)Math.Sin(barAng),
-                               x1 - hl * (float)Math.Cos(barAng), y1 - hl * (float)Math.Sin(barAng));
-                g.DrawLine(p, x2 + hl * (float)Math.Cos(barAng), y2 + hl * (float)Math.Sin(barAng),
-                               x2 - hl * (float)Math.Cos(barAng), y2 - hl * (float)Math.Sin(barAng));
+                float bl = Math.Max(10, w * 3f);
+                float ppx = (float)pxc, ppy = (float)pyc;
+                g.DrawLine(p, x1, y1, x2, y2);
+                g.DrawLine(p, x1 + bl * ppx, y1 + bl * ppy, x1 - bl * ppx, y1 - bl * ppy);
+                g.DrawLine(p, x2 + bl * ppx, y2 + bl * ppy, x2 - bl * ppx, y2 - bl * ppy);
                 return;
             }
-            DrawArrowHead(g, p, x2, y2, angA, 13);
-            if (style == Annot.S_BOTH) DrawArrowHead(g, p, x1, y1, angB, 13);
+
+            if (style == Annot.S_THIN)
+            {
+                // 细尾锥形: 尾尖 -> 头底渐宽 (填充) + 大实心头 (PixPin 特色款)
+                float bx = (float)(x2 - hl * 0.6 * dxc), by = (float)(y2 - hl * 0.6 * dyc);
+                float th = Math.Max(1.5f, w * 0.6f);
+                using (SolidBrush b = new SolidBrush(p.Color))
+                    g.FillPolygon(b, new PointF[] {
+                        new PointF(x1, y1),
+                        new PointF((float)(bx + pxc * th), (float)(by + pyc * th)),
+                        new PointF(x2, y2),
+                        new PointF((float)(bx - pxc * th), (float)(by - pyc * th)),
+                    });
+                DrawArrowHead(g, p, x2, y2, (float)ang, hl);
+                return;
+            }
+
+            if (style == Annot.S_HOLLOW)
+            {
+                float bx = (float)(x2 - hl * 0.9 * dxc), by = (float)(y2 - hl * 0.9 * dyc);
+                g.DrawLine(p, x1, y1, bx, by);
+                g.DrawPolygon(p, new PointF[] {
+                    new PointF(x2, y2),
+                    new PointF((float)(bx + pxc * half), (float)(by + pyc * half)),
+                    new PointF((float)(bx - pxc * half), (float)(by - pyc * half)),
+                });
+                return;
+            }
+
+            // 实线/双向: 线画到头底 (头不被线穿透) + 大实心头
+            float b2x = (float)(x2 - hl * 0.72 * dxc), b2y = (float)(y2 - hl * 0.72 * dyc);
+            g.DrawLine(p, x1, y1, b2x, b2y);
+            using (SolidBrush b = new SolidBrush(p.Color))
+                g.FillPolygon(b, new PointF[] {
+                    new PointF(x2, y2),
+                    new PointF((float)(b2x + pxc * half), (float)(b2y + pyc * half)),
+                    new PointF((float)(b2x - pxc * half), (float)(b2y - pyc * half)),
+                });
+            if (style == Annot.S_BOTH)
+            {
+                double angB = Math.Atan2(y1 - y2, x1 - x2);
+                float b1x = (float)(x1 + hl * 0.72 * Math.Cos(angB)), b1y = (float)(y1 + hl * 0.72 * Math.Sin(angB));
+                g.DrawLine(p, x1, y1, b1x, b1y);
+                DrawArrowHead(g, p, x1, y1, (float)angB, hl);
+            }
         }
 
         // ---- 导出: 冻结图选区 + 标注 合成 ----
@@ -1213,6 +1262,43 @@ partial class ShotService
                 Color c = cols[i];
                 propBar.AddColor(c, cnames[i], delegate { curColor = c; MarkProp(); }).ToolKey = "col" + i;
             }
+            // 序号: 格式 (1.2.3/I.II.III/a.b.c/A.B.C) + 起始数字 (PixPin 同款, 只影响新序号)
+            ToolbarPanel.Btn fmtBtn = null;
+            fmtBtn = propBar.AddText("1.2.3", "序号格式", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                string[][] fmts = { new string[] { "1", "1.2.3" }, new string[] { "I", "I.II.III" }, new string[] { "a", "a.b.c" }, new string[] { "A", "A.B.C" } };
+                foreach (string[] fm in fmts)
+                {
+                    string f = fm[0], label = fm[1];
+                    ToolStripItem it = m.Items.Add(label, null, delegate
+                    {
+                        curSeqFmt = f;
+                        if (fmtBtn != null) { fmtBtn.DrawStr = label; propBar.Invalidate(); }
+                    });
+                    if (f == curSeqFmt) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, fmtBtn.Rect.X, fmtBtn.Rect.Bottom + 2);
+            });
+            fmtBtn.ToolKey = "seqfmt";
+            ToolbarPanel.Btn startBtn = null;
+            startBtn = propBar.AddText("从" + seqNext, "起始数字", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                for (int v = 1; v <= 10; v++)
+                {
+                    int captured = v;
+                    ToolStripItem it = m.Items.Add(v.ToString(), null, delegate
+                    {
+                        seqNext = captured;
+                        if (startBtn != null) { startBtn.DrawStr = "从" + captured; propBar.Invalidate(); }
+                        Log("capture: seq start=" + captured);
+                    });
+                    if (v == seqNext) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, startBtn.Rect.X, startBtn.Rect.Bottom + 2);
+            });
+            startBtn.ToolKey = "seqstart";
             Controls.Add(propBar);
             propBar.Visible = false;
         }
@@ -1557,7 +1643,7 @@ partial class ShotService
                     }
                     Log("capture: ocr ok (" + (text == null ? 0 : text.Length) + " chars)");
                     bool empty = string.IsNullOrEmpty(text);
-                    Close();
+                    // 遮罩与标注保持 (用户要求: OCR 后继续截图操作), 结果浮窗显示
                     if (!empty) { try { Clipboard.SetText(text); } catch { } new ResultForm("OCR 识别结果", text).Show(); }
                     else ShowTrayInfo("未识别到文字");
                 });
