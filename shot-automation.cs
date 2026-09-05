@@ -36,12 +36,23 @@ partial class ShotService
         IntPtr found = IntPtr.Zero;
         EnumWindows(delegate (IntPtr h, IntPtr lp)
         {
-            if (h == exclude || !IsWindowVisible(h)) return true;
-            if ((GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return true;
-            RECT r;
-            if (!GetWindowRect(h, out r)) return true;
-            if (r.Left < -30000) return true; // 最小化
-            if (p.x >= r.Left && p.x < r.Right && p.y >= r.Top && p.y < r.Bottom) { found = h; return false; }
+            try
+            {
+                if (h == exclude || !IsWindowVisible(h)) return true;
+                if ((GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return true;
+                RECT r;
+                if (!GetWindowRect(h, out r)) return true;
+                if (r.Left < -30000) return true; // 最小化
+                if (p.x >= r.Left && p.x < r.Right && p.y >= r.Top && p.y < r.Bottom)
+                {
+                    StringBuilder cn = new StringBuilder(64);
+                    GetClassNameW(h, cn, 64);
+                    string cname = cn.ToString();
+                    if (cname == "Progman" || cname == "WorkerW") return true; // 桌面: 高亮全屏无意义
+                    found = h; return false;
+                }
+            }
+            catch { }
             return true;
         }, IntPtr.Zero);
         return found;

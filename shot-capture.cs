@@ -301,12 +301,20 @@ partial class ShotService
                 cur.Width = curWidth; cur.Color = curColor; cur.Style = curArrowStyle; cur.FontPt = curFontPt;
                 if (cur.Kind == Annot.K_SEQ)
                 {
-                    cur.No = seqNext++;
-                    int dia = (int)(curFontPt * 2);
-                    cur.Rect = new Rectangle(sp.X - dia / 2, sp.Y - dia / 2, dia, dia);
-                    cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
-                    PushAnnot(cur);
-                    Log("capture: annot seq #" + cur.No);
+                    try
+                    {
+                        cur.No = seqNext++;
+                        int dia = (int)(curFontPt * 2);
+                        cur.Rect = new Rectangle(sp.X - dia / 2, sp.Y - dia / 2, dia, dia);
+                        cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
+                        PushAnnot(cur);
+                        Log("capture: annot seq #" + cur.No);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("annot seq err: " + ex.Message);
+                        ShowTrayInfo("序号异常(已拦截): " + ex.Message);
+                    }
                     cur = null; // 序号一笔即成
                 }
                 else if (cur.Kind == Annot.K_PEN)
@@ -358,6 +366,12 @@ partial class ShotService
         DateTime lastHoverCheck = DateTime.MinValue;
 
         void UpdateHoverDetect(Point sp)
+        {
+            try { UpdateHoverDetectCore(sp); }
+            catch (Exception ex) { Log("hover detect err: " + ex.Message); }
+        }
+
+        void UpdateHoverDetectCore(Point sp)
         {
             if ((DateTime.Now - lastHoverCheck).TotalMilliseconds < 50) return;
             lastHoverCheck = DateTime.Now;
@@ -1280,7 +1294,7 @@ partial class ShotService
     {
         { "rect", "E71A" }, { "arrow", "E72A" }, { "pen", "E70F" }, { "seq", "E762" },
         { "pin", "E840" }, { "undo", "E7A7" }, { "redo", "E7A6" }, { "translate", "E8C1" },
-        { "save", "E78C" }, { "ok", "E73E" }, { "cancel", "E711" },
+        { "ok", "E73E" }, { "cancel", "E711" },
     };
 
     static Bitmap MakeIcon(string kind, int size)
@@ -1315,6 +1329,13 @@ partial class ShotService
                         g.DrawLine(w, 16.5f, 12.5f, 16.5f, 16.5f); g.DrawLine(w, 16.5f, 16.5f, 12.5f, 16.5f);
                         g.DrawLine(w, 6.5f, 6, 11.5f, 6);
                         g.DrawLine(w, 9, 6, 9, 13);
+                        break;
+                    case "save": // 纯软盘 (无箭头, 用户要求)
+                        g.DrawRectangle(w, 2.5f, 2.5f, 13, 13);
+                        g.DrawRectangle(w, 6, 3.5f, 6, 4);
+                        g.DrawLine(w, 5, 15.5f, 5, 10.5f);
+                        g.DrawLine(w, 5, 10.5f, 13, 10.5f);
+                        g.DrawLine(w, 13, 10.5f, 13, 15.5f);
                         break;
                     case "rec": // 红圆点 (录屏)
                         using (SolidBrush b = new SolidBrush(Color.FromArgb(255, 82, 70)))
