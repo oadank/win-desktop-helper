@@ -169,15 +169,14 @@ partial class ShotService
         // text annotation: self-drawn input (TextBox white opaque bg; BackgroundImage ignored by system EDIT control)
         // focus stays on overlay; chars arrive via WM_CHAR/KeyPress (IME works); text+caret painted in OnPaint = truly transparent
         bool textMode = false;
-        string textBuf = "";
+        TextBox textInput;       // PixPin 式编辑框 (白底清晰, IME 候选窗跟随输入框)
+        Panel editPanel;
         // 自动窗口检测 (PixPin 同款): 未按下时高亮光标下的窗口, 单击即选中; 拖动则转手动框选
         Rectangle hoverWin = Rectangle.Empty;
         bool pendingDown = false;
         Point downPt;
         Rectangle pendingWin = Rectangle.Empty;       // 文字标注的行内输入框
         Point textPt;
-        bool caretOn = true;
-        Timer caretTimer;
         int curFontPt = 14; // 属性栏: 字号 (文字/序号)
         string curFontFamily = "Microsoft YaHei UI"; // 属性栏: 字体
         static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
@@ -529,23 +528,7 @@ partial class ShotService
                 g.FillRectangle(dim, d.Right, d.Top, Math.Max(0, W - d.Right), d.Height);       // 右
             }
             DrawAnnots(g, Point.Empty);
-            if (textMode)
-            {
-                // typing text + blinking caret, painted on overlay = transparent background
-                using (SolidBrush tb = new SolidBrush(curColor))
-                {
-                    Font pf = GetAnnotFont(curFontFamily, curFontPt); // 缓存字体不可 Dispose (using 会销毁共享实例)
-                    g.DrawString(textBuf, pf, tb, new PointF(d.X + (textPt.X - sel.X), d.Y + (textPt.Y - sel.Y)));
-                }
-                if (caretOn)
-                {
-                    SizeF tw = g.MeasureString(textBuf, GetAnnotFont(curFontFamily, curFontPt));
-                    float cx = d.X + (textPt.X - sel.X) + tw.Width * 0.92f;
-                    float cy = d.Y + (textPt.Y - sel.Y);
-                    using (Pen cp = new Pen(curColor, 2f))
-                        g.DrawLine(cp, cx, cy + 2, cx, cy + GetAnnotFont(curFontFamily, curFontPt).Height - 2);
-                }
-            } // 选区内标注 (客户区即冻结图坐标, 偏移0)
+            // 选区内标注 (客户区即冻结图坐标, 偏移0) — 编辑中的文字在白底编辑框内
             using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
             using (Font f = new Font("Consolas", 11))
             using (Brush b = new SolidBrush(Color.Yellow))
@@ -668,43 +651,69 @@ partial class ShotService
 
         // ---- 行内文字输入 (PixPin 同款: 点击处直接打字, 回车落字 Esc 取消) ----
         // ---- text input (self-drawn): click inside selection, type directly, Enter commits, Esc cancels ----
+        // ---- 文字输入 (PixPin 式): 白底编辑框 + 确认/取消按钮, IME 候选窗跟随输入框 ----
         void OpenTextInput(Point sp)
         {
             CommitTextInput();
             textMode = true;
-            textBuf = "";
             textPt = sp;
-            if (caretTimer == null)
-            {
-                caretTimer = new Timer { Interval = 450 };
-                caretTimer.Tick += (s, e) => { caretOn = !caretOn; InvalidateTextInput(); };
-            }
-            caretOn = true;
-            caretTimer.Start();
-            ImeMode = ImeMode.On;
-            Focus();
-            InvalidateTextInput();
-            Log("capture: text input opened at " + sp);
-        }
+            Point c = RectangleToClient(new Rectangle(sp, Size.Empty)).Location;
+            if (c.X + 290 > ClientSize.Width - 4) c.X = ClientSize.Width - 294;
+            if (c.Y + 80 > ClientSize.Height - 4) c.Y = ClientSize.Height - 84;
 
-        void InvalidateTextInput()
-        {
-            Size ts = TextRenderer.MeasureText(textBuf.Length > 0 ? textBuf : "W", GetAnnotFont(curFontPt));
-            Rectangle r = new Rectangle(RectangleToClient(new Rectangle(textPt, Size.Empty)).Location,
-                                        new Size(ts.Width + 40, ts.Height + 10));
-            r.Intersect(ClientRectangle);
-            Invalidate(r);
+            editPanel = new Panel();
+            editPanel.BackColor = Color.White;
+            editPanel.SetBounds(c.X, c.Y, 284, 72);
+
+            textInput = new TextBox();
+            textInput.Font = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold);
+            textInput.ForeColor = Color.FromArgb(230, 60, 50);
+            textInput.BackColor = Color.White;
+            textInput.BorderStyle = BorderStyle.None;
+            textInput.SetBounds(8, 8, 268, 30);
+            textInput.KeyDown += (s, ev) =>
+            {
+                if (ev.KeyCode == Keys.Enter) { ev.SuppressKeyPress = true; CommitTextInput(); Focus(); }
+                else if (ev.KeyCode == Keys.Escape) { ev.SuppressKeyPress = true; CancelTextInput(); Focus(); }
+            };
+            editPanel.Controls.Add(textInput);
+
+            Button okB = new Button(); okB.Text = "确认"; okB.FlatStyle = FlatStyle.Flat; okB.FlatAppearance.BorderSize = 0;
+            okB.BackColor = Color.FromArgb(60, 140, 80); okB.ForeColor = Color.White;
+            okB.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold); okB.Cursor = Cursors.Hand;
+            okB.SetBounds(8, 42, 66, 24);
+            okB.Click += delegate { CommitTextInput(); };
+            editPanel.Controls.Add(okB);
+
+            Button cancelB = new Button(); cancelB.Text = "取消"; cancelB.FlatStyle = FlatStyle.Flat; cancelB.FlatAppearance.BorderSize = 0;
+            cancelB.BackColor = Color.FromArgb(190, 60, 55); cancelB.ForeColor = Color.White;
+            cancelB.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold); cancelB.Cursor = Cursors.Hand;
+            cancelB.SetBounds(80, 42, 66, 24);
+            cancelB.Click += delegate { CancelTextInput(); };
+            editPanel.Controls.Add(cancelB);
+
+            // 四角手柄 (PixPin 观感)
+            editPanel.Paint += (s, ev) =>
+            {
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(60, 110, 200)))
+                {
+                    foreach (Point pt in new Point[] { new Point(0, 0), new Point(editPanel.Width - 7, 0), new Point(0, editPanel.Height - 7), new Point(editPanel.Width - 7, editPanel.Height - 7) })
+                        ev.Graphics.FillRectangle(b, pt.X, pt.Y, 7, 7);
+                }
+            };
+
+            Controls.Add(editPanel);
+            editPanel.BringToFront();
+            textInput.Focus();
+            Log("capture: text input opened at " + sp);
         }
 
         void CommitTextInput()
         {
-            if (!textMode) return;
-            textMode = false;
-            if (caretTimer != null) caretTimer.Stop();
-            string t = textBuf;
+            if (!textMode || textInput == null) return;
+            string t = textInput.Text;
             Point pt = textPt;
-            textBuf = "";
-            InvalidateTextInput();
+            CloseTextInput();
             if (!string.IsNullOrEmpty(t))
             {
                 Annot a = new Annot();
@@ -722,12 +731,18 @@ partial class ShotService
         void CancelTextInput()
         {
             if (!textMode) return;
-            textMode = false;
-            if (caretTimer != null) caretTimer.Stop();
-            textBuf = "";
-            InvalidateTextInput();
+            CloseTextInput();
             Log("capture: text input cancelled");
         }
+
+        void CloseTextInput()
+        {
+            textMode = false;
+            if (editPanel != null) { try { editPanel.Dispose(); } catch { } editPanel = null; }
+            textInput = null;
+            Focus();
+        }
+
 
 
         // ---- 自绘紧凑工具条 (PixPin 同款密度: 32px 按钮 0 间距 / hover 圆角 / 细分隔线; ToolStrip 间距不可控已弃用) ----
@@ -1261,32 +1276,6 @@ partial class ShotService
             catch (Exception ex) { Log("result form err: " + ex.Message); }
         }
 
-        // self-drawn text input: printable chars / IME-committed chars arrive here via WM_CHAR
-        protected override void OnKeyPress(KeyPressEventArgs e)
-        {
-            base.OnKeyPress(e);
-            if (!textMode) return;
-            if (e.KeyChar == '\r')
-            {
-                CommitTextInput();
-                e.Handled = true;
-                return;
-            }
-            if (e.KeyChar == '\b')
-            {
-                if (textBuf.Length > 0) textBuf = textBuf.Remove(textBuf.Length - 1);
-                InvalidateTextInput();
-                e.Handled = true;
-                return;
-            }
-            if (e.KeyChar >= ' ')
-            {
-                textBuf += e.KeyChar;
-                InvalidateTextInput();
-                e.Handled = true;
-            }
-        }
-
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             if (keyData == Keys.Escape)
@@ -1306,7 +1295,7 @@ partial class ShotService
             base.OnFormClosed(e);
             Log("capture: overlay closed (" + annots.Count + " annots)");
             captureBusy = false; // 遮罩退出(动作完成或取消), 允许下一次截图
-            if (caretTimer != null) { try { caretTimer.Stop(); caretTimer.Dispose(); } catch { } caretTimer = null; } // 兜底: 防泄漏后 Tick 访问已释放窗体
+
             if (BackgroundImage != null) { try { BackgroundImage.Dispose(); } catch { } BackgroundImage = null; }
             if (frozen != null) { try { frozen.Dispose(); } catch { } }
         }
