@@ -934,19 +934,6 @@ partial class ShotService
                 editPanel.Controls.Add(b);
             }
 
-            // 下方 确认/取消 (用户示意)
-            Button okB = new Button(); okB.Text = "确认"; okB.FlatStyle = FlatStyle.Flat; okB.FlatAppearance.BorderSize = 0;
-            okB.BackColor = Color.FromArgb(60, 140, 80); okB.ForeColor = Color.White;
-            okB.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold); okB.Cursor = Cursors.Hand;
-            okB.Size = new Size(58, 22);
-            okB.Click += delegate { CommitTextInput(); };
-            editPanel.Controls.Add(okB);
-            Button cancelB = new Button(); cancelB.Text = "取消"; cancelB.FlatStyle = FlatStyle.Flat; cancelB.FlatAppearance.BorderSize = 0;
-            cancelB.BackColor = Color.FromArgb(190, 60, 55); cancelB.ForeColor = Color.White;
-            cancelB.Font = new Font("Microsoft YaHei UI", 8.5f, FontStyle.Bold); cancelB.Cursor = Cursors.Hand;
-            cancelB.Size = new Size(58, 22);
-            cancelB.Click += delegate { CancelTextInput(); };
-            editPanel.Controls.Add(cancelB);
 
             RelocateTextUI();
             Controls.Add(editPanel);
@@ -1044,7 +1031,7 @@ partial class ShotService
                 }
                 Point org = new Point((int)minX - 30, (int)minY - 30);
                 editPanel.Location = org;
-                editPanel.Size = new Size((int)(maxX - minX) + 60 + 8, (int)(maxY - minY) + 60 + 44);
+                editPanel.Size = new Size((int)(maxX - minX) + 60 + 8, (int)(maxY - minY) + 60 + 8);
                 // 四角按钮贴旋转后四角 (容器内坐标 = 角点 - 容器原点 - 半宽)
                 int ci = 0;
                 foreach (Control ctl in editPanel.Controls)
@@ -1055,16 +1042,7 @@ partial class ShotService
                     b.Location = new Point((int)(c0.X - org.X - 11), (int)(c0.Y - org.Y - 11));
                     ci++;
                 }
-                // 确认/取消 旋转后包围盒下方横排 (容器内)
-                foreach (Control ctl in editPanel.Controls)
-                {
-                    Button b = ctl as Button;
-                    if (b != null && (b.Text == "确认" || b.Text == "取消"))
-                    {
-                        int ix = (b.Text == "确认") ? 8 : 86;
-                        b.Location = new Point((int)minX - org.X + ix, (int)maxY - org.Y + 14);
-                    }
-                }
+
             }
             catch (Exception ex) { Log("relocatetextui err: " + ex.Message); }
         }
