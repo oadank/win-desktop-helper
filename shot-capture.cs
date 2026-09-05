@@ -824,10 +824,27 @@ partial class ShotService
                         using (StringFormat sf = new StringFormat())
                         {
                             sf.Alignment = StringAlignment.Center; sf.LineAlignment = StringAlignment.Center;
+                            sf.FormatFlags = StringFormatFlags.NoWrap; // 禁折行: 默认放不下会把"0"换行挤出圆外 (实测两位数只剩"1")
                             using (Brush wb = new SolidBrush(Color.White))
                             {
                                 Font f = GetAnnotFont(a.FontFamily, a.FontPt); // 缓存字体不可 Dispose
-                                g.DrawString(SeqText(a.No, a.SeqFmt), f, wb, (RectangleF)r, sf);
+                                string seqStr = SeqText(a.No, a.SeqFmt);
+                                // 文字水平压缩兜底长串(罗马); 数字串不压。测量带 DPI 补偿(实际渲染比 96dpi 测量宽)
+                                float avail = r.Width + 16;
+                                float sx = 1f;
+                                try { using (Font mf = new Font(a.FontFamily, a.FontPt, FontStyle.Bold)) { float tw = TextRenderer.MeasureText(seqStr, mf).Width * 1.25f; if (tw > avail) sx = avail / tw; } } catch { }
+                                // 绘制矩形左右加余量: GDI+ 布局矩形超出即裁剪, 不加余量"0"会被裁掉只剩"1" (实测根因)
+                                RectangleF drawR = new RectangleF(r.X - 40, r.Y - 4, r.Width + 80, r.Height + 8);
+                                if (sx < 1f)
+                                {
+                                    var st = g.Save();
+                                    g.TranslateTransform(r.X + r.Width / 2f, 0);
+                                    g.ScaleTransform(sx, 1f);
+                                    g.TranslateTransform(-(r.X + r.Width / 2f), 0);
+                                    g.DrawString(seqStr, f, wb, drawR, sf);
+                                    g.Restore(st);
+                                }
+                                else g.DrawString(seqStr, f, wb, drawR, sf);
                             }
                         }
                         break;
@@ -2169,14 +2186,19 @@ partial class ShotService
     }
 
     // 语言检测: 按 CJK 占比判 zh/en/mixed —— 点翻译自动反向翻译 (中文→英, 英文→中), 混合让用户选
-    // 序号徽章矩形: 宽度随文字微调 (PixPin 同款, 一位数近圆 两位数约1.35比例), 以 a.Rect 中心水平展开
+    // 序号徽章矩形: 宽=文字宽+边距, 上限1.25倍高(近圆); 超限长串(罗马)由绘制时水平压缩兜底
     static Rectangle SeqBadgeRect(Annot a)
     {
         string s = SeqText(a.No, a.SeqFmt);
-        int h = a.Rect.Height + 6;
-        int w = a.Rect.Width + 8;
-        try { using (Font f = new Font(a.FontFamily, a.FontPt, FontStyle.Bold)) w = Math.Max(h * 4 / 3, TextRenderer.MeasureText(s, f).Width + 16); } catch { }
-        return new Rectangle(a.Rect.X + (a.Rect.Width - w) / 2, a.Rect.Y - 3, w, h);
+        int h = a.Rect.Height;
+        int w = h;
+        try
+        {
+            using (Font f = new Font(a.FontFamily, a.FontPt, FontStyle.Bold))
+                w = Math.Max(h, Math.Min(h * 5 / 4, TextRenderer.MeasureText(s, f).Width + 12));
+        }
+        catch { }
+        return new Rectangle(a.Rect.X + (a.Rect.Width - w) / 2, a.Rect.Y, w, h);
     }
 
     static string SeqText(int n, string fmt)
