@@ -1281,24 +1281,25 @@ partial class ShotService
                 m.Show(propBar, fmtBtn.Rect.X, fmtBtn.Rect.Bottom + 2);
             });
             fmtBtn.ToolKey = "seqfmt";
-            ToolbarPanel.Btn startBtn = null;
-            startBtn = propBar.AddText("从" + seqNext, "起始数字", delegate
-            {
-                ContextMenuStrip m = DarkMenu();
-                for (int v = 1; v <= 20; v++)
-                {
-                    int captured = v;
-                    ToolStripItem it = m.Items.Add(v.ToString(), null, delegate
-                    {
-                        seqNext = captured;
-                        if (startBtn != null) { startBtn.DrawStr = "从" + captured; propBar.Invalidate(); }
-                        Log("capture: seq start=" + captured);
-                    });
-                    if (v == seqNext) it.Font = new Font(it.Font, FontStyle.Bold);
-                }
-                m.Show(propBar, startBtn.Rect.X, startBtn.Rect.Bottom + 2);
-            });
+            // PixPin 同款: "从N" 显示 + ▲▼ 步进按钮 (20项长菜单在屏幕边缘会被裁到只剩1项, 弃用)
+            ToolbarPanel.Btn startBtn = propBar.AddText("从" + seqNext, "序号起始数字", delegate { });
             startBtn.ToolKey = "seqstart";
+            ToolbarPanel.Btn seqUp = propBar.AddText("▲", "起始数字 +1", delegate
+            {
+                if (seqNext >= 99) return;
+                seqNext++;
+                startBtn.DrawStr = "从" + seqNext; propBar.Invalidate();
+                Log("capture: seq start=" + seqNext);
+            });
+            seqUp.ToolKey = "sequp";
+            ToolbarPanel.Btn seqDown = propBar.AddText("▼", "起始数字 -1", delegate
+            {
+                if (seqNext <= 1) return;
+                seqNext--;
+                startBtn.DrawStr = "从" + seqNext; propBar.Invalidate();
+                Log("capture: seq start=" + seqNext);
+            });
+            seqDown.ToolKey = "seqdown";
             Controls.Add(propBar);
             propBar.Visible = false;
         }
