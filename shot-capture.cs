@@ -487,6 +487,15 @@ partial class ShotService
             catch (Exception ex) { Log("mouseup err: " + ex.Message); }
         }
 
+        // 背景 = 冻结原图 blit 脏区 (1:1 无缩放走 fast path, 只处理脏区)
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (frozen != null)
+                e.Graphics.DrawImage(frozen, e.ClipRectangle, e.ClipRectangle, GraphicsUnit.Pixel);
+            else
+                base.OnPaintBackground(e);
+        }
+
         // 只重绘「旧框∪新框」外扩区域 — 全屏 blit 由 BackgroundImage 系统完成
         void InvalidateSelArea(Rectangle oldSel)
         {
