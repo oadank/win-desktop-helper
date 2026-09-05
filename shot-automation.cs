@@ -26,6 +26,27 @@ partial class ShotService
 
     // 置前: Windows 前台锁会拒绝后台进程的 SetForegroundWindow —
     // 三级策略: 直接置前 -> AttachThreadInput 挂前台输入队列再置前 -> 模拟 ALT 松开解锁再置前
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int idx);
+    const int GWL_EXSTYLE = -20;
+    const int WS_EX_TOOLWINDOW = 0x80;
+
+    // 光标处最顶层的普通可见窗口 (跳过自己/工具窗/最小化), 供截图"自动窗口检测"
+    static IntPtr WindowFromPointEx(POINT p, IntPtr exclude)
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows(delegate (IntPtr h, IntPtr lp)
+        {
+            if (h == exclude || !IsWindowVisible(h)) return true;
+            if ((GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return true;
+            RECT r;
+            if (!GetWindowRect(h, out r)) return true;
+            if (r.Left < -30000) return true; // 最小化
+            if (p.x >= r.Left && p.x < r.Right && p.y >= r.Top && p.y < r.Bottom) { found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     static string WinActivate(IntPtr h)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";

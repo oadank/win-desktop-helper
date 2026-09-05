@@ -169,7 +169,12 @@ partial class ShotService
         // text annotation: self-drawn input (TextBox white opaque bg; BackgroundImage ignored by system EDIT control)
         // focus stays on overlay; chars arrive via WM_CHAR/KeyPress (IME works); text+caret painted in OnPaint = truly transparent
         bool textMode = false;
-        string textBuf = "";       // 文字标注的行内输入框
+        string textBuf = "";
+        // 自动窗口检测 (PixPin 同款): 未按下时高亮光标下的窗口, 单击即选中; 拖动则转手动框选
+        Rectangle hoverWin = Rectangle.Empty;
+        bool pendingDown = false;
+        Point downPt;
+        Rectangle pendingWin = Rectangle.Empty;       // 文字标注的行内输入框
         Point textPt;
         bool caretOn = true;
         Timer caretTimer;
@@ -240,6 +245,7 @@ partial class ShotService
             hasSel = false;
             sel = Rectangle.Empty;
             HideBar();
+            InvalidateHover();
             Invalidate(); // 暗层恢复全屏 (低频操作, 全屏重绘一次可接受)
             Log("capture: reset selection (right-click)");
         }
@@ -258,6 +264,17 @@ partial class ShotService
             if (e.Clicks >= 2) return; // 双击的第二次按下不动作 (Double 事件里复制, 防重复框选)
             Point sp = PointToScreen(e.Location);
             if (!hasSel)
+            {
+                // 未选区: 记 pending — 移动超阈值 = 手动拖框; 原地松开 = 选中悬停窗口 (自动检测)
+                CommitTextInput();
+                pendingDown = true;
+                downPt = sp;
+                start = sp;
+                sel = new Rectangle(sp, Size.Empty);
+                pendingWin = hoverWin;
+                return;
+            }
+            if (false)
             {
                 // 框选阶段
                 Rectangle old = sel;
@@ -303,6 +320,16 @@ partial class ShotService
         protected override void OnMouseMove(MouseEventArgs e)
         {
             Point sp = PointToScreen(e.Location);
+            if (pendingDown && !dragging)
+            {
+                // 按下后移动超阈值 -> 转手动拖框 (自动检测让位)
+                if (Math.Abs(sp.X - downPt.X) > 6 || Math.Abs(sp.Y - downPt.Y) > 6)
+                {
+                    pendingDown = false;
+                    dragging = true;
+                    InvalidateHover();
+                }
+            }
             if (dragging)
             {
                 Rectangle old = sel;
@@ -321,11 +348,66 @@ partial class ShotService
                     InvalidateAnnot(cur);
                 }
             }
+            else if (!hasSel && !pendingDown && tool == null && !textMode)
+            {
+                UpdateHoverDetect(sp); // 自动窗口检测
+            }
+        }
+
+        // 自动窗口检测节流 (EnumWindows 全枚举, 50ms 一次)
+        DateTime lastHoverCheck = DateTime.MinValue;
+
+        void UpdateHoverDetect(Point sp)
+        {
+            if ((DateTime.Now - lastHoverCheck).TotalMilliseconds < 50) return;
+            lastHoverCheck = DateTime.Now;
+            POINT pp; pp.x = sp.X; pp.y = sp.Y;
+            IntPtr h = WindowFromPointEx(pp, Handle);
+            Rectangle nr = Rectangle.Empty;
+            if (h != IntPtr.Zero)
+            {
+                RECT r;
+                if (GetWindowRect(h, out r) && r.Right > r.Left && r.Bottom > r.Top)
+                    nr = new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
+            }
+            if (nr != hoverWin)
+            {
+                Rectangle old = hoverWin;
+                hoverWin = nr;
+                Rectangle u = nr != Rectangle.Empty ? RectangleToClient(nr) : Rectangle.Empty;
+                if (old != Rectangle.Empty)
+                    u = u != Rectangle.Empty ? Rectangle.Union(u, RectangleToClient(old)) : RectangleToClient(old);
+                if (u != Rectangle.Empty) { u.Inflate(40, 30); Invalidate(u); }
+            }
+        }
+
+        void InvalidateHover()
+        {
+            if (hoverWin == Rectangle.Empty) return;
+            Rectangle c = RectangleToClient(hoverWin);
+            c.Inflate(40, 30);
+            Invalidate(c);
+            hoverWin = Rectangle.Empty;
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             if (IsDisposed) return;
+            // pending 未拖动 = 选中悬停窗口 (自动检测完成, 等价框选)
+            if (pendingDown && e.Button == MouseButtons.Left && !dragging && !hasSel)
+            {
+                pendingDown = false;
+                if (pendingWin != Rectangle.Empty && pendingWin.Width > 10 && pendingWin.Height > 10)
+                {
+                    sel = pendingWin;
+                    hasSel = true;
+                    Log("capture: window picked (auto-detect) " + sel.Width + "x" + sel.Height);
+                    ShowBar();
+                }
+                InvalidateHover();
+                return;
+            }
+            pendingDown = false;
             Point sp = PointToScreen(e.Location);
             if (dragging)
             {
@@ -382,7 +464,24 @@ partial class ShotService
             base.OnPaint(e);
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            if (!hasSel) { using (SolidBrush dim = new SolidBrush(Color.FromArgb(90, 0, 0, 0))) g.FillRectangle(dim, e.ClipRectangle); return; }
+            if (!hasSel)
+            {
+                using (SolidBrush dim = new SolidBrush(Color.FromArgb(90, 0, 0, 0))) g.FillRectangle(dim, e.ClipRectangle);
+                if (hoverWin != Rectangle.Empty)
+                {
+                    // 悬停窗口: 挖亮 + 橙框 (PixPin 自动检测观感)
+                    Rectangle hd = RectangleToClient(hoverWin);
+                    hd.Intersect(ClientRectangle);
+                    if (hd.Width > 4 && hd.Height > 4)
+                    {
+                        g.SetClip(hd);
+                        g.DrawImage(frozen, hd, hd, GraphicsUnit.Pixel);
+                        g.ResetClip();
+                        using (Pen hp = new Pen(Color.Orange, 2)) g.DrawRectangle(hp, hd);
+                    }
+                }
+                return;
+            }
             Rectangle d = RectangleToClient(sel); // 客户区坐标 = 冻结图坐标 (窗体原点=虚拟屏原点)
             // 反向遮罩: 只填「选区外的 4 块纯色矩形」(纯色 alpha 填充, 无大图采样, 微秒级) — 框内原亮度由背景图透出
             using (SolidBrush dim = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
@@ -1193,7 +1292,7 @@ partial class ShotService
             if (FontGlyphs.ContainsKey(kind))
             {
                 string s = char.ConvertFromUtf32(Convert.ToInt32(FontGlyphs[kind], 16));
-                using (Font f = new Font("Segoe MDL2 Assets", size * 0.58f))
+                using (Font f = new Font("Segoe MDL2 Assets", size * 0.5f))
                     TextRenderer.DrawText(g, s, f, new Rectangle(0, 0, size, size), Color.FromArgb(232, 234, 240),
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                 return bmp;
@@ -1386,7 +1485,7 @@ partial class ShotService
                                           TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                     continue;
                 }
-                using (Bitmap ic = MakeIcon(b.Icon, 28))
+                using (Bitmap ic = MakeIcon(b.Icon, 24))
                 {
                     if (!b.Enabled)
                     {
@@ -1394,11 +1493,11 @@ partial class ShotService
                         using (System.Drawing.Imaging.ImageAttributes ia = new System.Drawing.Imaging.ImageAttributes())
                         {
                             ia.SetColorMatrix(cm);
-                            g.DrawImage(ic, new Rectangle(b.Rect.X + 6, b.Rect.Y + 6, 28, 28), 0, 0, 28, 28, GraphicsUnit.Pixel, ia);
+                            g.DrawImage(ic, new Rectangle(b.Rect.X + 8, b.Rect.Y + 8, 24, 24), 0, 0, 24, 24, GraphicsUnit.Pixel, ia);
                         }
                     }
                     else
-                        g.DrawImage(ic, b.Rect.X + 6, b.Rect.Y + 6, 28, 28);
+                        g.DrawImage(ic, b.Rect.X + 8, b.Rect.Y + 8, 24, 24);
                 }
             }
         }
