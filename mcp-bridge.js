@@ -81,13 +81,15 @@ const TOOLS = [
   },
   {
     name: 'mouse_click',
-    description: '点击（带坐标先移动再点）。button=left|right|middle，double=1 双击',
+    description: '点击（带坐标先移动再点）。button=left|right|middle，double=1 双击，triple=1 三击（选整行/段），mods=shift/ctrl/alt/win 按住修饰键点击（如 shift+click 选范围、ctrl+click 多选）',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         x: { type: 'number' }, y: { type: 'number' },
         button: { type: 'string', description: 'left|right|middle' },
-        double: { type: 'number', description: '0|1' }
+        double: { type: 'number', description: '0|1' },
+        triple: { type: 'number', description: '0|1 三连击' },
+        mods: { type: 'string', description: 'shift|ctrl|alt|win，可组合如 ctrl+shift' }
       }
     }
   },
@@ -126,10 +128,13 @@ const TOOLS = [
   },
   {
     name: 'mouse_scroll',
-    description: '滚轮：正数=向上滚，负数=向下滚（典型 ±120/格）',
+    description: '滚轮：正数=向上滚，负数=向下滚（典型 ±120/格）。可选 x,y：先移动到目标坐标再滚（作用于光标处）',
     inputSchema: {
       type: 'object', additionalProperties: false,
-      properties: { delta: { type: 'number' } },
+      properties: {
+        delta: { type: 'number' },
+        x: { type: 'number' }, y: { type: 'number' }
+      },
       required: ['delta']
     }
   },
@@ -345,6 +350,8 @@ function buildUrl(name, a) {
       if (a.x !== undefined && a.y !== undefined) qs.push('x=' + a.x, 'y=' + a.y);
       if (a.button) qs.push('button=' + a.button);
       if (a.double) qs.push('double=' + a.double);
+      if (a.triple) qs.push('triple=' + a.triple);
+      if (a.mods) qs.push('mods=' + enc(a.mods));
       return { path: '/mouse/click', qs };
     }
     case 'mouse_down': return { path: '/mouse/down', qs: a.button ? ['button=' + a.button] : [] };
@@ -355,7 +362,11 @@ function buildUrl(name, a) {
       return { path: '/mouse/drag', qs };
     }
     case 'mouse_pos': return { path: '/mouse/pos', qs: [] };
-    case 'mouse_scroll': return { path: '/mouse/scroll', qs: ['delta=' + a.delta] };
+    case 'mouse_scroll': {
+      let qs = ['delta=' + a.delta];
+      if (a.x !== undefined && a.y !== undefined) qs.push('x=' + a.x, 'y=' + a.y);
+      return { path: '/mouse/scroll', qs };
+    }
     case 'keyboard_type': return { path: '/keyboard/type', qs: ['text=' + enc(String(a.text))] };
     case 'keyboard_press': return { path: '/keyboard/press', qs: ['keys=' + enc(a.keys)] };
     case 'keyboard_hold': return { path: '/keyboard/hold', qs: ['keys=' + enc(a.keys), 'ms=' + (a.ms || 500)] };

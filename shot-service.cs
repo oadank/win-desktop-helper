@@ -268,17 +268,32 @@ public partial class ShotService
     // ---- 动: 鼠标 ----
     static void MouseMove(int x, int y) { SetCursorPos(x, y); }
 
-    static void MouseClick(string button, bool dbl)
+    static void MouseClick(string button, int times)
     {
         uint down = MOUSEEVENTF_LEFTDOWN, up = MOUSEEVENTF_LEFTUP;
         if (button == "right") { down = MOUSEEVENTF_RIGHTDOWN; up = MOUSEEVENTF_RIGHTUP; }
         else if (button == "middle") { down = MOUSEEVENTF_MIDDLEDOWN; up = MOUSEEVENTF_MIDDLEUP; }
-        int times = dbl ? 2 : 1;
         for (int i = 0; i < times; i++)
         {
             mouse_event(down, 0, 0, 0, UIntPtr.Zero);
             mouse_event(up, 0, 0, 0, UIntPtr.Zero);
         }
+    }
+
+    // 修饰键按下/松开 (点击时按住 shift/ctrl 等) — mods 如 "shift"/"ctrl+shift"
+    static byte[] ModsVks(string mods)
+    {
+        if (string.IsNullOrEmpty(mods)) return new byte[0];
+        var l = new List<byte>();
+        foreach (string k in mods.Split('+'))
+        {
+            string kk = k.Trim().ToLowerInvariant();
+            if (kk == "shift") l.Add(0x10);
+            else if (kk == "ctrl" || kk == "control") l.Add(0x11);
+            else if (kk == "alt") l.Add(0x12);
+            else if (kk == "win") l.Add(0x5B);
+        }
+        return l.ToArray();
     }
 
     static void MouseScroll(int delta) { mouse_event(MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)delta), UIntPtr.Zero); }
@@ -1179,17 +1194,30 @@ public partial class ShotService
                     int x = 0, y = 0; bool hasXY = TryInt(q, "x", out x) && TryInt(q, "y", out y);
                     string button = q.ContainsKey("button") ? q["button"].ToLowerInvariant() : "left";
                     bool dbl = q.ContainsKey("double") && q["double"] == "1";
+                    bool triple = q.ContainsKey("triple") && q["triple"] == "1";
+                    string mods = q.ContainsKey("mods") ? q["mods"].ToLowerInvariant() : "";
                     if (hasXY) MouseMove(x, y);
-                    MouseClick(button, dbl);
-                    body = "{\"ok\":true,\"button\":\"" + button + "\",\"double\":" + (dbl ? "true" : "false") +
+                    byte[] mvks = ModsVks(mods);
+                    foreach (byte vk in mvks) keybd_event(vk, 0, 0, UIntPtr.Zero); // 按住修饰键
+                    MouseClick(button, triple ? 3 : (dbl ? 2 : 1));
+                    for (int i = mvks.Length - 1; i >= 0; i--) keybd_event(mvks[i], 0, 2, UIntPtr.Zero); // KEYEVENTF_KEYUP 逆序松开
+                    body = "{\"ok\":true,\"button\":\"" + button + "\"" + (dbl ? ",\"double\":true" : "") + (triple ? ",\"triple\":true" : "") +
+                           (mods != "" ? ",\"mods\":\"" + JsonEscape(mods) + "\"" : "") +
                            (hasXY ? ",\"x\":" + x + ",\"y\":" + y : "") + "}";
-                    Log("[ctrl] mouse click " + button + (dbl ? " dbl" : "") + (hasXY ? " @ " + x + "," + y : ""));
+                    Log("[ctrl] mouse click " + button + (triple ? " triple" : (dbl ? " dbl" : "")) + (mods != "" ? " mods=" + mods : "") + (hasXY ? " @ " + x + "," + y : ""));
                 }
                 else if (path == "/mouse/scroll")
                 {
                     int d;
                     if (!TryInt(q, "delta", out d)) { code = 400; body = "{\"ok\":false,\"error\":\"need delta\"}"; }
-                    else { MouseScroll(d); body = "{\"ok\":true,\"delta\":" + d + "}"; Log("[ctrl] scroll " + d); }
+                    else
+                    {
+                        int sxp = 0, syp = 0;
+                        bool hasPt = TryInt(q, "x", out sxp) && TryInt(q, "y", out syp);
+                        if (hasPt) MouseMove(sxp, syp); // 滚轮作用于光标处, 先移到目标
+                        MouseScroll(d);
+                        body = "{\"ok\":true,\"delta\":" + d + (hasPt ? ",\"x\":" + sxp + ",\"y\":" + syp : "") + "}"; Log("[ctrl] scroll " + d + (hasPt ? " @ " + sxp + "," + syp : ""));
+                    }
                 }
                 else if (path == "/keyboard/type")
                 {
@@ -1916,11 +1944,23 @@ public partial class ShotService
                 {
                     string button = McpParam(a, "button"); if (button == "") button = "left";
                     bool dbl = McpParam(a, "double") == "1";
+                    bool triple = McpParam(a, "triple") == "1";
+                    string mods = McpParam(a, "mods");
                     if (McpParam(a, "x") != "" && McpParam(a, "y") != "") MouseMove(McpParamInt(a, "x"), McpParamInt(a, "y"));
-                    MouseClick(button, dbl);
-                    return McpText("{\"ok\":true,\"button\":\"" + button + "\",\"double\":" + (dbl ? "true" : "false") + "}", false);
+                    byte[] mvks = ModsVks(mods);
+                    foreach (byte vk in mvks) keybd_event(vk, 0, 0, UIntPtr.Zero);
+                    MouseClick(button, triple ? 3 : (dbl ? 2 : 1));
+                    for (int i = mvks.Length - 1; i >= 0; i--) keybd_event(mvks[i], 0, 2, UIntPtr.Zero);
+                    return McpText("{\"ok\":true,\"button\":\"" + button + "\"" + (dbl ? ",\"double\":true" : "") + (triple ? ",\"triple\":true" : "") + (mods != "" ? ",\"mods\":\"" + JsonEscape(mods) + "\"" : "") + "}", false);
                 }
-                case "mouse_scroll": { int d = McpParamInt(a, "delta"); MouseScroll(d); return McpText("{\"ok\":true,\"delta\":" + d + "}", false); }
+                case "mouse_scroll":
+                {
+                    int d = McpParamInt(a, "delta");
+                    string mx = McpParam(a, "x"), my = McpParam(a, "y");
+                    if (mx != "" && my != "") MouseMove(int.Parse(mx), int.Parse(my));
+                    MouseScroll(d);
+                    return McpText("{\"ok\":true,\"delta\":" + d + (mx != "" ? ",\"x\":" + mx + ",\"y\":" + my : "") + "}", false);
+                }
                 case "keyboard_type": { string t = McpParam(a, "text"); TypeText(t); return McpText("{\"ok\":true,\"chars\":" + t.Length + "}", false); }
                 case "keyboard_press": { string k = McpParam(a, "keys"); PressCombo(k); return McpText("{\"ok\":true,\"keys\":\"" + JsonEscape(k) + "\"}", false); }
                 case "app_run": { return McpText(AppRun(McpParam(a, "path"), McpParam(a, "args")), false); }
@@ -2045,8 +2085,8 @@ public partial class ShotService
             "{\"name\":\"active_window\",\"description\":\"获取当前活动窗口信息 {title,process,rect}\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"monitors\",\"description\":\"列出显示器元数据（分辨率/主屏/设备名）\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"mouse_move\",\"description\":\"移动鼠标到物理像素坐标\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\"]}}," +
-            "{\"name\":\"mouse_click\",\"description\":\"点击（带坐标先移动再点）。button=left|right|middle，double=1 双击\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"}}}}," +
-            "{\"name\":\"mouse_scroll\",\"description\":\"滚轮：正数=向上滚，负数=向下滚（典型 ±120）\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"delta\":{\"type\":\"number\"}},\"required\":[\"delta\"]}}," +
+            "{\"name\":\"mouse_click\",\"description\":\"点击（带坐标先移动再点）。button=left|right|middle，double=1 双击，triple=1 三击(选整行)，mods=shift/ctrl/alt 修饰键按住点击\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"},\"triple\":{\"type\":\"number\"},\"mods\":{\"type\":\"string\"}}}}," +
+            "{\"name\":\"mouse_scroll\",\"description\":\"滚轮：正数=向上滚，负数=向下滚（典型 ±120/格）。可选 x,y 先移动到目标坐标再滚\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"delta\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"delta\"]}}," +
             "{\"name\":\"keyboard_type\",\"description\":\"向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," +
             "{\"name\":\"keyboard_press\",\"description\":\"按组合键，如 ctrl+shift+a / enter / alt+f4 / win / ctrl+s\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"}},\"required\":[\"keys\"]}}," +
             "{\"name\":\"app_run\",\"description\":\"运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"path\"]}}," +

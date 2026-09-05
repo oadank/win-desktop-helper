@@ -399,7 +399,7 @@ partial class ShotService
             int cx = (int)(r2.X + r2.Width / 2), cy = (int)(r2.Y + r2.Height / 2);
             SetCursorPos(cx, cy);
             Thread.Sleep(60);
-            MouseClick("left", false);
+            MouseClick("left", 1);
             Log("ui click coord: " + name + " @ " + cx + "," + cy);
             return "{\"ok\":true,\"via\":\"coord\",\"x\":" + cx + ",\"y\":" + cy + ",\"name\":\"" + JsonEscape(name) + "\"}";
         }
