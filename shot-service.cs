@@ -1352,13 +1352,13 @@ public partial class ShotService
                     if (!q.ContainsKey("text")) { code = 400; body = "{\"ok\":false,\"error\":\"need text\"}"; }
                     else { body = ClipboardSetText(q["text"]); Log("[ctrl] clipboard set " + q["text"].Length + " chars"); }
                 }
-                else if (path == "/ui/tree") { body = UiTree(q); Log("[ui] tree " + target); }
-                else if (path == "/ui/click") { body = UiClick(q); Log("[ui] click " + target); }
-                else if (path == "/ui/find") { body = UiFind(q); Log("[ui] find " + target); }
-                else if (path == "/ui/select") { body = UiSelect(q); Log("[ui] select " + target); }
-                else if (path == "/ui/set") { body = UiSet(q); Log("[ui] set " + target); }
-                else if (path == "/ui/read") { body = UiRead(q); Log("[ui] read " + target); }
-                else if (path == "/ui/readall") { body = UiReadAll(q); Log("[ui] readall " + target); }
+                else if (path == "/ui/tree") { body = UiCall("tree", delegate { return UiTree(q); }, 8000); Log("[ui] tree " + target); }
+                else if (path == "/ui/click") { body = UiCall("click", delegate { return UiClick(q); }, 8000); Log("[ui] click " + target); }
+                else if (path == "/ui/find") { body = UiCall("find", delegate { return UiFind(q); }, 8000); Log("[ui] find " + target); }
+                else if (path == "/ui/select") { body = UiCall("select", delegate { return UiSelect(q); }, 8000); Log("[ui] select " + target); }
+                else if (path == "/ui/set") { body = UiCall("set", delegate { return UiSet(q); }, 8000); Log("[ui] set " + target); }
+                else if (path == "/ui/read") { body = UiCall("read", delegate { return UiRead(q); }, 8000); Log("[ui] read " + target); }
+                else if (path == "/ui/readall") { body = UiCall("readall", delegate { return UiReadAll(q); }, 8000); Log("[ui] readall " + target); }
                 else if (path == "/record/start")
                 {
                     int rx = 0, ry = 0, rw = 0, rh = 0, rf = 10;
@@ -2074,43 +2074,43 @@ public partial class ShotService
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
                     foreach (var kv in new[] { "title", "hwnd", "max" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
-                    return McpText(UiTree(q2), false);
+                    return McpText(UiCall("tree", delegate { return UiTree(q2); }, 8000), false);
                 }
                 case "ui_click":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
                     foreach (var kv in new[] { "title", "hwnd", "i", "name", "type" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
-                    return McpText(UiClick(q2), false);
+                    return McpText(UiCall("click", delegate { return UiClick(q2); }, 8000), false);
                 }
                 case "ui_find":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
                     foreach (var kv in new[] { "title", "hwnd", "name", "type" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
-                    return McpText(UiFind(q2), false);
+                    return McpText(UiCall("find", delegate { return UiFind(q2); }, 8000), false);
                 }
                 case "ui_select":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
                     foreach (var kv in new[] { "title", "hwnd", "i", "name", "start", "end" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
-                    return McpText(UiSelect(q2), false);
+                    return McpText(UiCall("select", delegate { return UiSelect(q2); }, 8000), false);
                 }
                 case "ui_set":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
                     foreach (var kv in new[] { "title", "hwnd", "i", "name", "value" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
-                    return McpText(UiSet(q2), false);
+                    return McpText(UiCall("set", delegate { return UiSet(q2); }, 8000), false);
                 }
                 case "ui_read":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
                     foreach (var kv in new[] { "title", "hwnd", "i", "name" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
-                    return McpText(UiRead(q2), false);
+                    return McpText(UiCall("read", delegate { return UiRead(q2); }, 8000), false);
                 }
                 case "ui_readall":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
                     foreach (var kv in new[] { "title", "hwnd", "max" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
-                    return McpText(UiReadAll(q2), false);
+                    return McpText(UiCall("readall", delegate { return UiReadAll(q2); }, 8000), false);
                 }
                 case "record_start":
                 {

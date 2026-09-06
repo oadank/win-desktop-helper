@@ -133,7 +133,36 @@ I4 再做一次文本复制后, json 图片条目 : ['...09-19-28-089.png', ...]
 
 ---
 
-## 六、我这边给自己记的教训（已写进共享 SKILL.md）
+## 六、🟠 BUG-D6：`/ui/tree`、`/ui/find` 在大 DOM（Electron）窗口上无限期挂死，且 `max` 不生效
+
+**现象**（v0.0.18 build 09-06 09:37 复测，服务全程存活）
+```
+/ui/tree?title=WorkBuddy&max=30    -> 25.0s 零字节超时 (http=000)
+/ui/tree?title=WorkBuddy&max=150   -> 25.0s 零字节超时
+/ui/find?title=WorkBuddy&name=输入 -> 10.0s 零字节超时
+--- 对照组 ---
+/ui/tree?title=ZCode&max=150       -> 0.56s  ✅ (Electron 类, 树较小)
+/ui/tree?title=Microsoft&max=60    -> 0.36s  ✅ (Edge / Chromium)
+/ui/tree?title=文件资源管理器&max=60 -> 0.04s  ✅ (Win32)
+```
+挂死期间 `/health`、`/active` 正常（0.02s）→ **不是服务崩，是这些 handler 线程永久阻塞**（所以日志里连 `req 200/500` 都没有，请求"消失"）。
+
+**根因**（`shot-automation.cs:389` / `:748`，另有 448/469/487 同型）
+```csharp
+var all = root.FindAll(TreeScope.Descendants, Condition.TrueCondition); // ← 先物化整棵树
+int n = Math.Min(all.Count, max);                                       // ← 之后才截断
+```
+`FindAll` 会把**全部后代节点一次性拉平**（每个元素都要跨进程走 UIA  marshalling），`max` 只限制后面的循环次数，**完全不能限制遍历成本**。Electron 这种几万节点的窗口 → 单次 `FindAll` 就是几十秒到无限期。而且整条路径上没有任何超时/取消。
+
+**修法建议**
+1. 换 `TreeWalker`（`ControlViewWalker`）**逐层深度优先 + 计数即停**，到 `max` 就 break —— 这样 `max` 才真的有界。
+2. `ui_find` 更该用**条件过滤**：`new PropertyCondition(NameProperty, name)` 交给 UIA 服务端过滤（或 `RawViewWalker` 剪枝），别"全量拉平再自己比字符串"。
+3. 加硬超时：`UiTree/UiFind` 用 `Thread.Join(timeoutMs)` 包一层（`ClipboardGet` 已经是这个写法），超时返回 `{"ok":false,"error":"uia timeout, try window_info/shot instead"}`，让调用方有降级提示而不是干等。
+4. 附带解释：我上一轮报的"元素 `i` 索引跨树不稳定"——`i` 就是这里的 `FindAll` 平铺顺序，DOM 一变顺序就变，同一个输入框在我操作期间从 `i=637` 漂到 `i=665/644/659/664`（当场拍到 637 已变成"08:00"时间戳文本）。建议文档明确"i 仅本次响应内有效"，或改用稳定句柄/`AutomationId`。
+
+---
+
+## 七、我这边给自己记的教训（已写进共享 SKILL.md）
 
 - **`/img/` URL 一度被我误判为"0 字节截断"**：实际是**我的测量错**——二进制按 UTF-8 解码统计、以及 Git Bash 下 `curl -o /c/...` 路径没落盘。用 python socket 收原始字节后 801/801、2129/2129 全对。**验二进制请用字节数，别解码。**
 - 已按 SKILL 铁律②把本轮全部结论用 `update_skill` 等价的追加方式写回 `SKILL.md`（`GET /guide` 现 15652 字节，含新小节），全体 agent 共享。

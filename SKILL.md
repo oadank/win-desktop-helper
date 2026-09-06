@@ -111,6 +111,13 @@
 5. **🟠 图片历史条目不持久化** —— ✅ 已修（图片分支已补 SaveClipHistory()，MD5 入库即时落盘）：`ClipWatcherLoop` 图片分支入库后**漏调 `SaveClipHistory()`**（全文件仅文本/删除/清空三处调用）。实测唯一尺寸 401×303 的图已进内存 history，但 `clipboard-history.json` 里没有，直到下一次**文本复制**才被顺带写盘 → 期间服务重启/更新则图片条目全丢。修一行即可。
 6. **🟡 `/clipboard/get` 每次都新存一份 PNG** —— ✅ 已修（MD5 文件名天然去重，同图复用零新落盘；agent 侧纪律仍建议 history 探测）：同一张图连读 4 次 → 磁盘多出 4 个 `clip_*.png`（无内容去重）。**agent 侧纪律：不要用 `/clipboard/get` 轮询等用户复制**，会灌盘；要探测用 `clipboard_history`。
 
+## 🟠 D6 /ui/tree|find 大DOM挂死+max 无效 —— ✅ 已修（2026-09-06 zcode 闭环, 三层防御）
+
+1. **计数即停**：`root.FindAll(Descendants,TrueCondition)` 全物化 → **`WalkLimited` TreeWalker(ControlView) 迭代 DFS，凑够 max+1 即停**（max 真正限制遍历成本；tree/readall/element/find 共 5 处）。
+2. **服务端精确过滤**：`ui_find`/`UiElement` 的 name（精确）/type 走 **PropertyCondition FindFirst/FindAll**（小窗口秒回，响应带 `match:"exact"`）。
+3. **硬超时**：全部 14 个 ui 入口（HTTP 7 + MCP 7）包 `UiCall(8000ms)` —— 极端 Electron 树（WorkBuddy）服务端遍历也 >8s 时，**返回 ok:false + 降级指引**（改用 /shot 截图坐标操作），handler 线程不再永久阻塞（实测：tree max=30 从 25s 零字节 → **0.71s**；readall 50 → 2.1s；find WorkBuddy → 8.1s 干净超时）。
+4. i 索引不稳定 = FindAll 平铺序的固有语义（DOM 一变就变），已在描述注明"i 仅本次响应有效，跨调用重查/按 name 定位"。
+
 ## 🔴 2026-09-06 重大自伤坑：给聊天类输入框 `keyboard/type` 打多行文本 = 自动连发多条
 
 **实测**：向 ZCode 对话输入框打 1466 字（含 20 个 `\n`）的结论 → `{"ok":true,"chars":1472}` 返回"成功"，但**只有第一行成了消息被发出**（聊天框 Enter 即发送），后续段落全部丢失/散投，且对方的输入框被留下残留 `\n`。这是**污染用户对话**级别的事故。
@@ -122,3 +129,28 @@
 3. 单行短消息才允许直接 `keyboard/type`，且打之前把文本里的 `\n`/`\r` 全换成 `；`。
 4. **`/ui/read?i=` 的索引会随消息流实时漂移**（实测同一输入框在一分钟内 i=637→644→659→664）：验证送达一律用 **`/ui/read?title=X&name=<占位符文本>`**（按 name 定位），别缓存 i、更别因"读不到"就以为没发出去而重发。
 5. 发送前必查**对方是否空闲**：ZCode 生成中时按钮是"停止生成"；此时发消息会进"排队"（占位符也从"提出后续修改要求"变成"继续输入以排队后续修改"），语义不同，先等它跑完。
+
+## 🔴 2026-09-06 D6：`/ui/tree`、`/ui/find` 在大 DOM（Electron）窗口上无限期挂死，`max` 不生效
+
+**实测**（v0.0.18 build 09-06 09:37，挂死期间服务全程存活）
+```
+/ui/tree?title=WorkBuddy&max=30    -> 25s 零字节超时 (http=000)
+/ui/find?title=WorkBuddy&name=输入 -> 10s 零字节超时
+/ui/tree?title=ZCode&max=150       -> 0.56s  ✅
+/ui/tree?title=Microsoft(Edge)&max=60 -> 0.36s  ✅
+/ui/tree?title=文件资源管理器&max=60  -> 0.04s  ✅
+```
+`/health`、`/active` 在挂死期间 0.02s 正常 → **不是服务崩，是 handler 线程永久阻塞**（日志里连 `req` 行都没有，请求直接"消失"）。
+
+**根因**（`shot-automation.cs:389` `UiTree`、`:748` `UiFind`，另 448/469/487 同型）
+```csharp
+var all = root.FindAll(TreeScope.Descendants, Condition.TrueCondition); // 先物化整棵树
+int n = Math.Min(all.Count, max);                                       // 之后才截断
+```
+`max` 只限制后面的循环，**完全限制不了 `FindAll` 的成本**；Electron 几万节点 → 几十秒到无限期，且全程无超时/取消。
+
+**修法建议**：① 改 `TreeWalker(ControlViewWalker)` 逐层 DFS **计数即停**，让 `max` 真有界；② `ui_find` 用 `PropertyCondition(NameProperty, name)` 让 UIA **服务端过滤**，别拉平再自己比字符串；③ 整体用 `Thread.Join(timeoutMs)` 包硬超时（`ClipboardGet` 已是这写法），超时回 `{"ok":false,"error":"uia timeout..."}` 给调用方降级提示。
+
+**agent 侧规避（修好之前）**：对 Electron/大 DOM 应用（WorkBuddy、VSCode 系、网页壳）**不要用 `/ui/tree`/`/ui/find`/`/ui/readall`**；改用 `/shot` + 视觉定位 + 物理坐标点击，或用 `/active` 拿窗口 rect 按比例估点位。必须枚举时先 `max=30` + 短超时试一次，超时立刻放弃该路线，别裸等（会卡死整条工具链）。
+
+**顺带解释"i 索引不稳定"**：`i` 就是 `FindAll` 的平铺顺序，DOM 一变就变（实测同一输入框一分钟内 i=637→644→659→664，637 已变成"08:00"时间戳文本）。工具描述应明确"i 仅在本次响应内有效，跨调用必须重查"。
