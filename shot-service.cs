@@ -207,7 +207,8 @@ public partial class ShotService
             try
             {
                 var task = OcrProvider().RecognizeAsync(bmp);
-                if (!task.Wait(waitMs > 0 ? waitMs : 60000)) { bmp.Dispose(); return "{\"ok\":false,\"error\":\"OCR timeout\"}"; }
+                int wms = waitMs > 0 ? waitMs : 60000;
+                if (!task.Wait(wms)) { bmp.Dispose(); return "{\"ok\":false,\"error\":\"OCR timeout (模型冷启动加载慢?)\",\"retryable\":true,\"waitedMs\":" + wms + "}"; }
                 text = task.Result;
             }
             catch (Exception ex) { err = (ex.InnerException != null ? ex.InnerException.Message : ex.Message); }
@@ -216,6 +217,30 @@ public partial class ShotService
             return "{\"ok\":true,\"chars\":" + (text ?? "").Length + ",\"text\":\"" + JsonEscape(text ?? "") + "\"}";
         }
         catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; }
+    }
+
+    // 服务启动后后台预热 Ollama OCR 模型 (X2: 冷启动首包慢导致调用方"第一次必超时")
+    static void OcrWarmup()
+    {
+        Thread th = new Thread(new ThreadStart(delegate
+        {
+            try
+            {
+                System.Threading.Thread.Sleep(4000);
+                string ep = Cfg("ocr.endpoint", "http://127.0.0.1:11434/api/generate");
+                using (var wc = new System.Net.WebClient())
+                {
+                    wc.Encoding = System.Text.Encoding.UTF8;
+                    wc.Headers[System.Net.HttpRequestHeader.ContentType] = "application/json";
+                    string m = ep.Contains("11434") ? "qwen3-vl:4b-instruct" : "";
+                    wc.UploadString(ep, "{\"model\":\"" + m + "\",\"prompt\":\"hi\",\"stream\":false}");
+                }
+                Log("ocr warmup done");
+            }
+            catch (Exception ex) { Log("ocr warmup skip: " + ex.Message); }
+        }));
+        th.IsBackground = true;
+        th.Start();
     }
 
     // /pin?path=<png>&x=&y= — 贴图到桌面 (agent 把图钉到用户屏幕上, 与截图工具条贴图同一实现)
@@ -1772,6 +1797,7 @@ public partial class ShotService
             clipT.SetApartmentState(ApartmentState.STA);
             clipT.IsBackground = true;
             clipT.Start();
+            OcrWarmup(); // X2: 后台预热, 首次 /ocr 不再冷启动超时
             Log("clipboard watcher started");
         }
         catch (Exception ex) { Log("clip watcher thread err: " + ex.Message); }

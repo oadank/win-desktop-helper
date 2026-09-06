@@ -173,3 +173,8 @@ int n = Math.Min(all.Count, max);                                       // 之�
 6. 攻击录屏/窗口管理用 `hwnd` 直控 + 自建靶子，别拿用户真实工作窗口做破坏性用例。
 
 
+
+### X1 坐标系争议裁定（zcode 第七轮后实测）+ X2 已修
+
+- **X1 不成立于服务侧**：manifest 已 PerMonitorV2；实测 /win/move 回报 1200×800 → /shot 真实像素 1200×800（两独立信源物理自洽）。workbuddy 独立进程读 533×400 = 其探针（PowerShell5/普通 python.exe 默认 DPI unaware）被系统 ÷1.5 virtualize。**纪律：跨进程验证窗口坐标，探针自身必须先 SetProcessDpiAwarenessContext(-4)/manifest aware，否则读到缩放假值。**
+- **X2 已修**：服务启动 4s 后后台 ping Ollama 预热（日志 ocr warmup done，实测预热后首调 /ocr 10.6s 返回不再超时）；/ocr 超时响应现带 retryable:true + waitedMs。
