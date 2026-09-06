@@ -100,8 +100,9 @@ partial class ShotService
     static string WinClose(IntPtr h)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
-        // PostMessage 不等目标线程: SendMessage(WM_CLOSE) 同步等待, 遇未保存对话框/忙窗口把 HTTP 挂 35s (实测)
-        PostMessage(h, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        if (!IsWindow(h)) return "{\"ok\":false,\"error\":\"invalid handle\"}"; // W3: 无效句柄曾报 closed:true
+        // PostMessage 不等目标线程: SendMessage(WM_CLOSE) 会同步等待, 遇未保存对话框/忙窗口把 HTTP 挂 35s (实测)
+        if (!PostMessage(h, WM_CLOSE, IntPtr.Zero, IntPtr.Zero)) return "{\"ok\":false,\"error\":\"post failed\"}";
         // 校验 2s 内窗口真消失, 返回值反映真实结果
         for (int t = 0; t < 10; t++)
         {
@@ -115,8 +116,21 @@ partial class ShotService
     static string WinMove(IntPtr h, int x, int y, int w, int hh)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
+        if (!IsWindow(h)) return "{\"ok\":false,\"error\":\"invalid handle\"}";
+        if (w < 50 || hh < 50) return "{\"ok\":false,\"error\":\"w/h must be >= 50\"}"; // W1: 零宽高曾被静默吞
+        var vs = System.Windows.Forms.SystemInformation.VirtualScreen;
+        bool clamped = false;
+        if (x < vs.X) { x = vs.X; clamped = true; }
+        if (y < vs.Y) { y = vs.Y; clamped = true; }
+        if (x + w > vs.Right) { x = Math.Max(vs.X, vs.Right - w); clamped = true; }
+        if (y + hh > vs.Bottom) { y = Math.Max(vs.Y, vs.Bottom - hh); clamped = true; } // W1: 负坐标 clamp 到可视区, 窗口不再飞丢
+        bool iconic = false;
+        try { iconic = IsIconic(h); } catch { }
+        if (iconic) { ShowWindow(h, 9); Thread.Sleep(150); } // W2: 最小化窗口 SetWindowPos 无效, 先 restore 再 move
         bool ok = MoveWindow(h, x, y, w, hh, true);
-        return "{\"ok\":true,\"moved\":" + (ok ? "true" : "false") + "}";
+        RECT rc; GetWindowRect(h, out rc);
+        return "{\"ok\":true,\"moved\":" + (ok ? "true" : "false") + (clamped ? ",\"clamped\":true" : "") + (iconic ? ",\"restoredFirst\":true" : "") +
+               ",\"rect\":{\"x\":" + rc.Left + ",\"y\":" + rc.Top + ",\"w\":" + (rc.Right - rc.Left) + ",\"h\":" + (rc.Bottom - rc.Top) + "}}";
     }
 
     // 等待窗口出现 (轮询 FindWindowByTitle)
@@ -706,16 +720,25 @@ partial class ShotService
     static DateTime recStart;
     static int recFps;
 
+    static readonly object recLock = new object();
     static string RecordStart(int x, int y, int w, int h, int fps)
     {
+        bool fpsNorm = false, sizeClamped = false;
+        lock (recLock) // R2: 检查+置位+启动整段互斥 (并发六连曾全回 ok 共用同一路径, ffmpeg 成孤儿)
+        {
         if (recording) return "{\"ok\":false,\"error\":\"already recording\",\"file\":\"" + JsonEscape(recPath) + "\"}";
-        if (w <= 0 || h <= 0) { var vs = VirtualScreen(); x = vs.X; y = vs.Y; w = vs.Width; h = vs.Height; }
+        // R1: 像素上限 4M, 超限回退虚拟屏 — 100000x100000(40GB Bitmap) 一条 URL 打挂进程
+        bool wantFull = (w <= 0 || h <= 0);
+        if (wantFull || (long)w * h > 4000000L)
+        {
+            var vs0 = VirtualScreen(); x = vs0.X; y = vs0.Y; w = vs0.Width; h = vs0.Height; sizeClamped = !wantFull; // 显式传超限才标 clamp, 默认全屏不算
+        }
         if (w % 2 != 0) w--;
         if (h % 2 != 0) h--;
-        if (fps <= 0 || fps > 30) fps = 10;
+        if (fps <= 0 || fps > 30) { fps = 10; fpsNorm = true; }
         recRect = new Rectangle(x, y, w, h);
         recFps = fps;
-        recPath = System.IO.Path.Combine(ShotDir, "rec_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".mp4");
+        recPath = System.IO.Path.Combine(ShotDir, "rec_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".mp4"); // 毫秒防同名
         try
         {
             var psi = new System.Diagnostics.ProcessStartInfo("ffmpeg",
@@ -737,13 +760,18 @@ partial class ShotService
         recThread.IsBackground = true;
         recThread.Start();
         Log("record start: " + recRect.ToString() + " fps=" + fps);
-        return "{\"ok\":true,\"file\":\"" + JsonEscape(recPath) + "\",\"fps\":" + fps + "}";
+        return "{\"ok\":true,\"file\":\"" + JsonEscape(recPath) + "\",\"fps\":" + fps + (fpsNorm ? ",\"fpsNormalized\":true" : "") +
+               ",\"video_size\":\"" + w + "x" + h + "\"" + (sizeClamped ? ",\"sizeClamped\":true" : "") + "}";
+        }
     }
 
     static void RecordLoop()
     {
         int bw = recRect.Width, bh = recRect.Height;
-        using (Bitmap frame = new Bitmap(bw, bh, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+        Bitmap frame0 = null;
+        try { frame0 = new Bitmap(bw, bh, System.Drawing.Imaging.PixelFormat.Format32bppArgb); }
+        catch (Exception ex) { Log("record alloc fail: " + ex.Message); lock (recLock) { recording = false; } try { if (recStdin != null) recStdin.Close(); } catch { } return; } // R1: OOM 不再 fail-fast 带走进程
+        using (Bitmap frame = frame0)
         {
             byte[] row = new byte[bw * 4];
             while (recording)

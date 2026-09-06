@@ -143,10 +143,10 @@ const TOOLS = [
   // ---- 键盘 ----
   {
     name: 'keyboard_type',
-    description: '向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符。打字前先 active_window 确认前台',
+    description: '向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符。打字前先 active_window 确认前台。换行默认发 Shift+Enter（软换行：记事本照常换行、聊天框不会误发送）；nl=enter 显式裸回车；整段精确多行推荐 clipboard_set+ctrl+v（粘贴前先去掉 \\r）',
     inputSchema: {
       type: 'object', additionalProperties: false,
-      properties: { text: { type: 'string' } },
+      properties: { text: { type: 'string' }, nl: { type: 'string', description: 'enter=裸回车(默认 shift+enter 软换行)' } },
       required: ['text']
     }
   },
@@ -174,7 +174,7 @@ const TOOLS = [
   // ---- 剪贴板 ----
   {
     name: 'clipboard_set',
-    description: '写文本到系统剪贴板。配合 keyboard_press ctrl+v 粘贴到任意输入框（比逐字打字快且稳）',
+    description: '写文本到系统剪贴板。配合 keyboard_press ctrl+v 粘贴到任意输入框（比逐字打字快且稳）。默认 \r 归一为 \n（聊天框粘贴遇回车符会触发发送）；keep_cr=1 保留原样',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: { text: { type: 'string' } },
@@ -185,6 +185,24 @@ const TOOLS = [
     name: 'clipboard_get',
     description: '直读当前剪贴板(多格式): type=text 返回文本; type=image 返回 PNG 文件路径+md5(用 Read 看图/OCR/传多模态——用户截屏后 agent 即可读图; 同内容图片 md5 相同不重复落盘); type=files 返回复制的文件路径列表。读选中文字 = 先 keyboard_press ctrl+c 再调本工具',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} }
+  },
+  {
+    name: 'ocr_image',
+    description: '对截图/图片文件跑 OCR（本地 qwen3-vl，无云端外泄）。path=PNG 路径（须位于截图目录，安全限制），返回 chars+text；wait=超时毫秒(默认60000, 大图冷启动建议120000)',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { path: { type: 'string' }, wait: { type: 'number' } },
+      required: ['path']
+    }
+  },
+  {
+    name: 'pin_image',
+    description: '把图片文件钉到桌面（贴图窗，与截图工具条贴图同一实现）：左键拖动/滚轮缩放/双击关闭/右键菜单。path=PNG（截图目录内），x/y=屏幕坐标(缺省居中)。给用户看对比图/参考图用这个',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { path: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' } },
+      required: ['path']
+    }
   },
   {
     name: 'clipboard_history',
@@ -404,10 +422,29 @@ function buildUrl(name, a) {
       if (a.x !== undefined && a.y !== undefined) qs.push('x=' + a.x, 'y=' + a.y);
       return { path: '/mouse/scroll', qs };
     }
-    case 'keyboard_type': return { path: '/keyboard/type', qs: ['text=' + enc(String(a.text))] };
+    case 'keyboard_type': {
+      let qs = ['text=' + enc(String(a.text))];
+      if (a.nl) qs.push('nl=' + enc(a.nl));
+      return { path: '/keyboard/type', qs };
+    }
     case 'keyboard_press': return { path: '/keyboard/press', qs: ['keys=' + enc(a.keys)] };
     case 'keyboard_hold': return { path: '/keyboard/hold', qs: ['keys=' + enc(a.keys), 'ms=' + (a.ms || 500)] };
-    case 'clipboard_set': return { path: '/clipboard/set', qs: ['text=' + enc(String(a.text))] };
+    case 'clipboard_set': {
+      let qs = ['text=' + enc(String(a.text))];
+      if (a.keep_cr) qs.push('keep_cr=1');
+      return { path: '/clipboard/set', qs };
+    }
+    case 'ocr_image': {
+      let qs = ['path=' + enc(a.path)];
+      if (a.wait !== undefined) qs.push('wait=' + a.wait);
+      return { path: '/ocr', qs };
+    }
+    case 'pin_image': {
+      let qs = ['path=' + enc(a.path)];
+      if (a.x !== undefined) qs.push('x=' + a.x);
+      if (a.y !== undefined) qs.push('y=' + a.y);
+      return { path: '/pin', qs };
+    }
     case 'clipboard_get': return { path: '/clipboard/get', qs: [] };
     case 'clipboard_history': return { path: '/clipboard/history', qs: a.limit !== undefined ? ['limit=' + a.limit] : [] };
     case 'ui_tree': {

@@ -190,6 +190,67 @@ public partial class ShotService
 
     // 窗口截图: PrintWindow+PW_RENDERFULLCONTENT 让窗口自绘进 DC (能拍到 DirectComposition/D2D 内容,
     // CopyFromScreen 拍不到 — 实测 Win11 记事本正文区黑屏)。中心区若全黑(某些应用 PrintWindow 黑屏)回退 CopyFromScreen
+    // /ocr?path=<png>&wait=1 — 后台 OCR (复用 OcrProvider/qwen3-vl): 截图文件进、文本出, agent 无 UI 依赖
+    static string OcrFile(string path, int waitMs)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path)) return "{\"ok\":false,\"error\":\"need path\"}";
+            string full;
+            try { full = System.IO.Path.GetFullPath(path); } catch { return "{\"ok\":false,\"error\":\"bad path\"}"; }
+            if (!System.IO.File.Exists(full)) return "{\"ok\":false,\"error\":\"file not found\"}";
+            if (!full.StartsWith(System.IO.Path.GetFullPath(ShotDir), StringComparison.OrdinalIgnoreCase))
+                return "{\"ok\":false,\"error\":\"path outside screenshots dir (安全限制)\"}";
+            Bitmap bmp;
+            using (Bitmap src = new Bitmap(full)) bmp = new Bitmap(src); // 拷出释放文件句柄
+            string text = null; string err = null;
+            try
+            {
+                var task = OcrProvider().RecognizeAsync(bmp);
+                if (!task.Wait(waitMs > 0 ? waitMs : 60000)) { bmp.Dispose(); return "{\"ok\":false,\"error\":\"OCR timeout\"}"; }
+                text = task.Result;
+            }
+            catch (Exception ex) { err = (ex.InnerException != null ? ex.InnerException.Message : ex.Message); }
+            bmp.Dispose();
+            if (err != null) return "{\"ok\":false,\"error\":\"" + JsonEscape(err) + "\"}";
+            return "{\"ok\":true,\"chars\":" + (text ?? "").Length + ",\"text\":\"" + JsonEscape(text ?? "") + "\"}";
+        }
+        catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; }
+    }
+
+    // /pin?path=<png>&x=&y= — 贴图到桌面 (agent 把图钉到用户屏幕上, 与截图工具条贴图同一实现)
+    static string PinFile(string path, int x, int y)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(path)) return "{\"ok\":false,\"error\":\"need path\"}";
+            string full;
+            try { full = System.IO.Path.GetFullPath(path); } catch { return "{\"ok\":false,\"error\":\"bad path\"}"; }
+            if (!System.IO.File.Exists(full)) return "{\"ok\":false,\"error\":\"file not found\"}";
+            if (!full.StartsWith(System.IO.Path.GetFullPath(ShotDir), StringComparison.OrdinalIgnoreCase))
+                return "{\"ok\":false,\"error\":\"path outside screenshots dir (安全限制)\"}";
+            Bitmap img;
+            using (Bitmap src = new Bitmap(full)) img = new Bitmap(src);
+            var vs = SystemInformation.VirtualScreen;
+            if (x == -1 || y == -1) { x = vs.X + vs.Width / 2 - img.Width / 2; y = vs.Y + vs.Height / 2 - img.Height / 2; }
+            Rectangle r = new Rectangle(x, y, img.Width, img.Height);
+            int px = x, py = y;
+            Form hk = hkForm;
+            if (hk == null || !hk.IsHandleCreated) { img.Dispose(); return "{\"ok\":false,\"error\":\"UI thread not ready, retry later\"}"; }
+            try
+            {
+                hk.BeginInvoke((Action)delegate
+                {
+                    try { PinForm p = new PinForm(img, r); p.Show(); }
+                    catch (Exception ex) { img.Dispose(); Log("pin err: " + ex.Message); }
+                });
+            }
+            catch (Exception ex) { img.Dispose(); return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
+            return "{\"ok\":true,\"rect\":{\"x\":" + px + ",\"y\":" + py + ",\"w\":" + img.Width + ",\"h\":" + img.Height + "},\"hint\":\"已钉到桌面: 左键拖动/滚轮缩放/双击关闭/右键菜单\"}";
+        }
+        catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; }
+    }
+
     static string DoShotWindow(IntPtr h)
     {
         RECT rc; GetWindowRect(h, out rc);
@@ -943,12 +1004,20 @@ public partial class ShotService
         SendInput(1, ins, Marshal.SizeOf(typeof(INPUT)));
     }
 
-    static void TypeText(string text)
+    static void TypeText(string text) { TypeText(text, null); }
+    // nl 默认 shift+enter: 记事本照常换行, 聊天/搜索框软换行不触发发送 (workbuddy 12:55 连发 4 条事故根治); nl="enter" 显式裸回车
+    static void TypeText(string text, string nlMode)
     {
+        bool soft = nlMode != "enter";
         text = text.Replace("\r\n", "\n");
         foreach (char c in text)
         {
-            if (c == '\n') { KeyEvent(0x0D, 0, 0); KeyEvent(0x0D, 0, KEYEVENTF_KEYUP); continue; } // Enter
+            if (c == '\n')
+            {
+                if (soft) { KeyEvent(0x10, 0, 0); KeyEvent(0x0D, 0, 0); KeyEvent(0x0D, 0, KEYEVENTF_KEYUP); KeyEvent(0x10, 0, KEYEVENTF_KEYUP); }
+                else { KeyEvent(0x0D, 0, 0); KeyEvent(0x0D, 0, KEYEVENTF_KEYUP); }
+                continue;
+            }
             if (c == '\t') { KeyEvent(0x09, 0, 0); KeyEvent(0x09, 0, KEYEVENTF_KEYUP); continue; } // Tab
             // Unicode 直发(中文/emoji 不依赖输入法)
             KeyEvent(0, (ushort)c, KEYEVENTF_UNICODE);
@@ -1115,6 +1184,20 @@ public partial class ShotService
                 }
                 else if (path == "/active") { body = ActiveWindowJson(); }
                 else if (path == "/apps") { body = AppList(); Log("[apps] list"); }
+                else if (path == "/ocr")
+                {
+                    if (!q.ContainsKey("path")) { code = 400; body = "{\"ok\":false,\"error\":\"need path\"}"; }
+                    else { int wm = 0; TryInt(q, "wait", out wm); body = OcrFile(q["path"], wm); Log("[ocr] " + q["path"]); }
+                }
+                else if (path == "/pin")
+                {
+                    if (!q.ContainsKey("path")) { code = 400; body = "{\"ok\":false,\"error\":\"need path\"}"; }
+                    else
+                    {
+                        int px = -1, py = -1; TryInt(q, "x", out px); TryInt(q, "y", out py);
+                        body = PinFile(q["path"], px, py); Log("[pin] " + q["path"]);
+                    }
+                }
                 else if (path == "/diag/threads")
                 {
                     string[] lt; lock (uiaLeaked) lt = uiaLeaked.ToArray();
@@ -1267,7 +1350,7 @@ public partial class ShotService
                     {
                         string text = q["text"];
                         if (text.Length > 2000) { code = 400; body = "{\"ok\":false,\"error\":\"text too long (max 2000)\"}"; }
-                        else { int nl = 0; foreach (char cc in text) if (cc == '\n') nl++; TypeText(text); body = "{\"ok\":true,\"chars\":" + text.Length + ",\"newlines\":" + nl + (nl > 0 ? ",\"warn\":\"text contains newlines - in chat/search/command boxes Enter SENDS; prefer clipboard_set+ctrl+v\"}" : "") + ",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] type " + text.Length + " chars" + (nl > 0 ? " (" + nl + " newlines!)" : "")); }
+                        else { int nl = 0; foreach (char cc in text) if (cc == '\n') nl++; TypeText(text, q.ContainsKey("nl") ? q["nl"] : ""); body = "{\"ok\":true,\"chars\":" + text.Length + ",\"newlines\":" + nl + (nl > 0 ? ",\"warn\":\"newlines sent as Shift+Enter (soft newline, no submit). pass nl=enter for real Enter; for exact multi-line paste prefer clipboard_set+ctrl+v\"" : "") + ",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] type " + text.Length + " chars" + (nl > 0 ? " (" + nl + " newlines!)" : "")); }
                     }
                 }
                 else if (path == "/keyboard/press")
@@ -1355,7 +1438,16 @@ public partial class ShotService
                 else if (path == "/clipboard/set")
                 {
                     if (!q.ContainsKey("text")) { code = 400; body = "{\"ok\":false,\"error\":\"need text\"}"; }
-                    else { body = ClipboardSetText(q["text"]); Log("[ctrl] clipboard set " + q["text"].Length + " chars"); }
+                    else
+                    {
+                        string ct = q["text"]; bool crn = false;
+                        // 默认 \r\n→\n: 聊天框粘贴遇 \r(回车) 同样触发连发 (12:55 事故); keep_cr=1 保留原样
+                        if (!(q.ContainsKey("keep_cr") && q["keep_cr"] == "1") && ct.IndexOf('\r') >= 0)
+                        { ct = ct.Replace("\r\n", "\n").Replace("\r", "\n"); crn = true; }
+                        body = ClipboardSetText(ct);
+                        if (crn) body = body.Substring(0, body.Length - 1) + ",\"crNormalized\":true}";
+                        Log("[ctrl] clipboard set " + ct.Length + " chars" + (crn ? " (CR normalized)" : ""));
+                    }
                 }
                 else if (path == "/ui/tree") { body = UiCall("tree", delegate { return UiTree(q); }, 8000); Log("[ui] tree " + target); }
                 else if (path == "/ui/click") { body = UiCall("click", delegate { return UiClick(q); }, 8000); Log("[ui] click " + target); }
@@ -2005,7 +2097,7 @@ public partial class ShotService
                     MouseScroll(d);
                     return McpText("{\"ok\":true,\"delta\":" + d + (mx != "" ? ",\"x\":" + mx + ",\"y\":" + my : "") + "}", false);
                 }
-                case "keyboard_type": { string t = McpParam(a, "text"); TypeText(t); return McpText("{\"ok\":true,\"chars\":" + t.Length + "}", false); }
+                case "keyboard_type": { string t = McpParam(a, "text"); int mnl = 0; foreach (char cc in t) if (cc == '\n') mnl++; TypeText(t, McpParam(a, "nl")); return McpText("{\"ok\":true,\"chars\":" + t.Length + ",\"newlines\":" + mnl + ",\"front\":" + FrontBriefJson() + "}", false); }
                 case "keyboard_press": { string k = McpParam(a, "keys"); PressCombo(k); return McpText("{\"ok\":true,\"keys\":\"" + JsonEscape(k) + "\"}", false); }
                 case "app_run": { return McpText(AppRun(McpParam(a, "path"), McpParam(a, "args")), false); }
                 case "taskbar_volume":
@@ -2016,6 +2108,12 @@ public partial class ShotService
                     if (McpParam(a, "reverse") == "1") volReverse = 1;
                     if (McpParam(a, "reverse") == "0") volReverse = 0;
                     return McpText("{\"ok\":true,\"enabled\":" + volEnabled + ",\"reverse\":" + volReverse + ",\"step\":" + volStep + ",\"taskbarWnds\":" + taskbarWnds.Length + "}", false);
+                }
+                case "ocr_image": return McpText(OcrFile(McpParam(a, "path"), McpParamInt(a, "wait")), false);
+                case "pin_image":
+                {
+                    int px = -1, py = -1; int.TryParse(McpParam(a, "x"), out px); int.TryParse(McpParam(a, "y"), out py);
+                    return McpText(PinFile(McpParam(a, "path"), px, py), false);
                 }
                 case "clipboard_get": return McpText(ClipboardGet(), false);
                 case "clipboard_history":
@@ -2144,7 +2242,7 @@ public partial class ShotService
             "{\"name\":\"mouse_move\",\"description\":\"移动鼠标到物理像素坐标\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\"]}}," +
             "{\"name\":\"mouse_click\",\"description\":\"点击。button=left|right|middle，double=1 双击，triple=1 三击选整行(坐标务必行内 rect.x+20 以上, 左边缘2px触发全选实测坑)，mods=shift/ctrl/alt 按住修饰键点击(选范围/多选)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"},\"triple\":{\"type\":\"number\"},\"mods\":{\"type\":\"string\"}}}}," +
             "{\"name\":\"mouse_scroll\",\"description\":\"滚轮：正数=向上滚，负数=向下滚（典型 ±120/格）。可选 x,y 先移动到目标坐标再滚\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"delta\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"delta\"]}}," +
-            "{\"name\":\"keyboard_type\",\"description\":\"向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," +
+            "{\"name\":\"keyboard_type\",\"description\":\"向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"},\"nl\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," +
             "{\"name\":\"keyboard_press\",\"description\":\"按组合键，如 ctrl+shift+a / enter / alt+f4 / win / ctrl+s\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"}},\"required\":[\"keys\"]}}," +
             "{\"name\":\"app_run\",\"description\":\"运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"path\"]}}," +
             "{\"name\":\"taskbar_volume\",\"description\":\"任务栏滚轮调音量（常驻功能）。enabled=0/1 开关，step=每次滚轮音量变化百分比(1-20,默认2)，reverse=1 反向(滚轮上=减小)。不带参返回当前状态。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"enabled\":{\"type\":\"number\"},\"step\":{\"type\":\"number\"},\"reverse\":{\"type\":\"number\"}}}}," +
@@ -2156,6 +2254,9 @@ public partial class ShotService
             "{\"name\":\"mouse_pos\",\"description\":\"查当前鼠标光标物理像素坐标\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}," +
             "{\"name\":\"keyboard_hold\",\"description\":\"按住组合键ms毫秒再松开(如按住win拖窗口)。keys格式同keyboard_press\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"},\"ms\":{\"type\":\"number\"}},\"required\":[\"keys\"]}," +
             "{\"name\":\"clipboard_set\",\"description\":\"写文本到剪贴板(替代手动复制)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}," +
+            "{\"name\":\"clipboard_get\",\"description\":\"直读当前剪贴板(多格式): text=文本/image=PNG路径+md5(Read看图/OCR通道)/files=文件路径列表\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}" +
+            "{\"name\":\"ocr_image\",\"description\":\"对截图文件跑OCR(qwen3-vl本地)。path=PNG(须截图目录内), 返回chars+text; 可选wait毫秒\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"wait\":{\"type\":\"number\"}},\"required\":[\"path\"]}}" +
+            "{\"name\":\"pin_image\",\"description\":\"图片文件钉到桌面(贴图窗,同截图工具条贴图): 左键拖动/滚轮缩放/双击关闭。path=PNG, x/y缺省居中\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"path\"]}}" +
             "{\"name\":\"ui_readall\",\"description\":\"批量读整棵元素树的 Name/Value(输入框内容)/类型 — 找输入框里的值/页面文本时用这个, 比 ui_read 逐个快。title=窗口标题, max=上限(默认300)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"max\":{\"type\":\"number\"}}}," +
             "{\"name\":\"record_start\",\"description\":\"开始录屏(抓屏管道喂ffmpeg出MP4 h264)。x,y,w,h=区域(默认全屏), fps=帧率(默认10,上限30)。无音频。用 record_stop 结束\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"fps\":{\"type\":\"number\"}}}}," +
             "{\"name\":\"record_stop\",\"description\":\"停止录屏, 返回 MP4 文件路径\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
