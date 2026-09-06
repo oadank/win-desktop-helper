@@ -937,40 +937,22 @@ partial class ShotService
 
             if (style == Annot.S_HOLLOW)
             {
-                // 样式② 空心线框箭头: 圆头封闭尾帽 + 上下平行杆线(均匀) + V 形开口双倒钩翼; 一条连续描边路径
+                // 样式② 空心线框 = 柳叶轮廓描边版 (用户: 与实心同几何, 尖头到尾全程一个指向, 无平行杆段)
                 float L = (float)Math.Sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
                 if (L < 4) return;
-                float lw2 = Math.Max(2.5f, w * 1.5f);           // 全程均匀线宽 = 粗细×1.5 (用户规格)
-                float bw = Math.Max(5.5f, w * 2.4f);            // 杆半宽
-                float hhl = Math.Max(20f, L * 0.2f);
+                float lw2 = Math.Max(2f, w * 1.2f);             // 描边稍细: 太粗会把锥度吃成"平行感" (用户观感反馈)
+                float hhl = Math.Max(22f, L * 0.22f);
                 if (hhl > L * 0.6f) hhl = L * 0.6f;
                 float hs2 = L - hhl;
-                float sw = hhl * 0.5f, fl = bw * 1.3f;          // 倒钩后掠/外展
-                float taper = Math.Max(10f, L * 0.12f);         // 尾部尖角张开区段
-                using (GraphicsPath gp = new GraphicsPath())
+                float hhw = Math.Max(5f, w * 3.1f);             // 锥度加大: 尾尖到头底全程明显张开
+                float chw = hhw * 2.75f, sweep = hhl * 0.45f;
+                PointF[] poly = LocalArrow(new PointF[] {
+                    new PointF(0, 0), new PointF(hs2, -hhw), new PointF(hs2 - sweep, -chw),
+                    new PointF(L, 0), new PointF(hs2 - sweep, chw), new PointF(hs2, hhw) }, x1, y1, (float)ang);
+                using (Pen fp = new Pen(p.Color, lw2))
                 {
-                    // 尾尖 V 收口 (用户: 左侧尖尖不要圆头) → 平行杆线 → V 形开口大倒钩 → 头尖, 一圈闭合线框
-                    gp.AddPolygon(new PointF[] {
-                        new PointF(0, 0),
-                        new PointF(taper, -bw),
-                        new PointF(hs2, -bw),
-                        new PointF(hs2 - sw, -(bw + fl)),
-                        new PointF(L, 0),
-                        new PointF(hs2 - sw, bw + fl),
-                        new PointF(hs2, bw),
-                        new PointF(taper, bw),
-                    });
-                    using (Matrix mx = new Matrix())
-                    {
-                        mx.Rotate((float)(ang * 57.29578), MatrixOrder.Append);
-                        mx.Translate(x1, y1, MatrixOrder.Append);
-                        gp.Transform(mx);
-                    }
-                    using (Pen fp = new Pen(p.Color, lw2))
-                    {
-                        fp.StartCap = LineCap.Round; fp.EndCap = LineCap.Round; fp.LineJoin = LineJoin.Round;
-                        g.DrawPath(fp, gp);
-                    }
+                    fp.LineJoin = LineJoin.Round;
+                    g.DrawPolygon(fp, poly);
                 }
                 return;
             }
@@ -1413,8 +1395,9 @@ partial class ShotService
                 for (int i = 0; i < styleOrder.Length; i++)
                 {
                     int v = styleOrder[i]; string lab = styleNames[i];
-                    ToolStripItem it = m.Items.Add(lab, ToolbarPanel.MakeStylePreviewBmp(v, true), delegate { curArrowStyle = v; MarkProp(); });
-                    if (curArrowStyle == v) it.Font = new Font(it.Font, FontStyle.Bold);
+                    ToolStripItem it = m.Items.Add("", ToolbarPanel.MakeStylePreviewBmp(v, true), delegate { curArrowStyle = v; MarkProp(); });
+                    it.ToolTipText = lab;
+                    if (curArrowStyle == v) it.BackColor = Color.FromArgb(52, 122, 214);
                 }
                 m.Show(propBar, styBtn.Rect.X, styBtn.Rect.Bottom + 2);
             }, arrowOnly);
@@ -1431,9 +1414,10 @@ partial class ShotService
                 for (int i = 0; i < widthVals.Length; i++)
                 {
                     float v = widthVals[i]; string lab = widthNames[i];
-                    ToolStripItem it = m.Items.Add(lab, ToolbarPanel.MakeWidthPreviewBmp(v, true), delegate { curWidth = v; MarkProp(); });
+                    ToolStripItem it = m.Items.Add("", ToolbarPanel.MakeWidthPreviewBmp(v, true), delegate { curWidth = v; MarkProp(); });
+                    it.ToolTipText = lab;
                     bool cur = (v <= 2.5f && curWidth <= 2.5f) || (v > 2.5f && v <= 4.5f && curWidth > 2.5f && curWidth <= 4.5f) || (v > 4.5f && curWidth > 4.5f);
-                    if (cur) it.Font = new Font(it.Font, FontStyle.Bold);
+                    if (cur) it.BackColor = Color.FromArgb(52, 122, 214);
                 }
                 m.Show(propBar, wdBtn.Rect.X, wdBtn.Rect.Bottom + 2);
             }, lineTools);
@@ -2145,6 +2129,7 @@ partial class ShotService
             using (Graphics g = Graphics.FromImage(bmp))
             {
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.FromArgb(40, 41, 46)); // 填菜单底色: 透明底被 ToolStrip 缩放合成纯白 (用户实测看不见样式)
                 float cy = H / 2f, x1 = 3, x2 = W - 3;
                 Color c = Color.FromArgb(232, 234, 240);
                 using (Pen p = new Pen(c, 2.4f))
@@ -2203,6 +2188,7 @@ partial class ShotService
             using (Graphics g = Graphics.FromImage(bmp))
             {
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.FromArgb(40, 41, 46)); // 同菜单底色
                 float cy = H / 2f;
                 using (Pen p = new Pen(Color.FromArgb(232, 234, 240), lw))
                 {
