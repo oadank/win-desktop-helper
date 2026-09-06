@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -659,10 +659,26 @@ partial class ShotService
             if (e == null) return "{\"ok\":false,\"error\":\"element not found (bad index or window)\"}";
             string name = "";
             try { name = e.Current.Name ?? ""; } catch { }
+            bool forceCoord = q.ContainsKey("mode") && q["mode"] == "coord";
+            if (forceCoord)
+            {
+                System.Windows.Rect rf = e.Current.BoundingRectangle;
+                int fx = (int)(rf.X + rf.Width / 2), fy = (int)(rf.Y + rf.Height / 2);
+                SetCursorPos(fx, fy);
+                Thread.Sleep(60);
+                MouseClick("left", 1);
+                Log("ui click coord(forced): " + name + " @ " + fx + "," + fy);
+                return "{\"ok\":true,\"via\":\"coord\",\"forced\":true,\"x\":" + fx + ",\"y\":" + fy + ",\"name\":\"" + JsonEscape(name) + "\"}";
+            }
             // 优先语义模式
             object pat;
             if (e.TryGetCurrentPattern(System.Windows.Automation.InvokePattern.Pattern, out pat))
-            { ((System.Windows.Automation.InvokePattern)pat).Invoke(); Log("ui click invoke: " + name); return "{\"ok\":true,\"via\":\"invoke\",\"name\":\"" + JsonEscape(name) + "\"}"; }
+            {
+                ((System.Windows.Automation.InvokePattern)pat).Invoke();
+                Log("ui click invoke: " + name);
+                // 2026-09-07: 微信「进入微信」按钮 invoke 返回成功但界面毫无变化 — invoke 成功 ≠ 真的点了
+                return "{\"ok\":true,\"via\":\"invoke\",\"name\":\"" + JsonEscape(name) + "\",\"warn\":\"invoke 成功不代表界面已变化(部分应用如微信不响应 UIA Invoke)。若界面无变化, 用 ui_find 拿 rect 后 mouse_click 中心, 或 ui_click 传 mode=coord\"}";
+            }
             if (e.TryGetCurrentPattern(System.Windows.Automation.TogglePattern.Pattern, out pat))
             { ((System.Windows.Automation.TogglePattern)pat).Toggle(); Log("ui click toggle: " + name); return "{\"ok\":true,\"via\":\"toggle\",\"name\":\"" + JsonEscape(name) + "\"}"; }
             if (e.TryGetCurrentPattern(System.Windows.Automation.ExpandCollapsePattern.Pattern, out pat))

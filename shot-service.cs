@@ -1,4 +1,4 @@
-// shot-service — 自建 Session 1 多模态助手桥 (HTTP, 127.0.0.1:18800)
+﻿// shot-service — 自建 Session 1 多模态助手桥 (HTTP, 127.0.0.1:18800)
 // 用途: Session 0 的任何 agent 通过 HTTP 请求, 让运行在用户会话(Session 1)的本服务:
 //   看: 截图(全屏/区域/窗口/显示器) + 活动窗口信息 + 显示器元数据
 //   动: 鼠标移动/点击/滚轮 + 键盘输入(含中文)/组合键 — T1 Safe Computer Control (Level 1)
@@ -154,19 +154,41 @@ public partial class ShotService
         return new Rectangle(minX, minY, maxR - minX, maxB - minY);
     }
 
-    static IntPtr FindWindowByTitle(string keyword)
+    // 分级匹配: 标题完全相等 > 标题前缀 > 标题包含 > 仅按进程名; 可选 process 过滤
+    // 2026-09-07 修: 旧版纯 IndexOf 包含匹配, title="微信" 命中 Edge 标签页标题(含"微信"二字) 实测误伤
+    static IntPtr FindWindowByTitle(string keyword, string process)
     {
-        IntPtr found = IntPtr.Zero;
+        if (keyword == "" && process == "") return IntPtr.Zero;
+        System.Collections.Generic.List<IntPtr> exact = new System.Collections.Generic.List<IntPtr>();
+        System.Collections.Generic.List<IntPtr> starts = new System.Collections.Generic.List<IntPtr>();
+        System.Collections.Generic.List<IntPtr> contains = new System.Collections.Generic.List<IntPtr>();
+        System.Collections.Generic.List<IntPtr> procOnly = new System.Collections.Generic.List<IntPtr>();
+        string pnNeed = process;
+        if (pnNeed.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) pnNeed = pnNeed.Substring(0, pnNeed.Length - 4);
         EnumWindows(delegate(IntPtr h, IntPtr lp)
         {
             if (!IsWindowVisible(h)) return true;
-            StringBuilder sb = new StringBuilder(512);
-            GetWindowTextW(h, sb, 512);
-            if (sb.ToString().IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0) { found = h; return false; }
+            string t = WindowTitle(h);
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            string pn = "";
+            try { pn = Process.GetProcessById((int)pid).ProcessName; } catch { }
+            if (pnNeed != "" && !string.Equals(pn, pnNeed, StringComparison.OrdinalIgnoreCase)) return true;
+            if (pnNeed != "" && keyword == "") { procOnly.Add(h); return true; }
+            if (keyword != "" && string.Equals(t, keyword, StringComparison.OrdinalIgnoreCase)) { exact.Add(h); return true; }
+            if (keyword != "" && t.StartsWith(keyword, StringComparison.OrdinalIgnoreCase)) { starts.Add(h); return true; }
+            if (keyword != "" && t.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0) { contains.Add(h); return true; }
             return true;
         }, IntPtr.Zero);
-        return found;
+        if (exact.Count > 0) return exact[0];
+        if (starts.Count > 0) return starts[0];
+        if (contains.Count > 0) return contains[0];
+        if (procOnly.Count > 0) return procOnly[0];
+        return IntPtr.Zero;
     }
+
+    static IntPtr FindWindowByTitle(string keyword) { return FindWindowByTitle(keyword, ""); }
+
+    static string WindowJsonByTitle(string keyword) { return WindowJsonByTitle(keyword, ""); }
 
     static string WindowTitle(IntPtr h)
     {
@@ -390,9 +412,9 @@ public partial class ShotService
         }
     }
 
-    static string WindowJsonByTitle(string keyword)
+    static string WindowJsonByTitle(string keyword, string process)
     {
-        IntPtr h = FindWindowByTitle(keyword);
+        IntPtr h = FindWindowByTitle(keyword, process);
         if (h == IntPtr.Zero) return null;
         RECT rc; GetWindowRect(h, out rc);
         uint pid; GetWindowThreadProcessId(h, out pid);
@@ -468,7 +490,12 @@ public partial class ShotService
     static void MouseScroll(int delta) { mouse_event(MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)delta), UIntPtr.Zero); }
 
     // 运行程序/打开(ShellExecute: 支持 exe/快捷方式/URL); 须在 Session 1 才有用户可见界面
-    static string AppRun(string path, string args)
+    static string AppRun(string path, string args) { return AppRun(path, args, 0, ""); }
+
+    // waitMs>0: 找到窗口后继续等到它稳定(rect 连续 3 次采样不变, 且句柄存活)再返回;
+    //           句柄中途失效(多进程应用如微信会换进程换窗)会重新 diff 找新窗口 — 2026-09-07 实测坑
+    // procFilter: 只认该进程名的窗口 (如 Weixin), 忽略启动器/其它进程弹出的过渡窗
+    static string AppRun(string path, string args, int waitMs, string procFilter)
     {
         // 启动前快照可见顶级窗口; 启动后轮询找新窗口 — Store 应用启动器 pid ≠ 窗口进程, 必须按窗口 diff 找 (实测坑)
         HashSet<long> before = new HashSet<long>();
@@ -493,6 +520,7 @@ public partial class ShotService
         try { runPid = p.Id.ToString(); runName = JsonEscape(p.ProcessName); }
         catch { runPid = "0"; runName = ""; } // 启动器秒退 (Store 应用) 或启动超时
         string winJson = "null";
+        IntPtr lastHwnd = IntPtr.Zero;
         for (int t = 0; t < 25; t++) // 最多等 2.5s, 找到新窗口提前结束
         {
             System.Threading.Thread.Sleep(100);
@@ -513,11 +541,57 @@ public partial class ShotService
             {
                 string proc = "";
                 try { proc = Process.GetProcessById((int)fpid).ProcessName; } catch { }
+                if (procFilter != "" && !string.Equals(proc, procFilter, StringComparison.OrdinalIgnoreCase)) continue; // 进程名不符, 继续等
                 winJson = "{\"hwnd\":" + found.ToInt64() + ",\"pid\":" + fpid + ",\"title\":\"" + JsonEscape(ftitle) + "\",\"process\":\"" + JsonEscape(proc) + "\"}";
+                lastHwnd = found;
                 break;
             }
         }
-        return "{\"ok\":true,\"pid\":" + runPid + ",\"name\":\"" + runName + "\",\"session\":" + Process.GetCurrentProcess().SessionId + ",\"window\":" + winJson + "}";
+        bool stable = false; int waitedMs = 0;
+        if (waitMs > 0)
+        {
+            int deadline = Environment.TickCount + waitMs;
+            int sameCount = 0; int lastL = 0, lastT = 0, lastW = 0, lastH = 0;
+            while (Environment.TickCount < deadline)
+            {
+                System.Threading.Thread.Sleep(200);
+                // 句柄失效(应用换进程重建窗口) → 重新 diff 找新窗口, 别死守旧句柄
+                if (lastHwnd == IntPtr.Zero || !IsWindow(lastHwnd))
+                {
+                    IntPtr nf = IntPtr.Zero; string ntitle = ""; uint npid = 0;
+                    EnumWindows(delegate(IntPtr h, IntPtr lp)
+                    {
+                        if (IsWindowVisible(h) && IsWindow(h) && !before.Contains(h.ToInt64()))
+                        {
+                            StringBuilder sb = new StringBuilder(256); GetWindowTextW(h, sb, 256);
+                            if (sb.Length > 0)
+                            {
+                                uint tp; GetWindowThreadProcessId(h, out tp);
+                                string pn = ""; try { pn = Process.GetProcessById((int)tp).ProcessName; } catch { }
+                                if (procFilter == "" || string.Equals(pn, procFilter, StringComparison.OrdinalIgnoreCase))
+                                { ntitle = sb.ToString(); npid = tp; nf = h; return false; }
+                            }
+                        }
+                        return true;
+                    }, IntPtr.Zero);
+                    if (nf != IntPtr.Zero)
+                    {
+                        string pn2 = ""; try { pn2 = Process.GetProcessById((int)npid).ProcessName; } catch { }
+                        lastHwnd = nf;
+                        winJson = "{\"hwnd\":" + nf.ToInt64() + ",\"pid\":" + npid + ",\"title\":\"" + JsonEscape(ntitle) + "\",\"process\":\"" + JsonEscape(pn2) + "\"}";
+                        sameCount = 0;
+                    }
+                    continue;
+                }
+                RECT sr; GetWindowRect(lastHwnd, out sr);
+                int cl = sr.Left, ct = sr.Top, cw = sr.Right - sr.Left, ch = sr.Bottom - sr.Top;
+                if (cl == lastL && ct == lastT && cw == lastW && ch == lastH) sameCount++; else sameCount = 0;
+                lastL = cl; lastT = ct; lastW = cw; lastH = ch;
+                if (sameCount >= 2 && cw > 0 && ch > 0) { stable = true; break; } // 连续 3 次采样一致
+            }
+            waitedMs = waitMs - Math.Max(0, deadline - Environment.TickCount);
+        }
+        return "{\"ok\":true,\"pid\":" + runPid + ",\"name\":\"" + runName + "\",\"session\":" + Process.GetCurrentProcess().SessionId + ",\"window\":" + winJson + (waitMs > 0 ? ",\"stable\":" + (stable ? "true" : "false") + ",\"waitedMs\":" + waitedMs : "") + "}";
     }
 
     // 当前前台窗口简报 (type/press 响应附带, 让调用方自查打到了哪个窗口 — 盲打事故防线)
@@ -1368,10 +1442,10 @@ public partial class ShotService
                 }
                 else if (path == "/window")
                 {
-                    if (!q.ContainsKey("title")) { code = 400; body = "{\"ok\":false,\"error\":\"need title\"}"; }
+                    if (!q.ContainsKey("title") && !q.ContainsKey("process")) { code = 400; body = "{\"ok\":false,\"error\":\"need title or process\"}"; }
                     else
                     {
-                        string wj = WindowJsonByTitle(q["title"]);
+                        string wj = WindowJsonByTitle(q.ContainsKey("title") ? q["title"] : "", q.ContainsKey("process") ? q["process"] : "");
                         if (wj == null) { code = 404; body = "{\"ok\":false,\"error\":\"window not found\"}"; }
                         else body = wj;
                     }
@@ -1477,7 +1551,7 @@ public partial class ShotService
                     if (!q.ContainsKey("path")) { code = 400; body = "{\"ok\":false,\"error\":\"need path\"}"; }
                     else
                     {
-                        try { body = AppRun(q["path"], q.ContainsKey("args") ? q["args"] : ""); Log("[run] " + q["path"]); }
+                        try { int aw = 0; TryInt(q, "wait", out aw); body = AppRun(q["path"], q.ContainsKey("args") ? q["args"] : "", aw, q.ContainsKey("process") ? q["process"] : ""); Log("[run] " + q["path"] + (aw > 0 ? " wait=" + aw : "")); }
                         catch (Exception ex) { code = 500; body = "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
                     }
                 }
@@ -2211,7 +2285,7 @@ public partial class ShotService
                 }
                 case "window_info":
                 {
-                    string wj = WindowJsonByTitle(McpParam(a, "title"));
+                    string wj = WindowJsonByTitle(McpParam(a, "title"), McpParam(a, "process"));
                     return wj == null ? McpText("{\"ok\":false,\"error\":\"window not found\"}", true) : McpText(wj, false);
                 }
                 case "active_window": return McpText(ActiveWindowJson(), false);
@@ -2240,7 +2314,11 @@ public partial class ShotService
                 }
                 case "keyboard_type": { string t = McpParam(a, "text"); int mnl = 0; foreach (char cc in t) if (cc == '\n') mnl++; TypeText(t, McpParam(a, "nl")); return McpText("{\"ok\":true,\"chars\":" + t.Length + ",\"newlines\":" + mnl + ",\"front\":" + FrontBriefJson() + "}", false); }
                 case "keyboard_press": { string k = McpParam(a, "keys"); PressCombo(k); return McpText("{\"ok\":true,\"keys\":\"" + JsonEscape(k) + "\"}", false); }
-                case "app_run": { return McpText(AppRun(McpParam(a, "path"), McpParam(a, "args")), false); }
+                case "app_run":
+                {
+                    int waitMs = 0; int.TryParse(McpParam(a, "wait"), out waitMs);
+                    return McpText(AppRun(McpParam(a, "path"), McpParam(a, "args"), waitMs, McpParam(a, "process")), false);
+                }
                 case "taskbar_volume":
                 {
                     // 任务栏滚轮调音量: enabled=0|1(开关) step=音量步进 reverse=1 反向; 不带参会查询状态
@@ -2377,7 +2455,7 @@ public partial class ShotService
     {
         return "[" +
             "{\"name\":\"screen_capture\",\"description\":\"截取用户桌面指定区域，返回 PNG 文件路径。region=all 全屏(默认)；screen=0 指定显示器；x,y,w,h 任意矩形；window=窗口标题关键词\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"region\":{\"type\":\"string\"},\"screen\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"window\":{\"type\":\"string\"}}}}," +
-            "{\"name\":\"window_info\",\"description\":\"按窗口标题关键词查询窗口信息 {hwnd,title,process,rect}，操作前定位用。查不到返回 ok:false\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"]}}," +
+            "{\"name\":\"window_info\",\"description\":\"按窗口标题/进程名查询窗口 {hwnd,title,process,rect}，操作前定位用。优先级: 标题全等>标题前缀>标题包含>仅进程名。警告: title 模糊匹配会误伤(如 title=微信 命中含该词的浏览器标签页), 建议同时给 process 或先用 list_apps 拿 hwnd。查不到返回 ok:false\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"process\":{\"type\":\"string\",\"description\":\"进程名过滤, 如 Weixin / msedge, 忽略大小写可带 .exe\"}}}}," +
             "{\"name\":\"active_window\",\"description\":\"获取当前活动窗口信息 {title,process,rect}\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"monitors\",\"description\":\"列出显示器元数据（分辨率/主屏/设备名）\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"mouse_move\",\"description\":\"移动鼠标到物理像素坐标\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\"]}}," +
@@ -2385,7 +2463,7 @@ public partial class ShotService
             "{\"name\":\"mouse_scroll\",\"description\":\"滚轮：正数=向上滚，负数=向下滚（典型 ±120/格）。可选 x,y 先移动到目标坐标再滚\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"delta\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"delta\"]}}," +
             "{\"name\":\"keyboard_type\",\"description\":\"向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"},\"nl\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," +
             "{\"name\":\"keyboard_press\",\"description\":\"按组合键，如 ctrl+shift+a / enter / alt+f4 / win / ctrl+s\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"}},\"required\":[\"keys\"]}}," +
-            "{\"name\":\"app_run\",\"description\":\"运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"path\"]}}," +
+            "{\"name\":\"app_run\",\"description\":\"运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见。多进程应用(微信/Electron)启动后会换进程换窗, 返回的 hwnd 可能是过渡态: 建议 wait=3000 + process=进程名, 服务端会等窗口 rect 稳定后再返回并带 stable 标记\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"},\"wait\":{\"type\":\"number\",\"description\":\"找到窗口后额外等待稳定的毫秒数(建议 3000), 0=不等待(旧行为)\"},\"process\":{\"type\":\"string\",\"description\":\"只认该进程名的窗口, 如 Weixin\"}},\"required\":[\"path\"]}}," +
             "{\"name\":\"taskbar_volume\",\"description\":\"任务栏滚轮调音量（常驻功能）。enabled=0/1 开关，step=每次滚轮音量变化百分比(1-20,默认2)，reverse=1 反向(滚轮上=减小)。不带参返回当前状态。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"enabled\":{\"type\":\"number\"},\"step\":{\"type\":\"number\"},\"reverse\":{\"type\":\"number\"}}}}," +
             "{\"name\":\"clipboard_history\",\"description\":\"读取剪贴板历史（常驻监听，最多50条，最新在前）。limit=返回条数(可选)。给AI复用刚复制的内容。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"limit\":{\"type\":\"number\"}}}}," +
             "{\"name\":\"win_manage\",\"description\":\"窗口管理。verb=activate|max|min|restore|close|move|wait|list。activate置前台(先解除最小化)；move需x,y,w,h；wait轮询等title窗口出现(timeout毫秒,上限60s)；list按pid列窗口\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"verb\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"pid\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"timeout\":{\"type\":\"number\"}},\"required\":[\"verb\"]}," +

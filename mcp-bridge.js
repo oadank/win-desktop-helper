@@ -31,11 +31,13 @@ const TOOLS = [
   },
   {
     name: 'window_info',
-    description: '按窗口标题关键词查询窗口 {hwnd,title,process,rect}，操作前定位用。查不到返回 ok:false',
+    description: '按窗口标题/进程名查询窗口 {hwnd,title,process,rect}，操作前定位用。匹配优先级: 标题全等>标题前缀>标题包含>仅进程名。⚠ 模糊匹配会误伤(实测 title=微信 命中了浏览器标签页标题里含"微信"的窗口), 建议同时给 process 或先用 list_apps 拿 hwnd。查不到返回 ok:false',
     inputSchema: {
       type: 'object', additionalProperties: false,
-      properties: { title: { type: 'string', description: '窗口标题关键词' } },
-      required: ['title']
+      properties: {
+        title: { type: 'string', description: '窗口标题关键词' },
+        process: { type: 'string', description: '进程名过滤(如 Weixin/msedge, 忽略大小写可带 .exe), 强烈建议给, 避免标题模糊匹配误伤' }
+      }
     }
   },
   {
@@ -227,14 +229,15 @@ const TOOLS = [
   },
   {
     name: 'ui_click',
-    description: '语义点击控件。定位二选一: i=ui_tree 下标, 或 name=控件名(如 "保存"/"确定", 一条命令直达, 精确优先模糊兜底, 可加 type=Button 过滤)。invoke/toggle/expand/select 模式优先, 失败回退坐标点击',
+    description: '【点击首选】语义点击控件。定位二选一: i=ui_tree 下标, 或 name=控件名(如 "保存"/"确定", 一条命令直达, 精确优先模糊兜底, 可加 type=Button 过滤)。invoke/toggle/expand/select 模式优先, 失败回退坐标点击。⚠ 部分应用(微信等)不响应 UIA Invoke: 返回 via=invoke 但界面无变化 —— 改用 ui_find 拿 rect 后 mouse_click 中心, 或本工具传 mode=coord',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         title: { type: 'string' }, hwnd: { type: 'number' },
         i: { type: 'number', description: 'ui_tree 元素下标' },
         name: { type: 'string', description: '按控件名定位 (推荐)' },
-        type: { type: 'string', description: '配合 name 过滤类型, 如 Button/MenuItem' }
+        type: { type: 'string', description: '配合 name 过滤类型, 如 Button/MenuItem' },
+        mode: { type: 'string', description: 'coord=跳过 UIA Invoke, 直接真实鼠标点控件中心(应用不响应 Invoke 时用)' }
       }
     }
   },
@@ -319,10 +322,14 @@ const TOOLS = [
   // ---- 应用 ----
   {
     name: 'app_run',
-    description: '运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见',
+    description: '运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见。⚠ 多进程应用(微信/Electron)启动后会换进程换窗, 返回的 hwnd 可能是过渡态: 建议 wait=3000 + process=进程名, 服务端等窗口 rect 稳定后再返回并带 stable 标记',
     inputSchema: {
       type: 'object', additionalProperties: false,
-      properties: { path: { type: 'string' }, args: { type: 'string' } },
+      properties: {
+        path: { type: 'string' }, args: { type: 'string' },
+        wait: { type: 'number', description: '找到窗口后额外等待稳定的毫秒数(建议 3000), 0=不等待' },
+        process: { type: 'string', description: '只认该进程名的窗口, 如 Weixin' }
+      },
       required: ['path']
     }
   },
@@ -380,7 +387,12 @@ function buildUrl(name, a) {
       else qs.push('region=all');
       return { path: '/shot', qs };
     }
-    case 'window_info': return { path: '/window', qs: ['title=' + enc(a.title)] };
+    case 'window_info': {
+      const qs = [];
+      if (a.title !== undefined) qs.push('title=' + enc(a.title));
+      if (a.process) qs.push('process=' + enc(a.process));
+      return { path: '/window', qs };
+    }
     case 'active_window': return { path: '/active', qs: [] };
     case 'list_apps': return { path: '/apps', qs: [] };
     case 'monitors': return { path: '/monitors', qs: [] };
@@ -461,6 +473,7 @@ function buildUrl(name, a) {
       if (a.i !== undefined) qs.push('i=' + a.i);
       if (a.name) qs.push('name=' + enc(a.name));
       if (a.type) qs.push('type=' + enc(a.type));
+      if (a.mode) qs.push('mode=' + enc(a.mode));
       return { path: '/ui/click', qs };
     }
     case 'ui_find': {
@@ -514,6 +527,8 @@ function buildUrl(name, a) {
     case 'app_run': {
       let qs = ['path=' + enc(a.path)];
       if (a.args) qs.push('args=' + enc(a.args));
+      if (a.wait !== undefined) qs.push('wait=' + a.wait);
+      if (a.process) qs.push('process=' + enc(a.process));
       return { path: '/app/run', qs };
     }
     case 'app_runas': {
