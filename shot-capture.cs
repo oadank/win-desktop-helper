@@ -154,6 +154,108 @@ partial class ShotService
     }
 
     // 全屏框选窗 (PixPin/ShareX 同款交互)
+    // 自绘深色下拉弹层 (PixPin 同款): #28292E 圆角底, 行悬停/选中=圆角蓝块(#3385FF)左右内缩,
+    // 预览直接画在弹层上 (箭头样式复用画布同一 DrawArrowEx — 预览与画布永不漂移, 根治 X2), 无白底/白边/黑顶条/分隔线
+    class StylePopup : Form
+    {
+        public delegate void DrawerDel(Graphics g, RectangleF row, int key, Color ink);
+        readonly int[] keys;
+        readonly System.Func<int, bool> isCurrent;
+        readonly Action<int> onPick;
+        readonly DrawerDel drawer;
+        readonly System.Func<int, string> tipper;
+        readonly Color ink;
+        int hover = -1;
+        readonly ToolTip tip = new ToolTip();
+
+        public StylePopup(int[] keys, System.Func<int, bool> isCurrent, Action<int> onPick, DrawerDel drawer, System.Func<int, string> tipper, Color ink)
+        {
+            this.keys = keys; this.isCurrent = isCurrent; this.onPick = onPick; this.drawer = drawer; this.tipper = tipper; this.ink = ink;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            BackColor = Color.FromArgb(40, 41, 46);
+            DoubleBuffered = true;
+            KeyPreview = true;
+            int w = 118, h = keys.Length * 38 + 8;
+            ClientSize = new Size(w, h);
+            using (GraphicsPath gp = RoundPath(0, 0, w, h, 14)) Region = new Region(gp);
+        }
+
+        static GraphicsPath RoundPath(int x, int y, int w, int h, int d)
+        {
+            GraphicsPath gp = new GraphicsPath();
+            gp.AddArc(x, y, d, d, 180, 90);
+            gp.AddArc(x + w - d, y, d, d, 270, 90);
+            gp.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+            gp.AddArc(x, y + h - d, d, d, 90, 90);
+            gp.CloseFigure();
+            return gp;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.FromArgb(40, 41, 46));
+            for (int i = 0; i < keys.Length; i++)
+            {
+                RectangleF row = new RectangleF(4, 4 + i * 38, ClientSize.Width - 8, 34);
+                bool sel = isCurrent != null && isCurrent(keys[i]);
+                if (i == hover || sel)
+                {
+                    using (SolidBrush hb = new SolidBrush(i == hover ? Color.FromArgb(64, 142, 255) : Color.FromArgb(51, 133, 255)))
+                        using (GraphicsPath gp = RoundPath((int)row.X, (int)row.Y, (int)row.Width, (int)row.Height, 12))
+                            g.FillPath(hb, gp);
+                }
+                try { drawer(g, new RectangleF(row.X + 8, row.Y, row.Width - 16, row.Height), keys[i], ink); } catch { }
+            }
+        }
+
+        int RowAt(Point pt)
+        {
+            if (pt.X < 4 || pt.X > ClientSize.Width - 4) return -1;
+            int i = (pt.Y - 4) / 38;
+            if (i < 0 || i >= keys.Length || pt.Y < 4 || pt.Y > ClientSize.Height - 4) return -1;
+            return i;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int r = RowAt(e.Location);
+            if (r != hover)
+            {
+                hover = r;
+                Invalidate();
+                try { if (r >= 0 && tipper != null) tip.Show(tipper(keys[r]), this, e.X + 12, e.Y + 18, 1200); else tip.Hide(this); } catch { }
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hover = -1; Invalidate(); try { tip.Hide(this); } catch { } }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            int r = RowAt(e.Location);
+            if (r >= 0 && onPick != null) { onPick(keys[r]); }
+            Close();
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Escape) { e.Handled = true; Close(); }
+        }
+
+        protected override void OnDeactivate(EventArgs e)
+        {
+            base.OnDeactivate(e);
+            try { StylePopup self = this; BeginInvoke((Action)delegate { if (Form.ActiveForm != self && !self.IsDisposed) self.Close(); }); } catch { }
+        }
+    }
+
     class CaptureOverlay : Form
     {
         readonly Bitmap frozen;  // 冻结的全屏原图 (尺寸=虚拟屏)
@@ -903,7 +1005,7 @@ partial class ShotService
 
             if (style == Annot.S_CALLOUT)
             {
-                float bl = Math.Max(14, w * 4f);
+                float bl = Math.Min(12f, Math.Max(7f, w * 4f)); // 12 上限: 弹层行高容得下 (原 14 起会超界)
                 float ppx = (float)pxc, ppy = (float)pyc;
                 g.DrawLine(p, x1, y1, x2, y2);
                 g.DrawLine(p, x1 + bl * ppx, y1 + bl * ppy, x1 - bl * ppx, y1 - bl * ppy);
@@ -1390,16 +1492,20 @@ partial class ShotService
             ToolbarPanel.Btn styBtn = null;
             styBtn = propBar.AddPreviewDropdown("箭头样式 (点选切换)", delegate
             {
-                ContextMenuStrip m = DarkMenu();
-                m.ShowImageMargin = true; m.ImageScalingSize = new Size(78, 22);
-                for (int i = 0; i < styleOrder.Length; i++)
-                {
-                    int v = styleOrder[i]; string lab = styleNames[i];
-                    ToolStripItem it = m.Items.Add("", ToolbarPanel.MakeStylePreviewBmp(v, true), delegate { curArrowStyle = v; MarkProp(); });
-                    it.ToolTipText = lab;
-                    if (curArrowStyle == v) it.BackColor = Color.FromArgb(52, 122, 214);
-                }
-                m.Show(propBar, styBtn.Rect.X, styBtn.Rect.Bottom + 2);
+                // 自绘弹层: 预览直接调画布同一 DrawArrowEx — 预览与画布同源永不漂移, 无白底/黑条
+                StylePopup sp = new StylePopup(styleOrder,
+                    delegate(int v) { return curArrowStyle == v; },
+                    delegate(int v) { curArrowStyle = v; MarkProp(); },
+                    delegate(Graphics g, RectangleF row, int key, Color ink2)
+                    {
+                        using (Pen ap = new Pen(Color.FromArgb(232, 234, 240), 2f))
+                            DrawArrowEx(g, ap, row.X + 5, row.Y + row.Height / 2f, row.Right - 5, row.Y + row.Height / 2f, key);
+                    },
+                    delegate(int v) { return styleNames[System.Array.IndexOf(styleOrder, v)]; },
+                    Color.FromArgb(232, 234, 240));
+                Point pos = propBar.PointToScreen(new Point(styBtn.Rect.X, styBtn.Rect.Bottom + 2));
+                sp.Location = pos;
+                sp.Show();
             }, arrowOnly);
             styBtn.ToolKey = "styd";
             propBar.AddSep(lineTools);
@@ -1409,17 +1515,23 @@ partial class ShotService
             ToolbarPanel.Btn wdBtn = null;
             wdBtn = propBar.AddPreviewDropdown("线条粗细", delegate
             {
-                ContextMenuStrip m = DarkMenu();
-                m.ShowImageMargin = true; m.ImageScalingSize = new Size(78, 22);
-                for (int i = 0; i < widthVals.Length; i++)
-                {
-                    float v = widthVals[i]; string lab = widthNames[i];
-                    ToolStripItem it = m.Items.Add("", ToolbarPanel.MakeWidthPreviewBmp(v, true), delegate { curWidth = v; MarkProp(); });
-                    it.ToolTipText = lab;
-                    bool cur = (v <= 2.5f && curWidth <= 2.5f) || (v > 2.5f && v <= 4.5f && curWidth > 2.5f && curWidth <= 4.5f) || (v > 4.5f && curWidth > 4.5f);
-                    if (cur) it.BackColor = Color.FromArgb(52, 122, 214);
-                }
-                m.Show(propBar, wdBtn.Rect.X, wdBtn.Rect.Bottom + 2);
+                int[] wkeys = { 20, 35, 60 }; // ×10 存 int (闭包捕获键)
+                StylePopup sp = new StylePopup(wkeys,
+                    delegate(int k) { float v = k / 10f; return (v <= 2.5f && curWidth <= 2.5f) || (v > 2.5f && v <= 4.5f && curWidth > 2.5f && curWidth <= 4.5f) || (v > 4.5f && curWidth > 4.5f); },
+                    delegate(int k) { curWidth = k / 10f; MarkProp(); },
+                    delegate(Graphics g, RectangleF row, int key, Color ink2)
+                    {
+                        using (Pen wp = new Pen(ink2, key / 10f))
+                        {
+                            wp.StartCap = System.Drawing.Drawing2D.LineCap.Round; wp.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                            g.DrawLine(wp, row.X + 5, row.Y + row.Height / 2f, row.Right - 5, row.Y + row.Height / 2f);
+                        }
+                    },
+                    delegate(int k) { return k == 20 ? "细线" : (k == 35 ? "中线" : "粗线"); },
+                    Color.FromArgb(232, 234, 240));
+                Point pos = propBar.PointToScreen(new Point(wdBtn.Rect.X, wdBtn.Rect.Bottom + 2));
+                sp.Location = pos;
+                sp.Show();
             }, lineTools);
             wdBtn.ToolKey = "wd";
             propBar.AddSep(seqOnly);
@@ -1499,8 +1611,7 @@ partial class ShotService
         {
             if (propBar == null || bar == null) return;
             Rectangle vs = SystemInformation.VirtualScreen;
-            // X1 (workbuddy): 主条 Height 被钳 88 但 WinForms 内部维持 96 → bar.Bottom 虚高 16px, 属性栏悬空压标注区 — 用真实底边 bar.Top+88
-            int x = bar.Left, y = bar.Top + 88 + (bar.Height > 48 ? 8 : 4);
+            int x = bar.Left, y = bar.Bottom + 2; // 紧贴主条 (猜高度锚距会空一行, 用户实测); 压选区时下方逻辑翻主条上方
             // X1 (workbuddy): 主条被顶到选区上方时(选区贴屏底), 属性栏放主条下方会压住选区右下正在标的标注/正文 → 翻到主条上方(选区外)
             Rectangle cand = new Rectangle(x, y, propBar.Width, propBar.Height);
             Rectangle selv = RectangleToClient(sel);
