@@ -167,12 +167,30 @@ partial class ShotService
         readonly Color ink;
         int hover = -1;
         readonly ToolTip tip = new ToolTip();
-        const int RowH = 34, Pad = 4;
+        readonly int RowH, Pad;
+        readonly int Rad, RadRow;
+
+        // DPI 缩放系数: 本进程 PerMonitorV2 + AutoScaleMode.None → 逻辑尺寸被当物理像素直接渲染,
+        // 150% 屏上弹层只有 104px 宽 (PixPin 同款 166px) 显得又小又挤。这里手动按 DPI 放大。
+        public static float UiScale()
+        {
+            try
+            {
+                using (Graphics g = Graphics.FromHwnd(IntPtr.Zero))
+                    return Math.Max(1f, Math.Min(3f, g.DpiX / 96f));
+            }
+            catch { return 1f; }
+        }
 
         public StylePopup(int[] keys, System.Func<int, bool> isCurrent, Action<int> onPick, DrawerDel drawer, System.Func<int, string> tipper, Color ink)
         {
             this.keys = keys; this.isCurrent = isCurrent; this.onPick = onPick; this.drawer = drawer; this.tipper = tipper; this.ink = ink;
-            AutoScaleMode = AutoScaleMode.None; // DPI 缩放下 ClientSize 被 Font 缩放改写 → 行位与可见区错位蓝块被裁 (用户实测)
+            float s = UiScale();
+            RowH = (int)Math.Round(32 * s);   // PixPin 同款紧凑行高 32 (原 34)
+            Pad = (int)Math.Round(6 * s);     // 四周内边距 6 (原 4 → 蓝块几乎贴边)
+            Rad = (int)Math.Round(10 * s);
+            RadRow = (int)Math.Round(7 * s);
+            AutoScaleMode = AutoScaleMode.None; // 关自动缩放: 手动算尺寸, 双重缩放会让行位与可见区错位 (蓝块被裁)
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             TopMost = true;
@@ -180,8 +198,19 @@ partial class ShotService
             BackColor = Color.FromArgb(40, 41, 46);
             DoubleBuffered = true;
             KeyPreview = true;
-            Size = new Size(104, keys.Length * RowH + Pad * 2);
-            using (GraphicsPath gp = RoundPath(0, 0, Width, Height, 12)) Region = new Region(gp);
+            Size = new Size((int)Math.Round(104 * s), keys.Length * RowH + Pad * 2);
+            using (GraphicsPath gp = RoundPath(0, 0, Width, Height, Rad)) Region = new Region(gp);
+            Log(string.Format("StylePopup ctor: s={0:F3} Size={1}x{2} RowH={3} Pad={4}", s, Width, Height, RowH, Pad));
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            // WinForms PMv2 首次 Show 会按 DPI suggested rect 改写宽度 (实测 156→202, 高度不变),
+            // Region 若停留在构造时的 156 会把右侧 46px 内容整体裁掉 (用户实测"预览超出/被裁断")
+            // → 按最终 Width 重建 Region; 行布局 RowRect 本就按当前 Width 现算, 无需其它调整
+            using (GraphicsPath gp = RoundPath(0, 0, Width, Height, Rad)) Region = new Region(gp);
+            Log(string.Format("StylePopup shown: Size={0}x{1} region rebuilt", Width, Height));
         }
 
         static GraphicsPath RoundPath(int x, int y, int w, int h, int d)
@@ -195,7 +224,7 @@ partial class ShotService
             return gp;
         }
 
-        RectangleF RowRect(int i) { return new RectangleF(Pad, Pad + i * RowH, Width - Pad * 2, RowH - 4); }
+        RectangleF RowRect(int i) { return new RectangleF(Pad, Pad + i * RowH, Width - Pad * 2, RowH); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -209,10 +238,11 @@ partial class ShotService
                 if (i == hover || sel)
                 {
                     using (SolidBrush hb = new SolidBrush(i == hover ? Color.FromArgb(64, 142, 255) : Color.FromArgb(51, 133, 255)))
-                        using (GraphicsPath gp = RoundPath((int)row.X, (int)row.Y, (int)row.Width, (int)row.Height, 10))
+                        using (GraphicsPath gp = RoundPath((int)row.X, (int)row.Y, (int)row.Width, (int)row.Height, RadRow))
                             g.FillPath(hb, gp);
                 }
-                try { drawer(g, new RectangleF(row.X + 6, row.Y, row.Width - 12, row.Height), keys[i], ink); } catch { }
+                // 传已内缩 Pad 的行矩形: 调用方只需再留 2px 余量, 箭头预览不会顶到弹层边
+                try { drawer(g, row, keys[i], ink); } catch { }
             }
         }
 
@@ -1066,7 +1096,9 @@ partial class ShotService
             // 实线/双向: 线画到头底 (头不被线穿透) + 大实心头
             float b2x = (float)(x2 - hl * 0.72 * dxc), b2y = (float)(y2 - hl * 0.72 * dyc);
             double angB = Math.Atan2(y1 - y2, x1 - x2);
-            float b1x = (float)(x1 + hl * 0.72 * Math.Cos(angB)), b1y = (float)(y1 + hl * 0.72 * Math.Sin(angB));
+            // 左头尖端在 x1、头朝左 (angB 指向左, cos=-1): 头底必须在尖端【内侧】= x1 - hl*0.72*cos(angB)
+            // (写成 + 会把杆起点推到尖端外侧, 杆向左冒出一截 → 用户实测"双箭头左侧横线出了箭头")
+            float b1x = (float)(x1 - hl * 0.72 * Math.Cos(angB)), b1y = (float)(y1 - hl * 0.72 * Math.Sin(angB));
             // S_BOTH 杆必须从左头底 b1 起画到右头底 b2 — 之前从 x1(左尖端)起画, 杆穿出左箭头外 (用户实测)
             float shaftX1 = style == Annot.S_BOTH ? b1x : x1, shaftY1 = style == Annot.S_BOTH ? b1y : y1;
             g.DrawLine(p, shaftX1, shaftY1, b2x, b2y);
@@ -1496,17 +1528,18 @@ partial class ShotService
             styBtn = propBar.AddPreviewDropdown("箭头样式 (点选切换)", delegate
             {
                 // 自绘弹层: 预览直接调画布同一 DrawArrowEx — 预览与画布同源永不漂移, 无白底/黑条
+                float ps = StylePopup.UiScale();
                 StylePopup sp = new StylePopup(styleOrder,
                     delegate(int v) { return curArrowStyle == v; },
                     delegate(int v) { curArrowStyle = v; MarkProp(); },
                     delegate(Graphics g, RectangleF row, int key, Color ink2)
                     {
-                        using (Pen ap = new Pen(Color.FromArgb(232, 234, 240), 1.6f))
-                            DrawArrowEx(g, ap, row.X + 18, row.Y + row.Height / 2f, row.Right - 18, row.Y + row.Height / 2f, key, 0.62f);
+                        using (Pen ap = new Pen(Color.FromArgb(232, 234, 240), 1.6f * ps))
+                            DrawArrowEx(g, ap, row.X + 10f * ps, row.Y + row.Height / 2f, row.Right - 10f * ps, row.Y + row.Height / 2f, key, 0.62f);
                     },
                     delegate(int v) { return styleNames[System.Array.IndexOf(styleOrder, v)]; },
                     Color.FromArgb(232, 234, 240));
-                Point pos = propBar.PointToScreen(new Point(styBtn.Rect.X, styBtn.Rect.Bottom + 2));
+                Point pos = propBar.PointToScreen(new Point(styBtn.Rect.X, styBtn.Rect.Bottom + 4));
                 sp.Location = pos;
                 sp.Show();
             }, arrowOnly);
@@ -1524,15 +1557,15 @@ partial class ShotService
                     delegate(int k) { curWidth = k / 10f; MarkProp(); },
                     delegate(Graphics g, RectangleF row, int key, Color ink2)
                     {
-                        using (Pen wp = new Pen(ink2, key / 10f))
+                        using (Pen wp = new Pen(ink2, key / 10f * StylePopup.UiScale()))
                         {
                             wp.StartCap = System.Drawing.Drawing2D.LineCap.Round; wp.EndCap = System.Drawing.Drawing2D.LineCap.Round;
-                            g.DrawLine(wp, row.X + 18, row.Y + row.Height / 2f, row.Right - 18, row.Y + row.Height / 2f);
+                            g.DrawLine(wp, row.X + 10f * StylePopup.UiScale(), row.Y + row.Height / 2f, row.Right - 10f * StylePopup.UiScale(), row.Y + row.Height / 2f);
                         }
                     },
                     delegate(int k) { return k == 20 ? "细线" : (k == 35 ? "中线" : "粗线"); },
                     Color.FromArgb(232, 234, 240));
-                Point pos = propBar.PointToScreen(new Point(wdBtn.Rect.X, wdBtn.Rect.Bottom + 2));
+                Point pos = propBar.PointToScreen(new Point(wdBtn.Rect.X, wdBtn.Rect.Bottom + 4));
                 sp.Location = pos;
                 sp.Show();
             }, lineTools);
@@ -2205,7 +2238,7 @@ partial class ShotService
         public ToolbarPanel()
         {
             DoubleBuffered = true;
-            BackColor = Color.FromArgb(26, 27, 31);
+            BackColor = Color.FromArgb(40, 41, 46); // 与 StylePopup 弹层同色 (原 26,27,31 近黑 → 与弹层深灰叠出"白黑套色"两层色)
         }
 
         public Btn Add(string icon, string tipText, Action onClick, bool toggle = false, string[] forTools = null)
@@ -2544,7 +2577,7 @@ partial class ShotService
                     using (SolidBrush sb = new SolidBrush(b.Swatch))
                         g.FillEllipse(sb, b.Rect.X + 10, b.Rect.Y + 10, 20, 20);
                     if (!b.Enabled)
-                        using (SolidBrush dim = new SolidBrush(Color.FromArgb(140, 26, 27, 31)))
+                        using (SolidBrush dim = new SolidBrush(Color.FromArgb(140, 40, 41, 46)))
                             g.FillEllipse(dim, b.Rect.X + 10, b.Rect.Y + 10, 20, 20);
                     continue;
                 }
