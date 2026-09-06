@@ -167,10 +167,12 @@ partial class ShotService
         readonly Color ink;
         int hover = -1;
         readonly ToolTip tip = new ToolTip();
+        const int RowH = 34, Pad = 4;
 
         public StylePopup(int[] keys, System.Func<int, bool> isCurrent, Action<int> onPick, DrawerDel drawer, System.Func<int, string> tipper, Color ink)
         {
             this.keys = keys; this.isCurrent = isCurrent; this.onPick = onPick; this.drawer = drawer; this.tipper = tipper; this.ink = ink;
+            AutoScaleMode = AutoScaleMode.None; // DPI 缩放下 ClientSize 被 Font 缩放改写 → 行位与可见区错位蓝块被裁 (用户实测)
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             TopMost = true;
@@ -178,9 +180,8 @@ partial class ShotService
             BackColor = Color.FromArgb(40, 41, 46);
             DoubleBuffered = true;
             KeyPreview = true;
-            int w = 100, h = keys.Length * 34 + 8;
-            ClientSize = new Size(w, h);
-            using (GraphicsPath gp = RoundPath(0, 0, w, h, 14)) Region = new Region(gp);
+            Size = new Size(104, keys.Length * RowH + Pad * 2);
+            using (GraphicsPath gp = RoundPath(0, 0, Width, Height, 12)) Region = new Region(gp);
         }
 
         static GraphicsPath RoundPath(int x, int y, int w, int h, int d)
@@ -194,6 +195,8 @@ partial class ShotService
             return gp;
         }
 
+        RectangleF RowRect(int i) { return new RectangleF(Pad, Pad + i * RowH, Width - Pad * 2, RowH - 4); }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
@@ -201,23 +204,23 @@ partial class ShotService
             g.Clear(Color.FromArgb(40, 41, 46));
             for (int i = 0; i < keys.Length; i++)
             {
-                RectangleF row = new RectangleF(4, 4 + i * 34, ClientSize.Width - 8, 30);
+                RectangleF row = RowRect(i);
                 bool sel = isCurrent != null && isCurrent(keys[i]);
                 if (i == hover || sel)
                 {
                     using (SolidBrush hb = new SolidBrush(i == hover ? Color.FromArgb(64, 142, 255) : Color.FromArgb(51, 133, 255)))
-                        using (GraphicsPath gp = RoundPath((int)row.X, (int)row.Y, (int)row.Width, (int)row.Height, 12))
+                        using (GraphicsPath gp = RoundPath((int)row.X, (int)row.Y, (int)row.Width, (int)row.Height, 10))
                             g.FillPath(hb, gp);
                 }
-                try { drawer(g, new RectangleF(row.X + 8, row.Y, row.Width - 16, row.Height), keys[i], ink); } catch { }
+                try { drawer(g, new RectangleF(row.X + 6, row.Y, row.Width - 12, row.Height), keys[i], ink); } catch { }
             }
         }
 
         int RowAt(Point pt)
         {
-            if (pt.X < 4 || pt.X > ClientSize.Width - 4) return -1;
-            int i = (pt.Y - 4) / 34;
-            if (i < 0 || i >= keys.Length || pt.Y < 4 || pt.Y > ClientSize.Height - 4) return -1;
+            if (pt.X < Pad || pt.X > Width - Pad) return -1;
+            int i = (pt.Y - Pad) / RowH;
+            if (i < 0 || i >= keys.Length || pt.Y < Pad || pt.Y > Height - Pad) return -1;
             return i;
         }
 
@@ -229,7 +232,7 @@ partial class ShotService
             {
                 hover = r;
                 Invalidate();
-                try { if (r >= 0 && tipper != null) tip.Show(tipper(keys[r]), this, e.X + 12, e.Y + 18, 1200); else tip.Hide(this); } catch { }
+                try { if (r >= 0 && tipper != null) tip.Show(tipper(keys[r]), this, e.X + 12, e.Y + 18, 1500); else tip.Hide(this); } catch { }
             }
         }
 
@@ -239,7 +242,7 @@ partial class ShotService
         {
             base.OnMouseDown(e);
             int r = RowAt(e.Location);
-            if (r >= 0 && onPick != null) { onPick(keys[r]); }
+            if (r >= 0 && onPick != null) onPick(keys[r]);
             Close();
         }
 
@@ -992,11 +995,12 @@ partial class ShotService
 
         // 箭头 6 样式 (照 PixPin): 实线 / 双向 / 细尾锥形 / 空心 / 标注线(双竖杠) / 直线
         // 头部大小随线宽缩放: hl=max(14, width*6) — 粗线大箭头 (用户实测要求)
-        static void DrawArrowEx(Graphics g, Pen p, float x1, float y1, float x2, float y2, int style)
+        static void DrawArrowEx(Graphics g, Pen p, float x1, float y1, float x2, float y2, int style) { DrawArrowEx(g, p, x1, y1, x2, y2, style, 1f); }
+        static void DrawArrowEx(Graphics g, Pen p, float x1, float y1, float x2, float y2, int style, float scale)
         {
             float w = p.Width;
-            float hl = Math.Max(26, w * 8f);   // 头长 (PixPin 比例: 大醒目)
-            float half = Math.Max(12, w * 4f); // 头底半宽
+            float hl = Math.Max(26, w * 8f) * scale;   // 头长 (PixPin 比例: 大醒目; 预览 scale 缩小)
+            float half = Math.Max(12, w * 4f) * scale; // 头底半宽
             double ang = Math.Atan2(y2 - y1, x2 - x1);
             double dxc = Math.Cos(ang), dyc = Math.Sin(ang);
             double pxc = -dyc, pyc = dxc;
@@ -1005,7 +1009,7 @@ partial class ShotService
 
             if (style == Annot.S_CALLOUT)
             {
-                float bl = Math.Min(10f, Math.Max(7f, w * 4f)); // 12 上限: 弹层行高容得下 (原 14 起会超界)
+                float bl = Math.Min(10f, Math.Max(7f, w * 4f)) * scale;
                 float ppx = (float)pxc, ppy = (float)pyc;
                 g.DrawLine(p, x1, y1, x2, y2);
                 g.DrawLine(p, x1 + bl * ppx, y1 + bl * ppy, x1 - bl * ppx, y1 - bl * ppy);
@@ -1043,10 +1047,10 @@ partial class ShotService
                 float L = (float)Math.Sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
                 if (L < 4) return;
                 float lw2 = Math.Max(2f, w * 1.2f);             // 描边稍细: 太粗会把锥度吃成"平行感" (用户观感反馈)
-                float hhl = Math.Max(22f, L * 0.22f);
+                float hhl = Math.Max(22f, L * 0.22f) * scale;
                 if (hhl > L * 0.6f) hhl = L * 0.6f;
                 float hs2 = L - hhl;
-                float hhw = Math.Max(5f, w * 3.1f);             // 锥度加大: 尾尖到头底全程明显张开
+                float hhw = Math.Max(5f, w * 3.1f) * scale;
                 float chw = hhw * 2.75f, sweep = hhl * 0.45f;
                 PointF[] poly = LocalArrow(new PointF[] {
                     new PointF(0, 0), new PointF(hs2, -hhw), new PointF(hs2 - sweep, -chw),
@@ -1497,8 +1501,8 @@ partial class ShotService
                     delegate(int v) { curArrowStyle = v; MarkProp(); },
                     delegate(Graphics g, RectangleF row, int key, Color ink2)
                     {
-                        using (Pen ap = new Pen(Color.FromArgb(232, 234, 240), 1.4f))
-                            DrawArrowEx(g, ap, row.X + 14, row.Y + row.Height / 2f, row.Right - 14, row.Y + row.Height / 2f, key);
+                        using (Pen ap = new Pen(Color.FromArgb(232, 234, 240), 1.6f))
+                            DrawArrowEx(g, ap, row.X + 18, row.Y + row.Height / 2f, row.Right - 18, row.Y + row.Height / 2f, key, 0.62f);
                     },
                     delegate(int v) { return styleNames[System.Array.IndexOf(styleOrder, v)]; },
                     Color.FromArgb(232, 234, 240));
@@ -1523,7 +1527,7 @@ partial class ShotService
                         using (Pen wp = new Pen(ink2, key / 10f))
                         {
                             wp.StartCap = System.Drawing.Drawing2D.LineCap.Round; wp.EndCap = System.Drawing.Drawing2D.LineCap.Round;
-                            g.DrawLine(wp, row.X + 16, row.Y + row.Height / 2f, row.Right - 16, row.Y + row.Height / 2f);
+                            g.DrawLine(wp, row.X + 18, row.Y + row.Height / 2f, row.Right - 18, row.Y + row.Height / 2f);
                         }
                     },
                     delegate(int k) { return k == 20 ? "细线" : (k == 35 ? "中线" : "粗线"); },
