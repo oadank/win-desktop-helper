@@ -26,6 +26,8 @@
   修复建议：CaptureOverlay.OnDeactivate → 若 GetForegroundWindow 已不属本进程则 Close()（注意区分工具条/ShowRecMenu/ResultForm 等自身子窗短暂夺焦，可按 pid 判断）；或失焦时把 overlay 拉回前台而非 busy,ignore。
   同一姿势复验通过的好消息：M1 重入防护 busy,ignore ✓；M2 焦点正常时 Esc 关闭+busy 复位 ✓；M3 拖框 mouseup sel=550x240→toolbar ✓；双击复制**无 use-after-dispose**（剪贴板 watcher 记录 clip image 300x200 md5 完整）——侦察阶段 3 个候选假警报全部如实划掉。
 
+【更正】局部截图工具栏/箭头二级工具栏已改由 WorkBuddy 接手修复完成（150×192 弹层已上线 build 17:06），你不用再做工具栏。本轮你只需要修两项：R9-1（hardlink 绕白名单）+ F1（遮罩失焦滞留 DoS），修完喊我复验。
+
 ## 端点小面扫尾（顺手）
 /win/wait 空标题秒回 found:true rect 1×1（可疑但不致命）；/window 不存在窗口、/monitors、/app/runas 缺参、/shot 负坐标均正常。无新 bug。
 
