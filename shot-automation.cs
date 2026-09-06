@@ -397,8 +397,17 @@ partial class ShotService
     }
 
     // UIA 调用硬超时: 超时返回降级提示 (后台线程 IsBackground, 进程退出不受影响)
+    static readonly List<string> uiaLeaked = new List<string>(); // 超时未死线程登记 (tool@时间), /diag/threads 可查
+    static int uiaLeakedCount { get { lock (uiaLeaked) return uiaLeaked.Count; } }
+
     static string UiCall(string toolName, Func<string> fn, int ms)
     {
+        // E1 熔断: UIA COM 调用无法强杀, 泄漏线程会自旋烧 CPU — 攒够 3 个就拒绝一切新 ui 调用直到服务重启
+        if (uiaLeakedCount >= 3)
+        {
+            Log("ui call fused: " + uiaLeakedCount + " leaked threads");
+            return "{\"ok\":false,\"error\":\"UIA fused: " + uiaLeakedCount + " leaked worker threads (大DOM 超时不可杀)。请重启 shot-service.exe; 期间改用 /shot 截图+坐标操作\",\"leaked\":" + uiaLeakedCount + "}";
+        }
         string outp = null;
         Thread th = new Thread(new ThreadStart(delegate
         {
@@ -409,26 +418,11 @@ partial class ShotService
         th.Start();
         if (!th.Join(ms))
         {
-            Log("uia timeout " + toolName + " >" + ms + "ms (大DOM?)");
+            lock (uiaLeaked) uiaLeaked.Add(toolName + "@" + DateTime.Now.ToString("HH:mm:ss"));
+            Log("uia timeout " + toolName + " >" + ms + "ms (大DOM?), leaked thread now " + uiaLeakedCount);
             return "{\"ok\":false,\"error\":\"UIA timeout " + ms + "ms - 疑似大DOM(Electron/聊天应用)。降级: /shot 截图+坐标操作, 或更小 max, 或 ui_find 精确 name\"}";
         }
         return outp ?? "{\"ok\":false,\"error\":\"uia internal\"}";
-    }
-
-    // 精确 name/type -> UIA Condition (服务端过滤, 大DOM 秒回); 返回 null 表示需要客户端 contains 遍历
-    static System.Windows.Automation.Condition NameTypeCond(string nm, string typeFilter)
-    {
-        var conds = new List<System.Windows.Automation.Condition>();
-        if (nm != "") conds.Add(new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, nm));
-        if (typeFilter != "")
-        {
-            var fi = typeof(System.Windows.Automation.ControlType).GetField(typeFilter, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-            if (fi == null) return null; // 未知类型名 → 交给客户端匹配
-            conds.Add(new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, fi.GetValue(null)));
-        }
-        if (conds.Count == 0) return null;
-        if (conds.Count == 1) return conds[0];
-        return new System.Windows.Automation.AndCondition(conds.ToArray());
     }
 
     static string UiResolveHwnd(Dictionary<string, string> q)
@@ -511,19 +505,7 @@ partial class ShotService
         if (nm != "")
         {
             string typeFilter = q.ContainsKey("type") ? q["type"] : "";
-            // 快路径: 服务端精确过滤 (D6 建议②, 大DOM 秒回)
-            try
-            {
-                var cond = NameTypeCond(nm, typeFilter);
-                if (cond != null)
-                {
-                    var hit = root.FindFirst(System.Windows.Automation.TreeScope.Descendants, cond);
-                    if (hit != null) return hit;
-                    if (typeFilter != "") return null; // 精确+type 无命中 = 确无此元素
-                }
-            }
-            catch { }
-            var all = WalkLimited(root, 1200);
+            var all = WalkLimited(root, 1200); // E1: 服务端 FindFirst 也是全树物化(泄漏同源), 统一 walk 计数即停
             System.Windows.Automation.AutomationElement exact = null, contains = null;
             for (int i = 0; i < all.Count; i++)
             {
@@ -562,33 +544,7 @@ partial class ShotService
             string nm = q.ContainsKey("name") ? q["name"] : "";
             string typeFilter = q.ContainsKey("type") ? q["type"] : "";
             if (nm == "" && typeFilter == "") return "{\"ok\":false,\"error\":\"need name and/or type\"}";
-            // 快路径: 服务端精确过滤, 大DOM 不挂 (D6 建议②)
-            try
-            {
-                var cond0 = NameTypeCond(nm, typeFilter);
-                if (cond0 != null)
-                {
-                    var fast = root.FindAll(System.Windows.Automation.TreeScope.Descendants, cond0);
-                    if (fast.Count > 0 || typeFilter != "")
-                    {
-                        var fitems = new List<string>();
-                        for (int i = 0; i < fast.Count && i < 100; i++)
-                        {
-                            var fe = fast[i];
-                            string fen = ""; try { fen = fe.Current.Name ?? ""; } catch { }
-                            string fct = ""; try { fct = fe.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); } catch { fct = "?"; }
-                            bool fenb = true; try { fenb = fe.Current.IsEnabled; } catch { }
-                            System.Windows.Rect fr = new System.Windows.Rect(0, 0, 0, 0); try { fr = fe.Current.BoundingRectangle; } catch { }
-                            if (fr.X < -30000 || fr.Width < 0) fr = new System.Windows.Rect(0, 0, 0, 0);
-                            fitems.Add("{\"i\":" + i + ",\"name\":\"" + JsonEscape(fen) + "\",\"type\":\"" + JsonEscape(fct) + "\",\"enabled\":" + (fenb ? "true" : "false") +
-                                       ",\"rect\":{\"x\":" + (int)fr.X + ",\"y\":" + (int)fr.Y + ",\"w\":" + (int)fr.Width + ",\"h\":" + (int)fr.Height + "}}");
-                        }
-                        return "{\"ok\":true,\"name\":\"" + JsonEscape(nm) + "\",\"type\":\"" + JsonEscape(typeFilter) + "\",\"count\":" + fitems.Count + ",\"match\":\"exact\",\"elements\":[" + string.Join(",", fitems.ToArray()) + "]}";
-                    }
-                }
-            }
-            catch { }
-            var all = WalkLimited(root, 1500); // contains 降级: 有上限遍历 (D6)
+            var all = WalkLimited(root, 1500); // E1: 唯一路径 = 计数即停遍历 (服务端 FindAll 全树物化会永久阻塞泄漏线程)
             var items = new List<string>();
             for (int i = 0; i < all.Count; i++)
             {

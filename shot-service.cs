@@ -1115,6 +1115,11 @@ public partial class ShotService
                 }
                 else if (path == "/active") { body = ActiveWindowJson(); }
                 else if (path == "/apps") { body = AppList(); Log("[apps] list"); }
+                else if (path == "/diag/threads")
+                {
+                    string[] lt; lock (uiaLeaked) lt = uiaLeaked.ToArray();
+                    body = "{\"ok\":true,\"uiaLeaked\":" + lt.Length + ",\"fused\":" + (lt.Length >= 3 ? "true" : "false") + ",\"entries\":[" + string.Join(",", Array.ConvertAll(lt, x => "\"" + JsonEscape(x) + "\"")) + "],\"hint\":\"泄漏线程来自 UIA 大DOM 超时(无法强杀); fused=true 时所有 /ui/* 将拒绝直到重启\"}";
+                }
                 else if (path.StartsWith("/img/"))
                 {
                     // 托管 Screenshots 目录下的图片: /img/<文件名> → PNG 字节
