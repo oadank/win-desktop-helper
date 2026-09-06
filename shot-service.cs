@@ -499,7 +499,7 @@ public partial class ShotService
     static readonly List<string> clipHist = new List<string>();
     static readonly object clipLock = new object();
     static string lastClipText = "";
-    static long lastClipImgFp = 0; // 剪贴板图片指纹 (去重: 轮询会反复读到同一张)
+    static string lastClipImgHash = ""; // 剪贴板图片 MD5 (精确去重, 轮询防重复入库)
     static string clipHotkeyName = "";   // 实际注册成功的组合(候选自动降级)
     static Form clipHistWin;             // 当前打开的剪贴板历史窗(单例: 再按热键=关闭, 不叠窗)
     static readonly string ClipStorePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "clipboard-history.json");
@@ -579,23 +579,15 @@ public partial class ShotService
             {
                 if (clipEnabled == 1 && Clipboard.ContainsImage())
                 {
-                    // 图片入历史: 存 PNG 落盘, 历史条目 "[图片] 路径" (AI 可 Read 该图/OCR/传多模态); 指纹去重
+                    // 图片入历史: MD5 命名入库(同图去重精确到字节, 3采样点漏检已根治), 条目 "[图片] 路径" (AI 可 Read 该图/OCR/传多模态)
                     Image img = Clipboard.GetImage();
                     if (img != null)
                     {
-                        long fp = img.Width * 1000003L + img.Height;
-                        using (Bitmap b = new Bitmap(img))
+                        string hash;
+                        string path = SaveClipboardImage(img, out hash);
+                        if (hash != "" && hash != lastClipImgHash)
                         {
-                            fp += b.GetPixel(5, 5).ToArgb();
-                            fp += b.GetPixel(b.Width / 2, b.Height / 2).ToArgb();
-                            fp += b.GetPixel(b.Width - 6, b.Height - 6).ToArgb();
-                        }
-                        if (fp != lastClipImgFp)
-                        {
-                            lastClipImgFp = fp;
-                            string name = "clip_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
-                            string path = Path.Combine(ShotDir, name);
-                            img.Save(path, ImageFormat.Png);
+                            lastClipImgHash = hash;
                             string entry = "[图片] " + path;
                             lock (clipLock)
                             {
@@ -603,7 +595,8 @@ public partial class ShotService
                                 clipHist.Insert(0, entry);
                                 while (clipHist.Count > clipMax) clipHist.RemoveAt(clipHist.Count - 1);
                             }
-                            Log("clip image captured " + img.Width + "x" + img.Height + " -> " + name);
+                            SaveClipHistory(); // 图片条目即时持久化 (此前只在文本复制时被顺带保存, 重启即丢)
+                            Log("clip image captured " + img.Width + "x" + img.Height + " md5=" + (hash.Length > 8 ? hash.Substring(0, 8) : hash));
                         }
                         img.Dispose();
                     }
@@ -2144,7 +2137,7 @@ public partial class ShotService
             "{\"name\":\"active_window\",\"description\":\"获取当前活动窗口信息 {title,process,rect}\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"monitors\",\"description\":\"列出显示器元数据（分辨率/主屏/设备名）\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"mouse_move\",\"description\":\"移动鼠标到物理像素坐标\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\"]}}," +
-            "{\"name\":\"mouse_click\",\"description\":\"点击（带坐标先移动再点）。button=left|right|middle，double=1 双击，triple=1 三击(选整行)，mods=shift/ctrl/alt 修饰键按住点击\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"},\"triple\":{\"type\":\"number\"},\"mods\":{\"type\":\"string\"}}}}," +
+            "{\"name\":\"mouse_click\",\"description\":\"点击。button=left|right|middle，double=1 双击，triple=1 三击选整行(坐标务必行内 rect.x+20 以上, 左边缘2px触发全选实测坑)，mods=shift/ctrl/alt 按住修饰键点击(选范围/多选)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"},\"triple\":{\"type\":\"number\"},\"mods\":{\"type\":\"string\"}}}}," +
             "{\"name\":\"mouse_scroll\",\"description\":\"滚轮：正数=向上滚，负数=向下滚（典型 ±120/格）。可选 x,y 先移动到目标坐标再滚\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"delta\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"delta\"]}}," +
             "{\"name\":\"keyboard_type\",\"description\":\"向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," +
             "{\"name\":\"keyboard_press\",\"description\":\"按组合键，如 ctrl+shift+a / enter / alt+f4 / win / ctrl+s\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"}},\"required\":[\"keys\"]}}," +

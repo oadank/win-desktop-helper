@@ -295,6 +295,22 @@ partial class ShotService
         return "{\"ok\":true,\"chars\":" + text.Length + "}";
     }
 
+    // 剪贴板图片统一入库: PNG 字节 MD5 作文件名 — 同图去重(3点采样漏检根治) + 重复读零落盘(轮询刷盘根治)
+    static string SaveClipboardImage(Image img, out string hash)
+    {
+        hash = "";
+        using (System.IO.MemoryStream ms = new System.IO.MemoryStream())
+        {
+            img.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+            byte[] data = ms.ToArray();
+            using (System.Security.Cryptography.MD5 md5 = System.Security.Cryptography.MD5.Create())
+                hash = BitConverter.ToString(md5.ComputeHash(data)).Replace("-", "");
+            string path = System.IO.Path.Combine(ShotDir, "clip_" + hash + ".png");
+            if (!System.IO.File.Exists(path)) { try { System.IO.File.WriteAllBytes(path, data); } catch (Exception ex) { Log("clip img save err: " + ex.Message); } }
+            return path;
+        }
+    }
+
     // 直读当前剪贴板 (多格式): text / image(存PNG返回路径, AI用Read看图) / files(复制的文件路径列表)
     static string ClipboardGet()
     {
@@ -308,13 +324,13 @@ partial class ShotService
                     Image img = System.Windows.Forms.Clipboard.GetImage();
                     if (img != null)
                     {
-                        string name = "clip_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
-                        string path = System.IO.Path.Combine(ShotDir, name);
-                        img.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                        string hash;
+                        string path = SaveClipboardImage(img, out hash); // MD5 命名: 同图复用不刷盘
+                        string name = System.IO.Path.GetFileName(path);
                         long bytes = new System.IO.FileInfo(path).Length;
                         result = "{\"ok\":true,\"type\":\"image\",\"file\":\"" + JsonEscape(path) +
                                  "\",\"url\":\"http://127.0.0.1:" + 18800 + "/img/" + JsonEscape(name) +
-                                 "\",\"w\":" + img.Width + ",\"h\":" + img.Height + ",\"bytes\":" + bytes + "}";
+                                 "\",\"w\":" + img.Width + ",\"h\":" + img.Height + ",\"bytes\":" + bytes + ",\"md5\":\"" + hash + "\"}";
                         img.Dispose();
                     }
                 }
@@ -455,7 +471,8 @@ partial class ShotService
         return list[idx];
     }
 
-    // 按名称查元素 (只查不点): name= 必填, type= 可选过滤; 返回全部匹配 {i,name,type,rect,enabled}
+    // 按名称/类型查元素 (只查不点): name= 与 type= 至少一个; 返回全部匹配 {i,name,type,rect,enabled}
+    // 注意: i 是当次遍历序号, 仅本次响应内有效, 跨调用必须重新查 (UIA 树会变)
     static string UiFind(Dictionary<string, string> q)
     {
         try
@@ -465,8 +482,8 @@ partial class ShotService
             IntPtr h = new IntPtr(long.Parse(hwndStr));
             var root = System.Windows.Automation.AutomationElement.FromHandle(h);
             string nm = q.ContainsKey("name") ? q["name"] : "";
-            if (nm == "") return "{\"ok\":false,\"error\":\"need name\"}";
             string typeFilter = q.ContainsKey("type") ? q["type"] : "";
+            if (nm == "" && typeFilter == "") return "{\"ok\":false,\"error\":\"need name and/or type\"}";
             var all = root.FindAll(System.Windows.Automation.TreeScope.Descendants, System.Windows.Automation.Condition.TrueCondition);
             var items = new List<string>();
             for (int i = 0; i < all.Count; i++)
@@ -474,7 +491,7 @@ partial class ShotService
                 var e = all[i];
                 string en = "";
                 try { en = e.Current.Name ?? ""; } catch { }
-                if (en.Length == 0 || en.IndexOf(nm, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                if (nm != "" && en.IndexOf(nm, StringComparison.OrdinalIgnoreCase) < 0) continue;
                 string ct = "";
                 try { ct = e.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); } catch { ct = "?"; }
                 if (typeFilter != "" && !ct.Equals(typeFilter, StringComparison.OrdinalIgnoreCase)) continue;
@@ -486,12 +503,13 @@ partial class ShotService
                           "\",\"enabled\":" + (enb ? "true" : "false") +
                           ",\"rect\":{\"x\":" + (int)r2.X + ",\"y\":" + (int)r2.Y + ",\"w\":" + (int)r2.Width + ",\"h\":" + (int)r2.Height + "}}");
             }
-            return "{\"ok\":true,\"name\":\"" + JsonEscape(nm) + "\",\"count\":" + items.Count + ",\"elements\":[" + string.Join(",", items.ToArray()) + "]}";
+            return "{\"ok\":true,\"name\":\"" + JsonEscape(nm) + "\",\"type\":\"" + JsonEscape(typeFilter) + "\",\"count\":" + items.Count + ",\"elements\":[" + string.Join(",", items.ToArray()) + "]}";
         }
         catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; }
     }
 
-    // 设置编辑控件选区 (EM_SETSEL): title/name/i 定位控件, start/end=字符范围; 仅 Win32 Edit/RichEdit 系支持
+    // 设置编辑控件选区 (EM_SETSEL): title/name/i 定位控件, start/end=字符范围(必须都给, 非负); 仅 Win32 Edit/RichEdit 系支持
+    // 越界 clamp 回 clamped:true; start>end 交换回 swapped:true; 相等=光标 collapsed:true — 杜绝假成功
     static string UiSelect(Dictionary<string, string> q)
     {
         try
@@ -499,16 +517,39 @@ partial class ShotService
             var e = UiElement(q);
             if (e == null) return "{\"ok\":false,\"error\":\"element not found (bad i/name/window)\"}";
             int start = 0, end = 0;
-            TryInt(q, "start", out start); TryInt(q, "end", out end);
+            bool hs = q.ContainsKey("start") && int.TryParse(q["start"], out start);
+            bool he = q.ContainsKey("end") && int.TryParse(q["end"], out end);
+            if (!hs || !he) return "{\"ok\":false,\"error\":\"need both start and end (integers; equal values = collapsed caret)\"}";
+            if (start < 0 || end < 0) return "{\"ok\":false,\"error\":\"start/end must be >= 0\"}";
             IntPtr ch = IntPtr.Zero;
             try { ch = new IntPtr(e.Current.NativeWindowHandle); } catch { }
-            if (ch == IntPtr.Zero) return "{\"ok\":false,\"error\":\"element has no native handle (用 click 定起点 + keyboard_press shift+end 代替)\"}";
-            SendMessage(ch, 0x00B1, (IntPtr)start, (IntPtr)end); // EM_SETSEL
-            SendMessage(ch, 0x00B7, IntPtr.Zero, IntPtr.Zero);   // EM_SCROLLCARET 滚到光标可见
-            string nm = "";
-            try { nm = e.Current.Name ?? ""; } catch { }
-            Log("ui select [" + start + "," + end + ") " + nm);
-            return "{\"ok\":true,\"start\":" + start + ",\"end\":" + end + ",\"name\":\"" + JsonEscape(nm) + "\"}";
+            if (ch == IntPtr.Zero) return "{\"ok\":false,\"error\":\"element has no native handle (用 click 定起点 + click mods=shift 定终点代替)\"}";
+            bool swapped = false, clamped = false;
+            if (start > end) { int x = start; start = end; end = x; swapped = true; }
+            int len = -1; // 文本长度 (Edit/Document 走 ValuePattern)
+            try
+            {
+                object vp;
+                if (e.TryGetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern, out vp))
+                {
+                    string v = ((System.Windows.Automation.ValuePattern)vp).Current.Value;
+                    if (v != null) len = v.Length;
+                }
+            }
+            catch { }
+            if (len >= 0 && end > len) { end = len; clamped = true; }
+            string elname = "";
+            try { elname = e.Current.Name ?? ""; } catch { }
+            if (start == end)
+            {
+                SendMessage(ch, 0x00B1, (IntPtr)start, (IntPtr)start); // EM_SETSEL 同位 = 光标定位
+                SendMessage(ch, 0x00B7, IntPtr.Zero, IntPtr.Zero);
+                return "{\"ok\":true,\"collapsed\":true,\"caret\":" + start + (clamped ? ",\"clamped\":true" : "") + ",\"name\":\"" + JsonEscape(elname) + "\"}";
+            }
+            SendMessage(ch, 0x00B1, (IntPtr)start, (IntPtr)end);
+            SendMessage(ch, 0x00B7, IntPtr.Zero, IntPtr.Zero);
+            Log("ui select [" + start + "," + end + ") " + elname);
+            return "{\"ok\":true,\"start\":" + start + ",\"end\":" + end + (swapped ? ",\"swapped\":true" : "") + (clamped ? ",\"clamped\":true" : "") + ",\"name\":\"" + JsonEscape(elname) + "\"}";
         }
         catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; }
     }

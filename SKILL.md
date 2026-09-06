@@ -84,3 +84,41 @@
 1. **窗口截图拍不到 DirectWrite 内容**：Win11 记事本正文区（RichEditD2DPT 硬件层）在 /shot 截图里是黑的，只有状态栏等 GDI 部分可见。验证写入是否成功改用 **ui_read 读 value** 或看状态栏字符计数，别靠截图。修复方向：PrintWindow+PW_RENDERFULLCONTENT 或 DXGI 桌面复制。
 2. **app_run 返回的 pid 不是窗口进程**：Store 应用（记事本/计算器）启动器进程即刻退出，真实 UI 是 spawn 出的新进程（pid 不同、标题可能英文如 "无标题 - Notepad"）。定位一律用 window_info/active 看真实标题，别信 app_run 的 pid。
 3. **keyboard_type 盲打危险**：activate 失败后打字会打进用户正在用的前台窗口（实测打进了用户的终端）。铁律：active_window 确认前台 == 目标窗口后才许 type/press。
+
+## 2026-09-06 交叉测试（workbuddy 攻语义组+剪贴板多媒体）实测结论
+
+### 好消息（都可用，姿势照抄）
+- **图片通道端到端可用**：`/clipboard/set` 前若剪贴板是图 → `/clipboard/get` 回 `type=image` 并把 PNG 落盘 `C:\Users\oadan\Pictures\Screenshots\clip_*.png`，同时给出 `url=http://127.0.0.1:18800/img/<名>`。
+- **`/img/` URL 逐字节可靠**（801/801、2129/2129 字节精确，同文件重复 5 次全一致）——之前怀疑"URL 截断/0 字节"是**测试方的错**：把二进制按 UTF-8 解码统计、以及 curl 在 msys 下 `-o /c/...` 路径静默不落盘。**验字节数请用 python socket 收原始字节或 curl 用 Windows 路径**。
+- **`type` 优先级正确**：图 > 文件列表 > 文本 > empty。`Clipboard.SetFileDropList` → 回 `type=files, count, files[]`；`Clipboard.Clear()` → `type=empty`（不报错）。
+- **图片条目已持久化**：`clipboard-history.json` 里 `[图片] 路径` 条目正常落盘，实测 4 条全部存活无死链（50 条上限）。
+- **三击真的生效**：`/mouse/click?triple=1` 记事本里 3/3 命中**整行**，中文行/数字行都正确。
+
+### 待修的 4 个坑（按严重度）—— ✅ 2026-09-06 zcode 已全部修复 (build 09-06 09:4x)
+
+1. **图片去重 3 点采样指纹** → 已改 **PNG 字节 MD5 作文件名**（`SaveClipboardImage`），同图精确去重、异图（哪怕只差 1 像素）必入库；顺带根治 D5（轮询 /clipboard/get 不再重复落盘，同内容复用既有文件）。
+2. **三击左边缘=全选（RichEdit 边距行为）** → 无法在服务端修，已在 **bridge/内嵌 schema 描述**注明「坐标务必取行内 rect.x+20 以上、行垂直中线」。
+3. **ui_select 假成功** → 已全参数校验：start/end 必须都给且非负（否则 ok:false），越界 clamp 返回 `clamped:true`，start>end 交换返回 `swapped:true`，相等返回 `collapsed:true`（光标定位语义），杜绝静默吞参数。
+4. **ui_find 不支持 type-only + 索引 i 不稳定** → ui_find 已支持 name 和/或 type（至少一个），bridge 空串不再被吞（`!== undefined` 透传）；ui_find/ui_tree 描述已注明「i 仅本次响应内有效，跨调用重查」。
+5. **图片历史条目不持久化（D4）** → 图片分支已补 `SaveClipHistory()` 即时落盘，重启/崩溃不再丢图片历史。
+
+
+### 有效测试姿势（复用）
+- 验证"选中/复制"类操作一律用**哨兵法**：`/clipboard/set?text=SENT-XX` → 操作 → `ctrl+c` → `/clipboard/get`，值没变即"未生效"，避免把上次残留选择误判成功（本人上一轮 C1f/C1g 就是这么误判成"复制了残留"，实为"未生效+假成功"）。
+- 需要行几何时无 `/ui/lines` 端点：用**三击阶梯探针**（固定 x，y 从 `rect.y+12` 起每 8px 试一次，看复制内容何时换行）+ 二分定边界，实测量出行高≈27px。
+
+## 2026-09-06 追加两项（同一轮，已实测定位）
+5. **🟠 图片历史条目不持久化**：`ClipWatcherLoop` 图片分支入库后**漏调 `SaveClipHistory()`**（全文件仅文本/删除/清空三处调用）。实测唯一尺寸 401×303 的图已进内存 history，但 `clipboard-history.json` 里没有，直到下一次**文本复制**才被顺带写盘 → 期间服务重启/更新则图片条目全丢。修一行即可。
+6. **🟡 `/clipboard/get` 每次都新存一份 PNG**：同一张图连读 4 次 → 磁盘多出 4 个 `clip_*.png`（无内容去重）。**agent 侧纪律：不要用 `/clipboard/get` 轮询等用户复制**，会灌盘；要探测用 `clipboard_history`。
+
+## 🔴 2026-09-06 重大自伤坑：给聊天类输入框 `keyboard/type` 打多行文本 = 自动连发多条
+
+**实测**：向 ZCode 对话输入框打 1466 字（含 20 个 `\n`）的结论 → `{"ok":true,"chars":1472}` 返回"成功"，但**只有第一行成了消息被发出**（聊天框 Enter 即发送），后续段落全部丢失/散投，且对方的输入框被留下残留 `\n`。这是**污染用户对话**级别的事故。
+
+**纪律（对所有聊天/搜索/命令框适用）**：
+1. 多行文本**绝不**直接 `keyboard/type` —— 换行会被当回车。
+2. 正确姿势：**剪贴板粘贴法**
+   `clipboard_set?text=<整段含换行>` → 点输入框 → `/keyboard/press?keys=ctrl+v`（粘贴不触发发送，换行原样保留）→ 校验 → 最后只按**一次** `enter`。
+3. 单行短消息才允许直接 `keyboard/type`，且打之前把文本里的 `\n`/`\r` 全换成 `；`。
+4. **`/ui/read?i=` 的索引会随消息流实时漂移**（实测同一输入框在一分钟内 i=637→644→659→664）：验证送达一律用 **`/ui/read?title=X&name=<占位符文本>`**（按 name 定位），别缓存 i、更别因"读不到"就以为没发出去而重发。
+5. 发送前必查**对方是否空闲**：ZCode 生成中时按钮是"停止生成"；此时发消息会进"排队"（占位符也从"提出后续修改要求"变成"继续输入以排队后续修改"），语义不同，先等它跑完。

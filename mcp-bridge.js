@@ -90,7 +90,7 @@ const TOOLS = [
         x: { type: 'number' }, y: { type: 'number' },
         button: { type: 'string', description: 'left|right|middle' },
         double: { type: 'number', description: '0|1' },
-        triple: { type: 'number', description: '0|1 三连击' },
+        triple: { type: 'number', description: '0|1 三连击(选整行/段); 坐标务必取行内 rect.x+20 以上、行垂直中线 —— 打左边缘 2px 会被 RichEdit 边距命中区变成全选(实测坑)' },
         mods: { type: 'string', description: 'shift|ctrl|alt|win，可组合如 ctrl+shift' }
       }
     }
@@ -183,7 +183,7 @@ const TOOLS = [
   },
   {
     name: 'clipboard_get',
-    description: '直读当前剪贴板(多格式): type=text 返回文本; type=image 返回 PNG 文件路径(用 Read 看图/OCR/传多模态——用户截屏后 agent 即可读图); type=files 返回复制的文件路径列表。读选中文字 = 先 keyboard_press ctrl+c 再调本工具',
+    description: '直读当前剪贴板(多格式): type=text 返回文本; type=image 返回 PNG 文件路径+md5(用 Read 看图/OCR/传多模态——用户截屏后 agent 即可读图; 同内容图片 md5 相同不重复落盘); type=files 返回复制的文件路径列表。读选中文字 = 先 keyboard_press ctrl+c 再调本工具',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} }
   },
   {
@@ -222,19 +222,18 @@ const TOOLS = [
   },
   {
     name: 'ui_find',
-    description: '按名称查控件(只查不点): 返回全部匹配 {i,name,type,rect,enabled}。name= 必填(模糊), type= 可选。先 find 确认再 click/set',
+    description: '按名称/类型查控件(只查不点): 返回全部匹配 {i,name,type,rect,enabled}。name=(模糊) 与 type=(精确类名如 Button/MenuItem) 至少给一个。注意: i 仅本次响应内有效, 跨调用必须重查。先 find 确认再 click/set',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         title: { type: 'string' }, hwnd: { type: 'number' },
         name: { type: 'string' }, type: { type: 'string' }
-      },
-      required: ['name']
+      }
     }
   },
   {
     name: 'ui_select',
-    description: '设置编辑控件选区 (EM_SETSEL, Win32 Edit/RichEdit 系): 定位控件(i 或 name), start/end=字符范围。配合 ctrl+c 读选中文本',
+    description: '设置编辑控件选区 (EM_SETSEL, Win32 Edit/RichEdit 系): 定位控件(i 或 name), start/end 必须都传且非负整数。越界自动 clamp(返回 clamped:true), start>end 交换(swapped:true), 相等=光标定位(collapsed:true)。配合 ctrl+c 读选中文本',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -431,8 +430,8 @@ function buildUrl(name, a) {
       let qs = [];
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
-      if (a.name) qs.push('name=' + enc(a.name));
-      if (a.type) qs.push('type=' + enc(a.type));
+      if (a.name !== undefined) qs.push('name=' + enc(a.name));
+      if (a.type !== undefined) qs.push('type=' + enc(a.type));
       return { path: '/ui/find', qs };
     }
     case 'ui_select': {
@@ -440,7 +439,7 @@ function buildUrl(name, a) {
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
       if (a.i !== undefined) qs.push('i=' + a.i);
-      if (a.name) qs.push('name=' + enc(a.name));
+      if (a.name !== undefined) qs.push('name=' + enc(a.name));
       qs.push('start=' + (a.start || 0), 'end=' + (a.end || 0));
       return { path: '/ui/select', qs };
     }
