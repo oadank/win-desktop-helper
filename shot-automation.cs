@@ -30,32 +30,55 @@ partial class ShotService
     const int GWL_EXSTYLE = -20;
     const int WS_EX_TOOLWINDOW = 0x80;
 
-    // 光标处最顶层的普通可见窗口 (跳过自己/工具窗/最小化), 供截图"自动窗口检测"
+    [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr parent, POINT pt, uint flags); // CWP_SKIPINVISIBLE|CWP_SKIPTRANSPARENT
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr h, ref POINT pt);
+    const uint CWP_SKIPINVISIBLE = 0x1, CWP_SKIPTRANSPARENT = 0x2;
+
+    // 光标处的检测目标窗口 (跳过自己/工具窗/最小化/cloaked 幻影/桌面), 并下钻到最深层子窗口。
+    // PixPin 同款灵敏度的关键 = 子窗口下钻: Electron/浏览器/IDE 的侧栏/正文/输入区都是子 HWND,
+    // 只回顶层时整个应用一个大框 (实测 zcode 高亮全窗); 下钻后高亮贴到内容区。深度上限防病态嵌套。
     static IntPtr WindowFromPointEx(POINT p, IntPtr exclude)
     {
-        IntPtr found = IntPtr.Zero;
+        IntPtr top = IntPtr.Zero;
+        uint myPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
         EnumWindows(delegate (IntPtr h, IntPtr lp)
         {
             try
             {
                 if (h == exclude || !IsWindowVisible(h)) return true;
                 if ((GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return true;
+                uint wpid; GetWindowThreadProcessId(h, out wpid);
+                if (wpid == myPid) return true; // 自家浮窗(结果/热键宿主)不参加检测
                 RECT r;
                 if (!GetWindowRect(h, out r)) return true;
                 if (r.Left < -30000) return true; // 最小化
                 if (p.x >= r.Left && p.x < r.Right && p.y >= r.Top && p.y < r.Bottom)
                 {
+                    int cloaked;
+                    if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return true; // UWP 幻影窗: rect 在但不可见
                     StringBuilder cn = new StringBuilder(64);
                     GetClassNameW(h, cn, 64);
                     string cname = cn.ToString();
                     if (cname == "Progman" || cname == "WorkerW") return true; // 桌面: 高亮全屏无意义
-                    found = h; return false;
+                    top = h; return false;
                 }
             }
             catch { }
             return true;
         }, IntPtr.Zero);
-        return found;
+        if (top == IntPtr.Zero) return IntPtr.Zero;
+        // 子窗口下钻: ChildWindowFromPointEx 的 pt 是父窗口客户区坐标, 每层都要 ScreenToClient
+        IntPtr cur = top;
+        for (int i = 0; i < 12; i++)
+        {
+            POINT cp = p; ScreenToClient(cur, ref cp);
+            IntPtr child = ChildWindowFromPointEx(cur, cp, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT);
+            if (child == IntPtr.Zero || child == cur) break;
+            RECT cr;
+            if (!GetWindowRect(child, out cr) || cr.Right <= cr.Left || cr.Bottom <= cr.Top) break;
+            cur = child;
+        }
+        return cur;
     }
 
     static string WinActivate(IntPtr h)

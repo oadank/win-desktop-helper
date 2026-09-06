@@ -382,6 +382,9 @@ partial class ShotService
         {
             base.OnShown(e);
             Activate(); // 拿焦点: Esc 才可达
+            // 开罩即高亮光标下窗口 (PixPin 同款: 不必先动鼠标); sp 直接就是屏幕坐标
+            try { POINT cp; GetCursorPos(out cp); UpdateHoverDetect(new Point(cp.x, cp.y)); } catch { }
+            StartHoverLoop(); // 后台持续检测 (HWND 下钻 + UIA 元素级)
             Log("capture: overlay shown bounds=" + Bounds);
         }
 
@@ -632,10 +635,7 @@ partial class ShotService
                     InvalidateAnnot(cur);
                 }
             }
-            else if (!hasSel && !pendingDown && tool == null && !textMode)
-            {
-                UpdateHoverDetect(sp); // 自动窗口检测
-            }
+            // 自动窗口检测已移至后台 HoverLoop (180ms 轮询 + UIA 元素级), 内联调用移除
         }
 
         // 只刷文字字形 (caret 闪烁用: 不带动四角按钮重绘, 按钮不闪)
@@ -724,6 +724,135 @@ partial class ShotService
             c.Inflate(40, 30);
             Invalidate(c);
             hoverWin = Rectangle.Empty;
+        }
+
+        // ---- 自动检测 v2 (PixPin 元素级灵敏度): 后台线程轮询光标, HWND 下钻 + UIA 子树命中。
+        // UIA 跨进程调用可能慢 (Electron 大树实测 8s 级), 绝不能上 UI 线程; 400ms 安全阀连续超限即停用本轮 UIA。
+        System.Threading.        Thread hoverThread;
+        volatile bool hoverStop = false;
+        volatile int uiaDisabled = 0;
+        volatile int uiaFailStreak = 0; // 连续慢/异常计数; 首查可能因 Chromium 惰性建树很慢, 连 5 次才停用
+
+        void StartHoverLoop()
+        {
+            if (hoverThread != null) return;
+            hoverThread = new System.Threading.Thread(HoverLoop);
+            hoverThread.IsBackground = true; // 永不阻塞进程退出
+            hoverThread.Start();
+        }
+
+        void HoverLoop()
+        {
+            Log("hover loop started");
+            Rectangle lastApplied = Rectangle.Empty; // 当前已生效的高亮框
+            Rectangle pendingCand = Rectangle.Empty; // 上一轮候选框 (防抖比对)
+            int waitCount = 0;
+            while (!hoverStop && !IsDisposed)
+            {
+                try
+                {
+                    POINT cp; GetCursorPos(out cp);
+                    var sp = new Point(cp.x, cp.y);
+                    Rectangle fin = Rectangle.Empty;
+                    IntPtr h = WindowFromPointEx(cp, Handle);
+                    if (h != IntPtr.Zero)
+                    {
+                        RECT r;
+                        if (GetWindowRect(h, out r) && r.Right > r.Left && r.Bottom > r.Top)
+                        {
+                            fin = new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
+                            // UIA 元素级细化: 找包含光标的最小元素矩形, 且必须落在 HWND 框内 (防抓到全屏怪元素)
+                            if (uiaDisabled == 0)
+                            {
+                                Rectangle uia = UiaRectAt(h, sp);
+                                if (uia != Rectangle.Empty && uia.Width > 8 && uia.Height > 8 && fin.Contains(uia)) fin = uia;
+                            }
+                        }
+                    }
+                    // 防抖: 新框需连续两轮一致才应用 (元素树抽风导致橙框来回跳);
+                    // 清空/从无到有/窗口级大切换 立即应用, 保证跟手
+                    bool immediate = fin == Rectangle.Empty || lastApplied == Rectangle.Empty ||
+                                     (fin.Width >= lastApplied.Width * 2 && fin.Height >= lastApplied.Height * 2);
+                    if (fin == lastApplied) { pendingCand = fin; waitCount = 0; }
+                    else if (fin == pendingCand || immediate) { ApplyHover(fin); lastApplied = fin; pendingCand = fin; waitCount = 0; }
+                    else { pendingCand = fin; waitCount++; }
+                }
+                catch { }
+                System.Threading.Thread.Sleep(180);
+            }
+        }
+
+        // UIA 子树命中: 在目标窗口辅助功能树里向下找包含 pt 的最小元素 (输入框/气泡/窗格级 = PixPin 手感来源)
+        Rectangle UiaRectAt(IntPtr hwnd, Point pt)
+        {
+            try
+            {
+                int dbgWalk = 0;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var cur = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+                for (int depth = 0; depth < 8; depth++)
+                {
+                    var kids = cur.FindAll(System.Windows.Automation.TreeScope.Children, System.Windows.Automation.Condition.TrueCondition);
+                    // walk 诊断日志已移除 (5Hz 刷屏)
+                    dbgWalk++;
+                    System.Windows.Automation.AutomationElement next = null;
+                    double best = double.MaxValue;
+                    foreach (System.Windows.Automation.AutomationElement k in kids)
+                    {
+                        try
+                        {
+                            // Chromium 渲染空壳: 无任何 a11y 子树, 钻进去就到头 → 跳过它走真分支
+                            if (k.Current.ClassName == "Intermediate D3D Window") continue;
+                            var r = k.Current.BoundingRectangle;
+                            if (r.IsEmpty || r.Width < 4 || r.Height < 4) continue;
+                            if (pt.X >= r.Left && pt.X < r.Right && pt.Y >= r.Top && pt.Y < r.Bottom)
+                            {
+                                double area = r.Width * r.Height;
+                                if (area < best) { best = area; next = k; }
+                            }
+                        }
+                        catch { }
+                    }
+                    if (next == null) break;
+                    cur = next;
+                }
+                var fr = cur.Current.BoundingRectangle; // 最深命中元素的矩形
+                if (sw.ElapsedMilliseconds > 500)
+                {
+                    // 首查可能因 Chromium 惰性建树很慢 (实测 1761ms), 连续 5 次才判残废
+                    if (++uiaFailStreak >= 5) { uiaDisabled = 1; Log("hover uia slow x5 -> disabled this session"); }
+                }
+                else uiaFailStreak = 0;
+                return fr.IsEmpty ? Rectangle.Empty : new Rectangle((int)fr.Left, (int)fr.Top, (int)fr.Width, (int)fr.Height);
+            }
+            catch (Exception ex)
+            {
+                if (++uiaFailStreak >= 5) { uiaDisabled = 1; Log("hover uia err x5: " + ex.Message); }
+                return Rectangle.Empty;
+            }
+        }
+
+        // 检测结果回 UI 线程: 换框 + 联合区域重绘 (选区已有时只更新字段不重绘, OnPaint 本来就不画 hover)
+        void ApplyHover(Rectangle nr)
+        {
+            try
+            {
+                if (IsDisposed) return;
+                BeginInvoke(new MethodInvoker(delegate
+                {
+                    try
+                    {
+                        if (IsDisposed || nr == hoverWin) return;
+                        Rectangle u = nr != Rectangle.Empty ? RectangleToClient(nr) : Rectangle.Empty;
+                        if (hoverWin != Rectangle.Empty)
+                            u = u != Rectangle.Empty ? Rectangle.Union(u, RectangleToClient(hoverWin)) : RectangleToClient(hoverWin);
+                        hoverWin = nr;
+                        if (!hasSel && u != Rectangle.Empty) { u.Inflate(40, 30); Invalidate(u); }
+                    }
+                    catch { }
+                }));
+            }
+            catch { }
         }
 
         // 文字输入: 宿主 TextBox 的字符经 KeyPreview 抬升到 Form (IME 确认后的中文照常)
