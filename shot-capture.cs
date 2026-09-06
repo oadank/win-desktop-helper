@@ -1323,14 +1323,8 @@ partial class ShotService
             if (propBar == null) { BuildPropBar(); }
             bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen" || tool == "text" || tool == "seq";
             if (!need) { propBar.Visible = false; return; }
-            // 分组可用性: 箭头样式仅箭头; 粗细对文字/序号无意义禁用; 字号仅文字/序号
-            foreach (var b in propBar.Btns)
-            {
-                if (b.ToolKey == null) continue;
-                if (b.ToolKey.StartsWith("sty")) b.Enabled = (tool == "arrow");
-                else if (b.ToolKey.StartsWith("w_")) b.Enabled = (tool != "text" && tool != "seq");
-                else if (b.ToolKey != null && b.ToolKey.StartsWith("f_")) b.Enabled = (tool == "text" || tool == "seq");
-            }
+            // PixPin 式显隐: 只显示当前工具相关属性 (不相关按钮直接隐藏, 悬空分隔线自动收敛)
+            propBar.ShowForTool(tool);
             MarkProp();
             PlacePropBar();
             propBar.Visible = true;
@@ -1338,21 +1332,51 @@ partial class ShotService
 
         void BuildPropBar()
         {
+            // PixPin 式属性栏: 只显示当前工具相关属性 (样式/粗细收成下拉按钮, 不再全量平铺一排)
             propBar = new ToolbarPanel();
-            propBar.Add("sty_arrow", "实线箭头", delegate { curArrowStyle = Annot.S_ARROW; MarkProp(); }).ToolKey = "sty_arrow";
-            propBar.Add("sty_both", "双向箭头", delegate { curArrowStyle = Annot.S_BOTH; MarkProp(); }).ToolKey = "sty_both";
-            propBar.Add("sty_line", "直线 (无箭头)", delegate { curArrowStyle = Annot.S_LINE; MarkProp(); }).ToolKey = "sty_line";
-            propBar.Add("sty_callout", "标注线 (两端竖杠)", delegate { curArrowStyle = Annot.S_CALLOUT; MarkProp(); }).ToolKey = "sty_callout";
-            propBar.AddSep();
-            propBar.Add("w_thin", "细线", delegate { curWidth = 2f; MarkProp(); }).ToolKey = "w_thin";
-            propBar.Add("w_mid", "中线", delegate { curWidth = 3.5f; MarkProp(); }).ToolKey = "w_mid";
-            propBar.Add("w_bold", "粗线", delegate { curWidth = 6f; MarkProp(); }).ToolKey = "w_bold";
-            propBar.AddSep();
-            fontBtn = propBar.AddText(curFontPt.ToString(), "字号 (文字/序号)", delegate { ShowFontMenu(); });
+            string[] lineTools = { "rect", "ellipse", "arrow", "pen" };
+            string[] textTools = { "text", "seq" };
+            // [箭头样式 ▾] 下拉 (仅箭头工具)
+            ToolbarPanel.Btn styBtn = null;
+            styBtn = propBar.AddText(StyleShort(curArrowStyle), "箭头样式 (点选切换)", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                int[] sv = { Annot.S_ARROW, Annot.S_BOTH, Annot.S_LINE, Annot.S_CALLOUT };
+                string[] sl = { "实线箭头", "双向箭头", "直线 (无箭头)", "标注线 (两端竖杠)" };
+                for (int i = 0; i < sv.Length; i++)
+                {
+                    int v = sv[i]; string lab = sl[i];
+                    ToolStripItem it = m.Items.Add(lab, null, delegate { curArrowStyle = v; MarkProp(); });
+                    if (curArrowStyle == v) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, styBtn.Rect.X, styBtn.Rect.Bottom + 2);
+            }, new[] { "arrow" });
+            styBtn.ToolKey = "styd";
+            propBar.AddSep(lineTools);
+            // [线宽 ▾] 下拉 (线条类工具)
+            ToolbarPanel.Btn wdBtn = null;
+            wdBtn = propBar.AddText(WidthShort(curWidth), "线条粗细", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                float[] wv = { 2f, 3.5f, 6f };
+                string[] wl = { "细线", "中线", "粗线" };
+                for (int i = 0; i < wv.Length; i++)
+                {
+                    float v = wv[i]; string lab = wl[i];
+                    ToolStripItem it = m.Items.Add(lab, null, delegate { curWidth = v; MarkProp(); });
+                    if (curWidth == v) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, wdBtn.Rect.X, wdBtn.Rect.Bottom + 2);
+            }, lineTools);
+            wdBtn.ToolKey = "wd";
+            propBar.AddSep(textTools);
+            // [字号] [字体] (文字/序号)
+            fontBtn = propBar.AddText(curFontPt.ToString(), "字号 (文字/序号)", delegate { ShowFontMenu(); }, textTools);
             fontBtn.ToolKey = "f_size";
-            familyBtn = propBar.AddText(FamilyShort(curFontFamily), "字体 (文字/序号)", delegate { ShowFamilyMenu(); });
+            familyBtn = propBar.AddText(FamilyShort(curFontFamily), "字体 (文字/序号)", delegate { ShowFamilyMenu(); }, textTools);
             familyBtn.ToolKey = "f_family";
             propBar.AddSep();
+            // [颜色] 全工具
             Color[] cols =
             {
                 Color.FromArgb(242, 80, 59),   // 红 (PixPin 默认)
@@ -1369,7 +1393,8 @@ partial class ShotService
                 Color c = cols[i];
                 propBar.AddColor(c, cnames[i], delegate { curColor = c; MarkProp(); }).ToolKey = "col" + i;
             }
-            // 序号: 格式 (1.2.3/I.II.III/a.b.c/A.B.C) + 起始数字 (PixPin 同款, 只影响新序号)
+            // [格式] [从N⇅] (仅序号)
+            propBar.AddSep(new[] { "seq" });
             ToolbarPanel.Btn fmtBtn = null;
             fmtBtn = propBar.AddText("1.2.3", "序号格式", delegate
             {
@@ -1386,9 +1411,8 @@ partial class ShotService
                     if (f == curSeqFmt) it.Font = new Font(it.Font, FontStyle.Bold);
                 }
                 m.Show(propBar, fmtBtn.Rect.X, fmtBtn.Rect.Bottom + 2);
-            });
+            }, new[] { "seq" });
             fmtBtn.ToolKey = "seqfmt";
-            // PixPin 同款一体化微调框: 左半当前值 右半上▲下▼ (点击上半+1 下半-1); 防独立按钮被重排推出屏幕
             ToolbarPanel.Btn startBtn = null;
             startBtn = propBar.AddSpinner("从" + seqNext, "序号起始数字 (▲+1 / ▼-1)", delegate(bool up)
             {
@@ -1396,28 +1420,31 @@ partial class ShotService
                 else { if (seqNext > 1) seqNext--; }
                 startBtn.DrawStr = "从" + seqNext; propBar.RelayoutNow();
                 Log("capture: seq start=" + seqNext);
-            });
+            }, new[] { "seq" });
             startBtn.ToolKey = "seqstart";
             Controls.Add(propBar);
             propBar.Visible = false;
         }
+
+        static string StyleShort(int style)
+        {
+            if (style == Annot.S_BOTH) return "双向↔ ▾";
+            if (style == Annot.S_LINE) return "直线— ▾";
+            if (style == Annot.S_CALLOUT) return "标注线 ⊾ ▾";
+            return "实线箭头 ▾";
+        }
+        static string WidthShort(float w) { return (w <= 2.5f ? "细线" : (w <= 4.5f ? "中线" : "粗线")) + " ▾"; }
 
         void MarkProp()
         {
             foreach (var b in propBar.Btns)
             {
                 if (b.ToolKey == null) continue;
-                if (b.ToolKey.StartsWith("sty")) b.On = (b.ToolKey == "sty_arrow" && curArrowStyle == Annot.S_ARROW) ||
-                                                        (b.ToolKey == "sty_both" && curArrowStyle == Annot.S_BOTH) ||
-                                                        (b.ToolKey == "sty_line" && curArrowStyle == Annot.S_LINE) ||
-                                                        (b.ToolKey == "sty_callout" && curArrowStyle == Annot.S_CALLOUT);
-                else if (b.ToolKey.StartsWith("w_")) b.On = (b.ToolKey == "w_thin" && curWidth <= 2.5f) ||
-                                                            (b.ToolKey == "w_mid" && curWidth > 2.5f && curWidth <= 4.5f) ||
-                                                            (b.ToolKey == "w_bold" && curWidth > 4.5f);
-
-                else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
+                if (b.ToolKey == "styd") b.DrawStr = StyleShort(curArrowStyle);        // 下拉按钮回显当前样式
+                else if (b.ToolKey == "wd") b.DrawStr = WidthShort(curWidth);          // 下拉按钮回显当前线宽
+                else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;     // 色块选中圈
             }
-            propBar.Invalidate();
+            propBar.RelayoutNow();
         }
 
         void PlacePropBar()
@@ -1965,24 +1992,26 @@ partial class ShotService
             public Rectangle Rect;
             public Color Swatch = Color.Empty; // 颜色圆点按钮 (非空时画色块而非图标)
             public string DrawStr;             // 文字按钮 (非空时画文字而非图标, 如字号/字体当前值)
+            public bool Visible = true;        // 属性栏按工具显隐 (PixPin 式), false 时 Relayout/Hit 跳过
+            public string[] ForTools;          // 仅这些工具可见; null = 全工具可见
         }
 
-        public Btn AddText(string str, string tipText, Action onClick)
+        public Btn AddText(string str, string tipText, Action onClick, string[] forTools = null)
         {
-            Btn b = new Btn { Icon = "#text", DrawStr = str, Tip = tipText, OnClick = onClick };
+            Btn b = new Btn { Icon = "#text", DrawStr = str, Tip = tipText, OnClick = onClick, ForTools = forTools };
             Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
         // PixPin 同款一体化微调框: 左半显示当前值, 右半上▲/下▼三角 (点击上半+1 下半-1)
-        public Btn AddSpinner(string str, string tipText, Action<bool> onSpin)
+        public Btn AddSpinner(string str, string tipText, Action<bool> onSpin, string[] forTools = null)
         {
-            Btn b = new Btn { Icon = "#text", DrawStr = str, Tip = tipText, IsSpinner = true, OnSpin = onSpin };
+            Btn b = new Btn { Icon = "#text", DrawStr = str, Tip = tipText, IsSpinner = true, OnSpin = onSpin, ForTools = forTools };
             Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
-        public Btn AddColor(Color c, string tipText, Action onClick)
+        public Btn AddColor(Color c, string tipText, Action onClick, string[] forTools = null)
         {
-            Btn b = new Btn { Icon = "color", Tip = tipText, OnClick = onClick, Swatch = c };
+            Btn b = new Btn { Icon = "color", Tip = tipText, OnClick = onClick, Swatch = c, ForTools = forTools };
             Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
@@ -1997,16 +2026,52 @@ partial class ShotService
             BackColor = Color.FromArgb(26, 27, 31);
         }
 
-        public Btn Add(string icon, string tipText, Action onClick, bool toggle = false)
+        public Btn Add(string icon, string tipText, Action onClick, bool toggle = false, string[] forTools = null)
         {
             Btn b = new Btn();
-            b.Icon = icon; b.Tip = tipText; b.OnClick = onClick; b.IsToggle = toggle;
+            b.Icon = icon; b.Tip = tipText; b.OnClick = onClick; b.IsToggle = toggle; b.ForTools = forTools;
             Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
-        public void AddSep()
+        public void AddSep(string[] forTools = null)
         {
-            Btns.Add(new Btn { Icon = "|" });
+            Btns.Add(new Btn { Icon = "|", ForTools = forTools });
+            Relayout(); Invalidate();
+        }
+
+        // 按工具显隐 (PixPin 式: 属性栏只显示当前工具相关属性); 收敛悬空分隔线
+        public void ShowForTool(string tool)
+        {
+            int visN = 0;
+            foreach (Btn b in Btns)
+            {
+                b.Visible = (tool == null) || b.ForTools == null || Array.IndexOf(b.ForTools, tool) >= 0;
+                if (b.Visible && b.Icon != "|") visN++;
+            }
+            Log("propbar show " + tool + " visible=" + visN);
+            for (int pass = 0; pass < 2; pass++) // 两轮收敛相邻 sep
+            {
+                int lastVis = -1;
+                for (int i = 0; i < Btns.Count; i++)
+                {
+                    Btn b = Btns[i];
+                    if (b.Icon == "|")
+                    {
+                        if (!b.Visible) continue;
+                        bool gap = false;
+                        for (int k = lastVis + 1; k < i; k++) if (Btns[k].Visible && Btns[k].Icon != "|") { gap = true; break; }
+                        if (lastVis < 0 || !gap) b.Visible = false;
+                    }
+                    else if (b.Visible) lastVis = i;
+                }
+                bool tailSeen = false;
+                for (int i = Btns.Count - 1; i >= 0; i--)
+                {
+                    Btn b = Btns[i];
+                    if (b.Icon == "|") { if (!tailSeen) b.Visible = false; }
+                    else if (b.Visible) tailSeen = true;
+                }
+            }
             Relayout(); Invalidate();
         }
 
@@ -2016,6 +2081,7 @@ partial class ShotService
             Font tf = null;
             foreach (Btn b in Btns)
             {
+                if (!b.Visible) { b.Rect = Rectangle.Empty; continue; } // 按工具隐藏: 不占位
                 if (b.Icon == "|") { b.Rect = new Rectangle(x, 12, 1, 24); x += 13; }
                 else if (b.Icon == "#text" && !string.IsNullOrEmpty(b.DrawStr))
                 {
@@ -2050,7 +2116,7 @@ partial class ShotService
             for (int i = 0; i < Btns.Count; i++)
             {
                 Btn b = Btns[i];
-                if (b.Icon != "|" && b.Rect.Contains(p)) return i;
+                if (b.Visible && b.Icon != "|" && b.Rect.Contains(p)) return i;
             }
             return -1;
         }
@@ -2080,7 +2146,7 @@ partial class ShotService
             for (int i = 0; i < Btns.Count; i++)
             {
                 Btn b = Btns[i];
-                if (b.Icon == "|") continue;
+                if (b.Icon == "|" || !b.Visible) continue;
                 if (i == hoverIdx || b.On)
                 {
                     using (SolidBrush br = new SolidBrush(b.On ? Color.FromArgb(58, 62, 74) : (i == hoverIdx ? Color.FromArgb(64, 68, 80) : Color.Transparent)))
