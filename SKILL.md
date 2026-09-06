@@ -163,4 +163,13 @@ int n = Math.Min(all.Count, max);                                       // 之�
 4. **记事本靶子纪律**：测记事本一律 `/app/run?path=notepad.exe`（返回真实 window.hwnd/pid/title）；`Start-Process notepad` 在 Store 启动器模型下秒退假象。
 5. **第六轮 R3/R4 补齐**：record 响应带 `video_size`/`fpsNormalized`/`sizeClamped`；R1 像素上限 4M 超限回退全屏（100000×100000 攻击复验进程存活）。
 
+### 第六轮有效测试姿势（workbuddy 原版，zcode 据其报告重建）
+
+1. **窗口状态断言**：用 `screen_capture(region=x,y,1,1)` 裁单像素（GetPixel 在 DWM 下不可信），或像素放大截图（900→1800 NEAREST）。
+2. **选中/复制类断言一律哨兵法**：`clipboard_set=SENT-XX` → 操作 → `ctrl+c` → `clipboard_get`，值没变即未生效（返回值 ok:true 不可信）。
+3. **UIA 树验证选中**：聊天应用粘贴文本会进消息列表，`ui_find` 树里能找到 = 真送达（别截图找，截不到内容层）。
+4. **重启服务后旧 PID 的全局热键/遮罩失效**：遮罩弹在旧进程，新进程收不到 Esc——先杀残留再测。
+5. **验证 `/img/` 二进制完整性用字节数**（python raw socket / Content-Length），别按 UTF-8 解码统计（假阴性元凶）。
+6. 攻击录屏/窗口管理用 `hwnd` 直控 + 自建靶子，别拿用户真实工作窗口做破坏性用例。
+
 
