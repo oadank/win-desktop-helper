@@ -385,6 +385,7 @@ partial class ShotService
             // 开罩即高亮光标下窗口 (PixPin 同款: 不必先动鼠标); sp 直接就是屏幕坐标
             try { POINT cp; GetCursorPos(out cp); UpdateHoverDetect(new Point(cp.x, cp.y)); } catch { }
             StartHoverLoop(); // 后台持续检测 (HWND 下钻 + UIA 元素级)
+            StartRefiner();   // UIA 细化独立线程 (慢查询不挡悬停跟手)
             Log("capture: overlay shown bounds=" + Bounds);
         }
 
@@ -480,7 +481,7 @@ partial class ShotService
             base.OnDeactivate(e);
             try
             {
-                if (IsDisposed || textMode) return;
+                if (IsDisposed || textMode || recMode) return; // 录制模式: 选区内点击直达下层应用=必然失焦, 遮罩必须留着
                 IntPtr fg = GetForegroundWindow();
                 if (fg == IntPtr.Zero || fg == Handle) return;
                 uint pid; GetWindowThreadProcessId(fg, out pid);
@@ -730,7 +731,7 @@ partial class ShotService
 
         // ---- 自动检测 v2 (PixPin 元素级灵敏度): 后台线程轮询光标, HWND 下钻 + UIA 子树命中。
         // UIA 跨进程调用可能慢 (Electron 大树实测 8s 级), 绝不能上 UI 线程; 400ms 安全阀连续超限即停用本轮 UIA。
-        System.Threading.        Thread hoverThread;
+        System.Threading.Thread hoverThread;
         volatile bool hoverStop = false;
         volatile int uiaDisabled = 0;
         volatile int uiaFailStreak = 0; // 连续慢/异常计数; 首查可能因 Chromium 惰性建树很慢, 连 5 次才停用
@@ -748,9 +749,9 @@ partial class ShotService
             IntPtr lastHwnd = IntPtr.Zero;       // 上轮命中的窗口 (换窗口=立即跟手, 不等 UIA)
             Rectangle uiaCache = Rectangle.Empty; // 细化框缓存: 光标还在里面就一直锁定 (修闪烁: 不再隔轮查询导致大框↔小框交替)
             IntPtr uiaCacheHwnd = IntPtr.Zero;
-            int cycle = 0;
             while (!hoverStop && !IsDisposed)
             {
+                if (recMode) { ApplyHover(Rectangle.Empty); System.Threading.Thread.Sleep(150); continue; } // 录制模式: 选区固定, 停止悬停高亮
                 try
                 {
                     POINT cp; GetCursorPos(out cp);
@@ -771,11 +772,15 @@ partial class ShotService
                             }
                             else if (uiaFailStreak < 5)
                             {
-                                // 缓存失配 (光标移出/换元素): 立即重查直到重新锁定 (树已暖, 单查很快)
-                                Rectangle uia = UiaRectAt(h, sp);
-                                if (uia != Rectangle.Empty && uia.Width > 8 && uia.Height > 8 && fin.Contains(uia))
+                                // 缓存失配: 请求后台细化 (绝不阻塞本循环 — 树冷查询几百 ms, 同步查=高亮冻住不跟手)
+                                lock (uiaLock) { reqHwnd = h; reqPt = sp; }
+                                uiaKick.Set();
+                                // 顺手消费已就绪的结果 (光标还停在结果框内才收)
+                                lock (uiaLock)
                                 {
-                                    uiaCache = uia; uiaCacheHwnd = h; fin = uia;
+                                    if (uiaResultHwnd == h && uiaResult != Rectangle.Empty &&
+                                        uiaResult.Contains(sp) && fin.Contains(uiaResult))
+                                    { uiaCache = uiaResult; uiaCacheHwnd = h; fin = uiaResult; uiaResult = Rectangle.Empty; }
                                 }
                             }
                         }
@@ -785,8 +790,35 @@ partial class ShotService
                     ApplyHover(fin); // 带滑动过渡动画
                 }
                 catch { }
-                cycle++;
-                System.Threading.Thread.Sleep(100);
+                System.Threading.Thread.Sleep(60);
+            }
+        }
+
+        // UIA 细化专用线程: 慢查询全在这里跑, 悬停循环只投请求/收结果 → 换窗/移动永远跟手
+        readonly object uiaLock = new object();
+        IntPtr reqHwnd = IntPtr.Zero; Point reqPt;
+        Rectangle uiaResult = Rectangle.Empty; IntPtr uiaResultHwnd = IntPtr.Zero;
+        System.Threading.AutoResetEvent uiaKick = new System.Threading.AutoResetEvent(false);
+        System.Threading.Thread refinerThread;
+
+        void StartRefiner()
+        {
+            if (refinerThread != null) return;
+            refinerThread = new System.Threading.Thread(RefineLoop);
+            refinerThread.IsBackground = true; // 永不阻塞进程退出
+            refinerThread.Start();
+        }
+
+        void RefineLoop()
+        {
+            while (!IsDisposed)
+            {
+                uiaKick.WaitOne(250);
+                IntPtr h; Point pt;
+                lock (uiaLock) { h = reqHwnd; pt = reqPt; reqHwnd = IntPtr.Zero; }
+                if (h == IntPtr.Zero) continue;
+                Rectangle uia = UiaRectAt(h, pt); // 可能几百 ms (树冷) — 反正不挡悬停循环
+                lock (uiaLock) { uiaResult = uia; uiaResultHwnd = h; }
             }
         }
 
@@ -1110,8 +1142,16 @@ partial class ShotService
                     g.DrawRectangle(hp, -4, -4, hts.Width + 10, hts.Height + 10);
                 g.Restore(hs);
             }
-            using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
-            DrawSelHandles(g); // 选框 8 手柄 (PixPin 同款)
+            if (recMode)
+            {
+                // 录制模式: Region 把选区挖空了, 画在边线上的框会被裁掉内侧一半 — 外扩画整条红框 (PixPin 录制观感)
+                using (Pen p = new Pen(Color.Red, 3)) g.DrawRectangle(p, d.X - 2, d.Y - 2, d.Width + 4, d.Height + 4);
+            }
+            else
+            {
+                using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
+                DrawSelHandles(g); // 选框 8 手柄 (PixPin 同款)
+            }
             using (Font f = new Font("Consolas", 11))
             using (Brush b = new SolidBrush(Color.Yellow))
             using (Brush bg = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
