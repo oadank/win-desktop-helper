@@ -2166,14 +2166,14 @@ partial class ShotService
                     }
                     else if (style == Annot.S_HOLLOW)
                     {
-                        float bw2 = 3.4f, hs3 = (x2 - x1) * 0.68f, sw3 = 5.5f, fl2 = 4.2f, tp2 = (x2 - x1) * 0.13f;
-                        using (GraphicsPath gp = new GraphicsPath())
+                        float LL = x2 - x1, hhl2 = LL * 0.34f, hs3 = LL - hhl2;
+                        float hhw2 = 2.6f, chw2 = hhw2 * 2.6f, sw3 = hhl2 * 0.45f;
+                        using (Pen hp = new Pen(c, 1.9f))
                         {
-                            gp.AddPolygon(new PointF[] {
-                                new PointF(x1, cy), new PointF(x1 + tp2, cy - bw2), new PointF(x1 + hs3, cy - bw2),
-                                new PointF(x1 + hs3 - sw3, cy - bw2 - fl2), new PointF(x2, cy),
-                                new PointF(x1 + hs3 - sw3, cy + bw2 + fl2), new PointF(x1 + hs3, cy + bw2), new PointF(x1 + tp2, cy + bw2) });
-                            using (Pen hp = new Pen(c, 1.9f)) { hp.LineJoin = LineJoin.Round; g.DrawPath(hp, gp); }
+                            hp.LineJoin = LineJoin.Round;
+                            g.DrawPolygon(hp, new PointF[] {
+                                new PointF(x1, cy), new PointF(x1 + hs3, cy - hhw2), new PointF(x1 + hs3 - sw3, cy - chw2),
+                                new PointF(x2, cy), new PointF(x1 + hs3 - sw3, cy + chw2), new PointF(x1 + hs3, cy + hhw2) });
                         }
                     }
                 }
