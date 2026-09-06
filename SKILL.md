@@ -153,11 +153,14 @@ int n = Math.Min(all.Count, max);                                       // 之�
 
 **agent 侧规避（修好之前）**：对 Electron/大 DOM 应用（WorkBuddy、VSCode 系、网页壳）**不要用 `/ui/tree`/`/ui/find`/`/ui/readall`**；改用 `/shot` + 视觉定位 + 物理坐标点击，或用 `/active` 拿窗口 rect 按比例估点位。必须枚举时先 `max=30` + 短超时试一次，超时立刻放弃该路线，别裸等（会卡死整条工具链）。
 
-**顺带解释"i 索引不稳定"**：`i` 就是 `FindAll` 的平铺顺序，DOM 一变就变（实测同一输入框一分钟内 i=637→644→659→664，637 已变成"08:00"时间戳文本）。工具描述应明确"i 仅在本次响应内有效，跨调用必须重查"。### ✅ 聊天框连发的服务侧根治（2026-09-06 zcode，双保险）
+**顺带解释"i 索引不稳定"**：`i` 就是 `FindAll` 的平铺顺序，DOM 一变就变（实测同一输入框一分钟内 i=637→644→659→664，637 已变成"08:00"时间戳文本）。工具描述应明确"i 仅在本次响应内有效，跨调用必须重查"。
 
-1. ** 默认软换行**： 不再直发 Enter，改发 **Shift+Enter**（记事本照常换行；聊天/搜索框软换行不触发发送）。要真回车传 。响应带  计数+warn。
-2. ** 默认 CR 归一**：含  的文本自动转 （响应 ），根治粘贴路径的回车符连发； 保留原样。
-3. **截图/贴图 HTTP 化**：（本地 qwen3-vl，限截图目录）、（贴图窗），MCP 同步 / —— 之前只有遮罩按钮/F3/托盘入口，agent 完全用不了。
-4. **记事本靶子纪律**：测记事本一律 （返回真实 window.hwnd/pid/title）； 在 Store 启动器模型下秒退假象。
+### ✅ 聊天框连发的服务侧根治（2026-09-06 zcode，双保险）
+
+1. **`keyboard/type` 默认软换行**：`\n` 不再直发 Enter，改发 **Shift+Enter**（记事本照常换行；聊天/搜索框软换行不触发发送）。要真回车传 `nl=enter`。响应带 `newlines` 计数+warn。
+2. **`clipboard/set` 默认 CR 归一**：含 `\r` 的文本自动转 `\n`（响应 `crNormalized:true`），根治粘贴路径的回车符连发；`keep_cr=1` 保留原样。
+3. **截图/贴图 HTTP 化**：`/ocr?path=&wait=`（本地 qwen3-vl，限截图目录）、`/pin?path=&x=&y=`（贴图窗），MCP 同步 `ocr_image`/`pin_image` —— 之前只有遮罩按钮/F3/托盘入口，agent 完全用不了。
+4. **记事本靶子纪律**：测记事本一律 `/app/run?path=notepad.exe`（返回真实 window.hwnd/pid/title）；`Start-Process notepad` 在 Store 启动器模型下秒退假象。
+5. **第六轮 R3/R4 补齐**：record 响应带 `video_size`/`fpsNormalized`/`sizeClamped`；R1 像素上限 4M 超限回退全屏（100000×100000 攻击复验进程存活）。
 
 
