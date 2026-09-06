@@ -494,6 +494,7 @@ partial class ShotService
         protected override void OnMouseDown(MouseEventArgs e)
         {
             if (IsDisposed) return;
+            if (recMode) return; // 录制中: 选区外点击不再改变选区 (选区内点击已被 Region 镂空直达下层应用)
             if (e.Button == MouseButtons.Right)
             {
                 if (hasSel || tool != null || textMode) ResetSelection();
@@ -582,6 +583,7 @@ partial class ShotService
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
+            if (recMode) return; // 录制中: 不再响应选区调整
             Point sp = PointToScreen(e.Location);
             if (resizeHandle >= 0)
             {
@@ -743,8 +745,9 @@ partial class ShotService
 
         void HoverLoop()
         {
-            IntPtr lastHwnd = IntPtr.Zero;   // 上轮命中的窗口 (换窗口=立即跟手, 不等 UIA)
-            Rectangle lastFin = Rectangle.Empty; // 上轮结果 (窗口内细化去跳变)
+            IntPtr lastHwnd = IntPtr.Zero;       // 上轮命中的窗口 (换窗口=立即跟手, 不等 UIA)
+            Rectangle uiaCache = Rectangle.Empty; // 细化框缓存: 光标还在里面就一直锁定 (修闪烁: 不再隔轮查询导致大框↔小框交替)
+            IntPtr uiaCacheHwnd = IntPtr.Zero;
             int cycle = 0;
             while (!hoverStop && !IsDisposed)
             {
@@ -760,17 +763,25 @@ partial class ShotService
                         if (GetWindowRect(h, out r) && r.Right > r.Left && r.Bottom > r.Top)
                         {
                             fin = new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
-                            // UIA 元素级细化只在"停留同一窗口"时做: 换窗口立即上原生框 (PixPin 跟手关键),
-                            // 惰性树冷查询动辄几百 ms, 若换窗也等它=切换卡顿元凶
-                            if (uiaFailStreak < 5 && h == lastHwnd && fin != lastFin && cycle % 2 == 0)
+                            bool cacheHit = uiaCacheHwnd == h && uiaCache != Rectangle.Empty &&
+                                            uiaCache.Contains(sp) && fin.Contains(uiaCache);
+                            if (cacheHit)
                             {
+                                fin = uiaCache; // 锁定: 光标还在细化框内就不换框 (稳定不闪)
+                            }
+                            else if (uiaFailStreak < 5)
+                            {
+                                // 缓存失配 (光标移出/换元素): 立即重查直到重新锁定 (树已暖, 单查很快)
                                 Rectangle uia = UiaRectAt(h, sp);
-                                if (uia != Rectangle.Empty && uia.Width > 8 && uia.Height > 8 && fin.Contains(uia)) fin = uia;
+                                if (uia != Rectangle.Empty && uia.Width > 8 && uia.Height > 8 && fin.Contains(uia))
+                                {
+                                    uiaCache = uia; uiaCacheHwnd = h; fin = uia;
+                                }
                             }
                         }
                     }
+                    if (h != lastHwnd) { uiaCache = Rectangle.Empty; uiaCacheHwnd = IntPtr.Zero; }
                     lastHwnd = h;
-                    lastFin = fin;
                     ApplyHover(fin); // 带滑动过渡动画
                 }
                 catch { }
@@ -846,7 +857,7 @@ partial class ShotService
                     {
                         if (IsDisposed) return;
                         if (nr == animTgt && (animTimer == null || !animTimer.Enabled)) return; // 无变化
-                        Rectangle cur = animTimer != null && animTimer.Enabled ? animFrom : hoverWin; // 动画进行中则从当前进度续滑
+                        Rectangle cur = hoverWin; // 动画进行中 hoverWin=当前插值位置, 从这续滑 (修: 用 animFrom 会跳回起点)
                         if (cur == nr) { animTgt = nr; return; }
                         // 空框↔实框 (高亮出现/消失) 直接切换, 滑动只用于框与框之间
                         if (nr == Rectangle.Empty || cur == Rectangle.Empty)
@@ -926,6 +937,7 @@ partial class ShotService
         {
             try
             {
+            if (recMode) return; // 录制中: 无选区操作
             if (IsDisposed) return;
             // 手柄拖拽结束: 工具条回位 + 补重绘 (拖拽中手柄隐藏, 松开显示)
             if (resizeHandle >= 0 && e.Button == MouseButtons.Left)
@@ -1993,26 +2005,32 @@ partial class ShotService
         {
             CommitTextInput();
             Rectangle area = fullScreen ? SystemInformation.VirtualScreen : sel;
-            Close(); // 录屏开始前遮罩必须关 (录的是用户看到的屏幕)
             if (delaySec > 0) ShowTrayInfo(delaySec + " 秒后开始录制" + (fullScreen ? "全屏" : "选区") + "...");
+            bool barMode = !fullScreen && delaySec == 0; // 立即选区录制: 遮罩转录制条 (PixPin 式, 选区框不消失)
+            if (!barMode) Close(); // 延迟倒计时/全屏: 关遮罩走 HUD+红框
+            Rectangle areaC = area;
             Task.Run(() =>
             {
                 // ⚠️ 后台线程异常会直接弹 .NET 崩溃框(ThreadException 只兜 UI 线程) — 全包
                 try
                 {
                     if (delaySec > 0) System.Threading.Thread.Sleep(delaySec * 1000);
-                    string r = RecordStart(area.X, area.Y, area.Width, area.Height, 10);
+                    string r = RecordStart(areaC.X, areaC.Y, areaC.Width, areaC.Height, 10);
                     Log("record via toolbar: " + r);
                     bool ok = r.Contains("\"ok\":true");
                     RunOnHk(() =>
                     {
-                        if (ok)
+                        if (!ok) { ShowTrayInfo("录屏启动失败: " + r); return; }
+                        if (barMode)
+                        {
+                            EnterRecModeUI(); // 工具条变录制条, 选区框保留, 选区内可自由操作
+                        }
+                        else
                         {
                             ShowRecordHud();
                             ShowRecBorder();
-                            ShowTrayInfo("已开始录制 " + area.Width + "x" + area.Height + " — 右下角红色 HUD 的 ⏹ 或托盘菜单可停止");
+                            ShowTrayInfo("已开始录制 " + areaC.Width + "x" + areaC.Height + " — 右下角红色 HUD 的 ⏹ 或托盘菜单可停止");
                         }
-                        else ShowTrayInfo("录屏启动失败: " + r);
                     });
                 }
                 catch (Exception ex)
@@ -2021,6 +2039,66 @@ partial class ShotService
                     RunOnHk(() => ShowTrayInfo("录屏异常: " + ex.Message));
                 }
             });
+        }
+
+        // ---- 录制模式遮罩: 选区外暗化+拦截, 选区内镂空 (点击直达下层应用=录操作过程); 工具条变 [计时][■][✕] ----
+        bool recMode;
+        Timer recClock;
+
+        void EnterRecModeUI()
+        {
+            try
+            {
+                recMode = true;
+                System.Drawing.Drawing2D.GraphicsPath gp = new System.Drawing.Drawing2D.GraphicsPath();
+                gp.AddRectangle(new Rectangle(0, 0, ClientSize.Width, ClientSize.Height));
+                Rectangle hole = RectangleToClient(sel);
+                gp.AddRectangle(hole); // Alternate 填充: 内环=洞 (命中测试同样镂空)
+                Region = new Region(gp);
+                bar.EnterRecMode(RecStopFromBar, RecCancelFromBar);
+                PlaceBar(); // 按新按钮数重排 + 回选区下方
+                recClock = new Timer { Interval = 500 };
+                recClock.Tick += delegate { try { bar.RecTick(); } catch { } };
+                recClock.Start();
+                Log("capture: rec mode ui, sel=" + sel);
+            }
+            catch (Exception ex) { Log("rec mode err: " + ex.Message); }
+        }
+
+        void StopRecClock()
+        {
+            try { if (recClock != null) { recClock.Stop(); recClock.Dispose(); } } catch { }
+            recClock = null;
+        }
+
+        void RecStopFromBar()
+        {
+            recMode = false;
+            StopRecClock();
+            RecordStopAndNotify(); // 停止 + 关 HUD/红框 + 气泡报保存路径
+            Close();
+        }
+
+        void RecCancelFromBar()
+        {
+            recMode = false;
+            StopRecClock();
+            string r = RecordStop();
+            try
+            {
+                int p1 = r.IndexOf("\"file\":\"");
+                if (r.Contains("\"ok\":true") && p1 >= 0)
+                {
+                    int p2 = r.IndexOf("\"", p1 + 9);
+                    string f = r.Substring(p1 + 9, p2 - p1 - 9);
+                    if (System.IO.File.Exists(f)) System.IO.File.Delete(f);
+                }
+            }
+            catch { }
+            CloseRecordHud();
+            CloseRecBorder();
+            ShowTrayInfo("录制已取消, 未保存");
+            Close();
         }
 
         void RecordStopAndNotify()
@@ -2265,6 +2343,7 @@ partial class ShotService
         {
             if (keyData == Keys.Escape)
             {
+                if (recMode) { RecCancelFromBar(); return true; } // 录制中 Esc = 取消录制 (遮罩仍有焦点时可用)
                 if (textMode) { CancelTextInput(); return true; }
                 if (cur != null) { var c = cur; cur = null; InvalidateAnnot(c); return true; } // 丢弃当前笔画
                 CancelAll();
@@ -2347,6 +2426,10 @@ partial class ShotService
                         using (SolidBrush b = new SolidBrush(Color.FromArgb(255, 82, 70)))
                             g.FillEllipse(b, 4, 4, 10, 10);
                         g.DrawEllipse(w, 4, 4, 10, 10);
+                        break;
+                    case "stop": // 红方块 (停止录制)
+                        using (SolidBrush b2 = new SolidBrush(Color.FromArgb(235, 60, 50)))
+                            g.FillRectangle(b2, 4.5f, 4.5f, 9, 9);
                         break;
                     case "sty_arrow": // 实线箭头预览
                         g.DrawLine(w, 2, 9, 14, 9);
@@ -2452,6 +2535,32 @@ partial class ShotService
             Btn b = new Btn();
             b.Icon = icon; b.Tip = tipText; b.OnClick = onClick; b.IsToggle = toggle; b.ForTools = forTools;
             Btns.Add(b); Relayout(); Invalidate(); return b;
+        }
+
+        // ---- 录制模式 (PixPin 式): 常规按钮全藏, 只留 [计时][■停止][✕取消]; 停止后遮罩直接关 ----
+        List<Btn> savedBtns;
+        Btn recTimeBtn;
+        public void EnterRecMode(Action onStop, Action onCancel)
+        {
+            savedBtns = new List<Btn>(Btns);
+            Btns.Clear();
+            recTimeBtn = new Btn { Icon = "#text", DrawStr = "00:00", Tip = "录制时长" };
+            Btns.Add(recTimeBtn);
+            Btns.Add(new Btn { Icon = "stop", Tip = "停止录制并保存 (托盘菜单也可停)", OnClick = onStop });
+            Btns.Add(new Btn { Icon = "cancel", Tip = "取消录制, 不保存", OnClick = onCancel });
+            Relayout(); Invalidate();
+        }
+
+        public void RecTick()
+        {
+            try
+            {
+                if (recTimeBtn == null) return;
+                var el = DateTime.Now - recStart; // 外层 ShotService 静态
+                recTimeBtn.DrawStr = ((int)el.TotalSeconds / 60).ToString("00") + ":" + ((int)el.TotalSeconds % 60).ToString("00");
+                Invalidate();
+            }
+            catch { }
         }
 
         // 箭头样式两行网格 (PixPin 图2): 6 格 (5+1), 选中蓝底, 格内画放大的样式预览

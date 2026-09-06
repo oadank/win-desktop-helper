@@ -1665,9 +1665,28 @@ public partial class ShotService
         catch { return null; }
     }
 
+    // 断言写日志监听器: Debug.Assert 失败只落 shot-service.log, 不弹框不挂 UI 线程
+    sealed class AssertLogListener : System.Diagnostics.TraceListener
+    {
+        public override void Write(string message) { Log("ASSERT: " + message); }
+        public override void WriteLine(string message) { Log("ASSERT: " + message); }
+        public override void Fail(string message, string detailMessage)
+        {
+            Log("ASSERT FAIL: " + message + (string.IsNullOrEmpty(detailMessage) ? "" : " | " + detailMessage));
+        }
+    }
+
     [STAThread]
     public static void Main(string[] args)
     {
+        // 断言不再弹模态框 (服务弹 Debug.Assert 框会挂死整个 UI 线程, 还读不到内容) — 全部改写日志
+        try
+        {
+            System.Diagnostics.Trace.AutoFlush = true;
+            System.Diagnostics.Trace.Listeners.Clear();
+            System.Diagnostics.Trace.Listeners.Add(new AssertLogListener());
+        }
+        catch { }
         // 构建指纹: exe 文件的修改时间+大小 = 用户编译时刻。跑的是不是刚编的, 一眼可验 (堵"改了没变化"坑)
         string build = BuildStamp();
         bool allowTray = true, watchMode = false;
