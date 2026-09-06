@@ -178,7 +178,7 @@ partial class ShotService
             BackColor = Color.FromArgb(40, 41, 46);
             DoubleBuffered = true;
             KeyPreview = true;
-            int w = 118, h = keys.Length * 38 + 8;
+            int w = 100, h = keys.Length * 34 + 8;
             ClientSize = new Size(w, h);
             using (GraphicsPath gp = RoundPath(0, 0, w, h, 14)) Region = new Region(gp);
         }
@@ -201,7 +201,7 @@ partial class ShotService
             g.Clear(Color.FromArgb(40, 41, 46));
             for (int i = 0; i < keys.Length; i++)
             {
-                RectangleF row = new RectangleF(4, 4 + i * 38, ClientSize.Width - 8, 34);
+                RectangleF row = new RectangleF(4, 4 + i * 34, ClientSize.Width - 8, 30);
                 bool sel = isCurrent != null && isCurrent(keys[i]);
                 if (i == hover || sel)
                 {
@@ -216,7 +216,7 @@ partial class ShotService
         int RowAt(Point pt)
         {
             if (pt.X < 4 || pt.X > ClientSize.Width - 4) return -1;
-            int i = (pt.Y - 4) / 38;
+            int i = (pt.Y - 4) / 34;
             if (i < 0 || i >= keys.Length || pt.Y < 4 || pt.Y > ClientSize.Height - 4) return -1;
             return i;
         }
@@ -1005,7 +1005,7 @@ partial class ShotService
 
             if (style == Annot.S_CALLOUT)
             {
-                float bl = Math.Min(12f, Math.Max(7f, w * 4f)); // 12 上限: 弹层行高容得下 (原 14 起会超界)
+                float bl = Math.Min(10f, Math.Max(7f, w * 4f)); // 12 上限: 弹层行高容得下 (原 14 起会超界)
                 float ppx = (float)pxc, ppy = (float)pyc;
                 g.DrawLine(p, x1, y1, x2, y2);
                 g.DrawLine(p, x1 + bl * ppx, y1 + bl * ppy, x1 - bl * ppx, y1 - bl * ppy);
@@ -1061,7 +1061,11 @@ partial class ShotService
 
             // 实线/双向: 线画到头底 (头不被线穿透) + 大实心头
             float b2x = (float)(x2 - hl * 0.72 * dxc), b2y = (float)(y2 - hl * 0.72 * dyc);
-            g.DrawLine(p, x1, y1, b2x, b2y);
+            double angB = Math.Atan2(y1 - y2, x1 - x2);
+            float b1x = (float)(x1 + hl * 0.72 * Math.Cos(angB)), b1y = (float)(y1 + hl * 0.72 * Math.Sin(angB));
+            // S_BOTH 杆必须从左头底 b1 起画到右头底 b2 — 之前从 x1(左尖端)起画, 杆穿出左箭头外 (用户实测)
+            float shaftX1 = style == Annot.S_BOTH ? b1x : x1, shaftY1 = style == Annot.S_BOTH ? b1y : y1;
+            g.DrawLine(p, shaftX1, shaftY1, b2x, b2y);
             using (SolidBrush b = new SolidBrush(p.Color))
                 g.FillPolygon(b, new PointF[] {
                     new PointF(x2, y2),
@@ -1069,12 +1073,7 @@ partial class ShotService
                     new PointF((float)(b2x - pxc * half), (float)(b2y - pyc * half)),
                 });
             if (style == Annot.S_BOTH)
-            {
-                double angB = Math.Atan2(y1 - y2, x1 - x2);
-                float b1x = (float)(x1 + hl * 0.72 * Math.Cos(angB)), b1y = (float)(y1 + hl * 0.72 * Math.Sin(angB));
-                g.DrawLine(p, x1, y1, b1x, b1y);
                 DrawArrowHead(g, p, x1, y1, (float)angB, hl);
-            }
         }
 
         // ---- 导出: 冻结图选区 + 标注 合成 ----
@@ -1498,8 +1497,8 @@ partial class ShotService
                     delegate(int v) { curArrowStyle = v; MarkProp(); },
                     delegate(Graphics g, RectangleF row, int key, Color ink2)
                     {
-                        using (Pen ap = new Pen(Color.FromArgb(232, 234, 240), 2f))
-                            DrawArrowEx(g, ap, row.X + 5, row.Y + row.Height / 2f, row.Right - 5, row.Y + row.Height / 2f, key);
+                        using (Pen ap = new Pen(Color.FromArgb(232, 234, 240), 1.4f))
+                            DrawArrowEx(g, ap, row.X + 14, row.Y + row.Height / 2f, row.Right - 14, row.Y + row.Height / 2f, key);
                     },
                     delegate(int v) { return styleNames[System.Array.IndexOf(styleOrder, v)]; },
                     Color.FromArgb(232, 234, 240));
@@ -1524,7 +1523,7 @@ partial class ShotService
                         using (Pen wp = new Pen(ink2, key / 10f))
                         {
                             wp.StartCap = System.Drawing.Drawing2D.LineCap.Round; wp.EndCap = System.Drawing.Drawing2D.LineCap.Round;
-                            g.DrawLine(wp, row.X + 5, row.Y + row.Height / 2f, row.Right - 5, row.Y + row.Height / 2f);
+                            g.DrawLine(wp, row.X + 16, row.Y + row.Height / 2f, row.Right - 16, row.Y + row.Height / 2f);
                         }
                     },
                     delegate(int k) { return k == 20 ? "细线" : (k == 35 ? "中线" : "粗线"); },
