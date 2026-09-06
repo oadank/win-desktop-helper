@@ -1575,10 +1575,17 @@ public partial class ShotService
                     int rx = 0, ry = 0, rw = 0, rh = 0, rf = 10;
                     TryInt(q, "x", out rx); TryInt(q, "y", out ry); TryInt(q, "w", out rw); TryInt(q, "h", out rh); TryInt(q, "fps", out rf);
                     body = RecordStart(rx, ry, rw, rh, rf); // RecordStart 内部: w/h<=0 用全屏, fps 越界用默认
+                    if (body.Contains("\"ok\":true")) ShowRecBorder(); // agent 发起的录制也给用户红框可见性
                     Log("[rec] start " + target);
                 }
-                else if (path == "/record/stop") { body = RecordStop(); Log("[rec] stop"); }
+                else if (path == "/record/stop") { body = RecordStop(); CaptureOverlay.CloseRecordHud(); CloseRecBorder(); Log("[rec] stop"); }
                 else if (path == "/record/status") { body = RecordStatus(); }
+                else if (path == "/app/exit")
+                {
+                    // 优雅退出: 录制中会先触发 ProcessExit 钩子关 stdin 让 ffmpeg 落盘 (需显式 confirm 防误触)
+                    if (!q.ContainsKey("confirm") || q["confirm"] != "1") { code = 400; body = "{\"ok\":false,\"error\":\"need confirm=1\"}"; }
+                    else { Log("app exit requested via http"); body = "{\"ok\":true,\"bye\":true}"; new Thread(new ThreadStart(delegate { Thread.Sleep(300); Environment.Exit(0); })) { IsBackground = true }.Start(); }
+                }
                 else if (path == "/app/runas")
                 {
                     if (!q.ContainsKey("path")) { code = 400; body = "{\"ok\":false,\"error\":\"need path (UAC 由用户确认)\"}"; }
@@ -2460,6 +2467,25 @@ public partial class ShotService
 
         // M3: 设置/百度翻译登录入口 (用户自助填 appid/key, 存 json 热生效)
         menu.Items.Add("设置...", null, delegate { try { ShowSettingsForm(); } catch (Exception ex) { Log("settings err: " + ex.Message); } });
+
+        // 录屏停止入口 (退出程序不再等于录屏失控: 录制中 ProcessExit 兜底落盘; 这里给显式停止)
+        ToolStripMenuItem mRecStop = new ToolStripMenuItem("⏹ 停止录制", null, delegate
+        {
+            try
+            {
+                string r = RecordStop();
+                CaptureOverlay.CloseRecordHud();
+                CloseRecBorder();
+                Log("record stop via tray: " + r);
+                string file = "";
+                int p1 = r.IndexOf("\"file\":\"");
+                if (p1 >= 0) { int p2 = r.IndexOf("\"", p1 + 9); file = r.Substring(p1 + 9, p2 - p1 - 9); }
+                TrayNotify("录屏已保存", string.IsNullOrEmpty(file) ? r : file);
+            }
+            catch (Exception ex) { Log("tray rec stop err: " + ex.Message); }
+        });
+        menu.Items.Add(mRecStop);
+        menu.Opening += delegate { mRecStop.Enabled = recording; }; // 打开菜单时按录制状态亮/灰
 
         menu.Items.Add("隐藏托盘图标", null, delegate { TrayIcon.Visible = false; Log("tray hidden (restart service to show again)"); });
         menu.Items.Add("退出服务", null, delegate { Log("tray exit requested"); Environment.Exit(0); });

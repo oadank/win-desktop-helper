@@ -743,10 +743,9 @@ partial class ShotService
 
         void HoverLoop()
         {
-            Log("hover loop started");
-            Rectangle lastApplied = Rectangle.Empty; // 当前已生效的高亮框
-            Rectangle pendingCand = Rectangle.Empty; // 上一轮候选框 (防抖比对)
-            int waitCount = 0;
+            IntPtr lastHwnd = IntPtr.Zero;   // 上轮命中的窗口 (换窗口=立即跟手, 不等 UIA)
+            Rectangle lastFin = Rectangle.Empty; // 上轮结果 (窗口内细化去跳变)
+            int cycle = 0;
             while (!hoverStop && !IsDisposed)
             {
                 try
@@ -761,24 +760,22 @@ partial class ShotService
                         if (GetWindowRect(h, out r) && r.Right > r.Left && r.Bottom > r.Top)
                         {
                             fin = new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
-                            // UIA 元素级细化: 找包含光标的最小元素矩形, 且必须落在 HWND 框内 (防抓到全屏怪元素)
-                            if (uiaDisabled == 0)
+                            // UIA 元素级细化只在"停留同一窗口"时做: 换窗口立即上原生框 (PixPin 跟手关键),
+                            // 惰性树冷查询动辄几百 ms, 若换窗也等它=切换卡顿元凶
+                            if (uiaFailStreak < 5 && h == lastHwnd && fin != lastFin && cycle % 2 == 0)
                             {
                                 Rectangle uia = UiaRectAt(h, sp);
                                 if (uia != Rectangle.Empty && uia.Width > 8 && uia.Height > 8 && fin.Contains(uia)) fin = uia;
                             }
                         }
                     }
-                    // 防抖: 新框需连续两轮一致才应用 (元素树抽风导致橙框来回跳);
-                    // 清空/从无到有/窗口级大切换 立即应用, 保证跟手
-                    bool immediate = fin == Rectangle.Empty || lastApplied == Rectangle.Empty ||
-                                     (fin.Width >= lastApplied.Width * 2 && fin.Height >= lastApplied.Height * 2);
-                    if (fin == lastApplied) { pendingCand = fin; waitCount = 0; }
-                    else if (fin == pendingCand || immediate) { ApplyHover(fin); lastApplied = fin; pendingCand = fin; waitCount = 0; }
-                    else { pendingCand = fin; waitCount++; }
+                    lastHwnd = h;
+                    lastFin = fin;
+                    ApplyHover(fin); // 带滑动过渡动画
                 }
                 catch { }
-                System.Threading.Thread.Sleep(180);
+                cycle++;
+                System.Threading.Thread.Sleep(100);
             }
         }
 
@@ -833,6 +830,11 @@ partial class ShotService
         }
 
         // 检测结果回 UI 线程: 换框 + 联合区域重绘 (选区已有时只更新字段不重绘, OnPaint 本来就不画 hover)
+        // ---- 橙框滑动过渡 (PixPin 同款): 从当前框平滑滑到新框, ~130ms smoothstep ----
+        Rectangle animFrom = Rectangle.Empty, animTgt = Rectangle.Empty;
+        DateTime animT0;
+        Timer animTimer; // UI 线程创建 (ApplyHover 经 BeginInvoke, 天然在 UI 线程)
+
         void ApplyHover(Rectangle nr)
         {
             try
@@ -842,17 +844,72 @@ partial class ShotService
                 {
                     try
                     {
-                        if (IsDisposed || nr == hoverWin) return;
-                        Rectangle u = nr != Rectangle.Empty ? RectangleToClient(nr) : Rectangle.Empty;
-                        if (hoverWin != Rectangle.Empty)
-                            u = u != Rectangle.Empty ? Rectangle.Union(u, RectangleToClient(hoverWin)) : RectangleToClient(hoverWin);
-                        hoverWin = nr;
-                        if (!hasSel && u != Rectangle.Empty) { u.Inflate(40, 30); Invalidate(u); }
+                        if (IsDisposed) return;
+                        if (nr == animTgt && (animTimer == null || !animTimer.Enabled)) return; // 无变化
+                        Rectangle cur = animTimer != null && animTimer.Enabled ? animFrom : hoverWin; // 动画进行中则从当前进度续滑
+                        if (cur == nr) { animTgt = nr; return; }
+                        // 空框↔实框 (高亮出现/消失) 直接切换, 滑动只用于框与框之间
+                        if (nr == Rectangle.Empty || cur == Rectangle.Empty)
+                        {
+                            StopAnim();
+                            SetHoverWin(nr);
+                            return;
+                        }
+                        animFrom = cur; animTgt = nr; animT0 = DateTime.Now;
+                        if (animTimer == null)
+                        {
+                            animTimer = new Timer { Interval = 16 };
+                            animTimer.Tick += delegate
+                            {
+                                try
+                                {
+                                    if (IsDisposed) { StopAnim(); return; }
+                                    double t = (DateTime.Now - animT0).TotalMilliseconds / 130.0;
+                                    if (t >= 1.0)
+                                    {
+                                        StopAnim();
+                                        SetHoverWin(animTgt);
+                                        return;
+                                    }
+                                    t = t * t * (3 - 2 * t); // smoothstep 缓动
+                                    Rectangle draw = LerpRect(animFrom, animTgt, t);
+                                    SetHoverWin(draw);
+                                }
+                                catch { }
+                            };
+                        }
+                        animTimer.Start();
                     }
                     catch { }
                 }));
             }
             catch { }
+        }
+
+        void StopAnim()
+        {
+            try { if (animTimer != null) animTimer.Stop(); } catch { }
+        }
+
+        void SetHoverWin(Rectangle nr)
+        {
+            Rectangle prev = hoverWin;
+            hoverWin = nr;
+            Rectangle u = nr != Rectangle.Empty ? RectangleToClient(nr) : Rectangle.Empty;
+            if (prev != Rectangle.Empty)
+                u = u != Rectangle.Empty ? Rectangle.Union(u, RectangleToClient(prev)) : RectangleToClient(prev);
+            if (!hasSel && u != Rectangle.Empty) { u.Inflate(40, 30); Invalidate(u); }
+        }
+
+        static Rectangle LerpRect(Rectangle a, Rectangle b, double t)
+        {
+            RectangleF fa = new RectangleF(a.X, a.Y, a.Width, a.Height);
+            RectangleF fb = new RectangleF(b.X, b.Y, b.Width, b.Height);
+            return Rectangle.Round(new RectangleF(
+                fa.X + (fb.X - fa.X) * (float)t,
+                fa.Y + (fb.Y - fa.Y) * (float)t,
+                fa.Width + (fb.Width - fa.Width) * (float)t,
+                fa.Height + (fb.Height - fa.Height) * (float)t));
         }
 
         // 文字输入: 宿主 TextBox 的字符经 KeyPreview 抬升到 Form (IME 确认后的中文照常)
@@ -1947,7 +2004,16 @@ partial class ShotService
                     string r = RecordStart(area.X, area.Y, area.Width, area.Height, 10);
                     Log("record via toolbar: " + r);
                     bool ok = r.Contains("\"ok\":true");
-                    RunOnHk(() => { if (ok) ShowRecordHud(); else ShowTrayInfo("录屏启动失败: " + r); });
+                    RunOnHk(() =>
+                    {
+                        if (ok)
+                        {
+                            ShowRecordHud();
+                            ShowRecBorder();
+                            ShowTrayInfo("已开始录制 " + area.Width + "x" + area.Height + " — 右下角红色 HUD 的 ⏹ 或托盘菜单可停止");
+                        }
+                        else ShowTrayInfo("录屏启动失败: " + r);
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -1963,6 +2029,7 @@ partial class ShotService
             {
                 string r = RecordStop();
                 CloseRecordHud();
+                CloseRecBorder();
                 Log("record stop via toolbar: " + r);
             string file = "";
             int p1 = r.IndexOf("\"file\":\"");
@@ -2022,7 +2089,7 @@ partial class ShotService
             hud.Show();
         }
 
-        static void CloseRecordHud()
+        internal static void CloseRecordHud()
         {
             RunOnHk(() =>
             {

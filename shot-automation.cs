@@ -746,6 +746,7 @@ partial class ShotService
     static readonly object recLock = new object();
     static string RecordStart(int x, int y, int w, int h, int fps)
     {
+        HookRecExitStop(); // 进程退出时自动收尾录屏 (兜底: 不让 ffmpeg 孤儿/文件烂尾)
         bool fpsNorm = false, sizeClamped = false;
         lock (recLock) // R2: 检查+置位+启动整段互斥 (并发六连曾全回 ok 共用同一路径, ffmpeg 成孤儿)
         {
@@ -843,6 +844,91 @@ partial class ShotService
     {
         if (!recording) return "{\"ok\":true,\"recording\":false}";
         return "{\"ok\":true,\"recording\":true,\"file\":\"" + JsonEscape(recPath) + "\",\"elapsedSec\":" + (int)(DateTime.Now - recStart).TotalSeconds + ",\"fps\":" + recFps + "}";
+    }
+
+    // ---- 录屏可视化: 录制区域红框环 (画在区域外圈 4px, 不遮镜头不入镜; 点击穿透) ----
+    static Form recBorder;
+
+    sealed class ClickThroughBorderForm : Form
+    {
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x00000080  // WS_EX_TOOLWINDOW: 不进 Alt+Tab
+                            | 0x00000020  // WS_EX_TRANSPARENT: 鼠标点击穿透
+                            | 0x00080000  // WS_EX_LAYERED
+                            | 0x08000000; // WS_EX_NOACTIVATE: 不抢焦点
+                return cp;
+            }
+        }
+    }
+
+    static void ShowRecBorder()
+    {
+        CloseRecBorder();
+        RunOnUi(delegate
+        {
+            try
+            {
+                Form f = new ClickThroughBorderForm();
+                f.FormBorderStyle = FormBorderStyle.None;
+                f.StartPosition = FormStartPosition.Manual;
+                Rectangle b = recRect; b.Inflate(4, 4); // 红框环在录制区外圈
+                f.Bounds = b;
+                f.TopMost = true;
+                f.ShowInTaskbar = false;
+                f.BackColor = Color.FromArgb(235, 50, 50);
+                System.Drawing.Drawing2D.GraphicsPath gp = new System.Drawing.Drawing2D.GraphicsPath();
+                gp.AddRectangle(new Rectangle(0, 0, b.Width, b.Height));
+                gp.AddRectangle(new Rectangle(4, 4, b.Width - 8, b.Height - 8)); // 挖空中间, 只留 4px 红环
+                f.Region = new Region(gp);
+                f.Show();
+                recBorder = f;
+            }
+            catch (Exception ex) { Log("rec border err: " + ex.Message); }
+        });
+    }
+
+    // 回 UI 线程执行 (录屏窗体须在创建过消息循环的线程; 与 CaptureOverlay.RunOnHk 同款, 这里独立一份给 ShotService 静态方法用)
+    static void RunOnUi(Action a)
+    {
+        try
+        {
+            Form hk = hkForm;
+            if (hk != null && hk.IsHandleCreated) hk.BeginInvoke(new MethodInvoker(delegate { try { a(); } catch (Exception ex) { Log("hk ui err: " + ex.Message); } }));
+            else { try { a(); } catch (Exception ex) { Log("hk ui fallback err: " + ex.Message); } }
+        }
+        catch { }
+    }
+
+    static void CloseRecBorder()
+    {
+        Form f = recBorder; recBorder = null;
+        if (f == null || f.IsDisposed) return;
+        try { f.BeginInvoke(new MethodInvoker(delegate { try { f.Close(); } catch { } })); }
+        catch { try { f.Close(); } catch { } }
+    }
+
+    // 进程退出保护: 托盘"退出服务"/管理员重启 时若在录屏, 立即关 stdin 让 ffmpeg 收 EOF 封装落盘 (ProcessExit 仅 2s, 不能等 Join)
+    static bool recExitHooked;
+    public static void HookRecExitStop()
+    {
+        if (recExitHooked) return;
+        recExitHooked = true;
+        AppDomain.CurrentDomain.ProcessExit += delegate
+        {
+            try
+            {
+                if (!recording) return;
+                recording = false;
+                try { recStdin.BaseStream.Close(); } catch { }
+                Log("record finalize on process exit: " + recPath);
+            }
+            catch { }
+        };
     }
 
     // ==================== UIA 批量读值 ====================
