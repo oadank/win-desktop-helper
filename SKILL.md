@@ -108,8 +108,8 @@
 - 需要行几何时无 `/ui/lines` 端点：用**三击阶梯探针**（固定 x，y 从 `rect.y+12` 起每 8px 试一次，看复制内容何时换行）+ 二分定边界，实测量出行高≈27px。
 
 ## 2026-09-06 追加两项（同一轮，已实测定位）
-5. **🟠 图片历史条目不持久化**：`ClipWatcherLoop` 图片分支入库后**漏调 `SaveClipHistory()`**（全文件仅文本/删除/清空三处调用）。实测唯一尺寸 401×303 的图已进内存 history，但 `clipboard-history.json` 里没有，直到下一次**文本复制**才被顺带写盘 → 期间服务重启/更新则图片条目全丢。修一行即可。
-6. **🟡 `/clipboard/get` 每次都新存一份 PNG**：同一张图连读 4 次 → 磁盘多出 4 个 `clip_*.png`（无内容去重）。**agent 侧纪律：不要用 `/clipboard/get` 轮询等用户复制**，会灌盘；要探测用 `clipboard_history`。
+5. **🟠 图片历史条目不持久化** —— ✅ 已修（图片分支已补 SaveClipHistory()，MD5 入库即时落盘）：`ClipWatcherLoop` 图片分支入库后**漏调 `SaveClipHistory()`**（全文件仅文本/删除/清空三处调用）。实测唯一尺寸 401×303 的图已进内存 history，但 `clipboard-history.json` 里没有，直到下一次**文本复制**才被顺带写盘 → 期间服务重启/更新则图片条目全丢。修一行即可。
+6. **🟡 `/clipboard/get` 每次都新存一份 PNG** —— ✅ 已修（MD5 文件名天然去重，同图复用零新落盘；agent 侧纪律仍建议 history 探测）：同一张图连读 4 次 → 磁盘多出 4 个 `clip_*.png`（无内容去重）。**agent 侧纪律：不要用 `/clipboard/get` 轮询等用户复制**，会灌盘；要探测用 `clipboard_history`。
 
 ## 🔴 2026-09-06 重大自伤坑：给聊天类输入框 `keyboard/type` 打多行文本 = 自动连发多条
 

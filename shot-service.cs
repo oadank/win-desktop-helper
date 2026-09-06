@@ -1262,7 +1262,7 @@ public partial class ShotService
                     {
                         string text = q["text"];
                         if (text.Length > 2000) { code = 400; body = "{\"ok\":false,\"error\":\"text too long (max 2000)\"}"; }
-                        else { TypeText(text); body = "{\"ok\":true,\"chars\":" + text.Length + ",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] type " + text.Length + " chars"); }
+                        else { int nl = 0; foreach (char cc in text) if (cc == '\n') nl++; TypeText(text); body = "{\"ok\":true,\"chars\":" + text.Length + ",\"newlines\":" + nl + (nl > 0 ? ",\"warn\":\"text contains newlines - in chat/search/command boxes Enter SENDS; prefer clipboard_set+ctrl+v\"}" : "") + ",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] type " + text.Length + " chars" + (nl > 0 ? " (" + nl + " newlines!)" : "")); }
                     }
                 }
                 else if (path == "/keyboard/press")
