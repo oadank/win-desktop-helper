@@ -169,6 +169,8 @@ partial class ShotService
         readonly ToolTip tip = new ToolTip();
         readonly int RowH, Pad;
         readonly int Rad, RadRow;
+        readonly Size designSize;   // 构造时的设计尺寸 (物理像素)
+        Point designPos;            // Show 前设定的位置
 
         // DPI 缩放系数: 本进程 PerMonitorV2 + AutoScaleMode.None → 逻辑尺寸被当物理像素直接渲染,
         // 150% 屏上弹层只有 104px 宽 (PixPin 同款 166px) 显得又小又挤。这里手动按 DPI 放大。
@@ -186,10 +188,10 @@ partial class ShotService
         {
             this.keys = keys; this.isCurrent = isCurrent; this.onPick = onPick; this.drawer = drawer; this.tipper = tipper; this.ink = ink;
             float s = UiScale();
-            RowH = (int)Math.Round(32 * s);   // PixPin 同款紧凑行高 32 (原 34)
-            Pad = (int)Math.Round(6 * s);     // 四周内边距 6 (原 4 → 蓝块几乎贴边)
-            Rad = (int)Math.Round(10 * s);
-            RadRow = (int)Math.Round(7 * s);
+            RowH = (int)Math.Round(20 * s);   // PixPin 同款紧凑行高: 显示 30px (34*1.5=51 太高, 用户要求整体缩小)
+            Pad = (int)Math.Round(4 * s);     // 显示 6px
+            Rad = (int)Math.Round(8 * s);
+            RadRow = (int)Math.Round(6 * s);
             AutoScaleMode = AutoScaleMode.None; // 关自动缩放: 手动算尺寸, 双重缩放会让行位与可见区错位 (蓝块被裁)
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -198,7 +200,8 @@ partial class ShotService
             BackColor = Color.FromArgb(40, 41, 46);
             DoubleBuffered = true;
             KeyPreview = true;
-            Size = new Size((int)Math.Round(104 * s), keys.Length * RowH + Pad * 2);
+            designSize = new Size((int)Math.Round(100 * s), keys.Length * RowH + Pad * 2); // 显示 ~150 宽 (PixPin 166)
+            Size = designSize;
             using (GraphicsPath gp = RoundPath(0, 0, Width, Height, Rad)) Region = new Region(gp);
             Log(string.Format("StylePopup ctor: s={0:F3} Size={1}x{2} RowH={3} Pad={4}", s, Width, Height, RowH, Pad));
         }
@@ -206,11 +209,18 @@ partial class ShotService
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            // WinForms PMv2 首次 Show 会按 DPI suggested rect 改写宽度 (实测 156→202, 高度不变),
-            // Region 若停留在构造时的 156 会把右侧 46px 内容整体裁掉 (用户实测"预览超出/被裁断")
-            // → 按最终 Width 重建 Region; 行布局 RowRect 本就按当前 Width 现算, 无需其它调整
+            // WinForms PMv2 首次 Show 会按 DPI suggested rect 改写窗口尺寸 (实测 156→202, 高度也可能被动),
+            // 尺寸一变 Region(圆角) 和行布局就与设计不符 → 强制拉回设计尺寸并重建 Region
+            if (Size != designSize) Size = designSize;
+            if (Location != designPos) Location = designPos;
             using (GraphicsPath gp = RoundPath(0, 0, Width, Height, Rad)) Region = new Region(gp);
-            Log(string.Format("StylePopup shown: Size={0}x{1} region rebuilt", Width, Height));
+            Log(string.Format("StylePopup shown: Size={0}x{1} (design {2}x{3}) region rebuilt", Width, Height, designSize.Width, designSize.Height));
+        }
+
+        public new void Show()
+        {
+            designPos = Location;
+            base.Show();
         }
 
         static GraphicsPath RoundPath(int x, int y, int w, int h, int d)
