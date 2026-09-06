@@ -190,19 +190,72 @@ public partial class ShotService
 
     // 窗口截图: PrintWindow+PW_RENDERFULLCONTENT 让窗口自绘进 DC (能拍到 DirectComposition/D2D 内容,
     // CopyFromScreen 拍不到 — 实测 Win11 记事本正文区黑屏)。中心区若全黑(某些应用 PrintWindow 黑屏)回退 CopyFromScreen
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern uint GetFinalPathNameByHandleW(IntPtr h, StringBuilder sb, uint len, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandleW(IntPtr h);
+
+    // R8-1: 打开句柄取"解析后真实路径"(junction/symlink/reparse 全部还原), 必须落在截图目录内。
+    // 纯字符串 StartsWith(GetFullPath) 不解析 reparse, 目录内建 junction 指向外部即可绕过 (workbuddy R8 PoC)
+    // (备用工具函数: 取句柄级最终路径; 注意对 junction 不解析目标, R8-1 已改用逐段 reparse 检查)
+    static string ResolveFinalPath(string p)
+    {
+        try
+        {
+            IntPtr h = CreateFileW(p, 0x8000000, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero); // READ_ATTRIBUTES|BACKUP_SEMANTICS, OPEN_EXISTING
+            if (h == new IntPtr(-1)) return null;
+            try
+            {
+                StringBuilder sb = new StringBuilder(1024);
+                uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
+                if (n == 0 || n >= sb.Capacity) return null;
+                string r = sb.ToString();
+                if (r.StartsWith("\\\\?\\")) r = r.Substring(4);
+                return r;
+            }
+            finally { CloseHandleW(h); }
+        }
+        catch { return null; }
+    }
+
+    static bool SafeShotPath(string path, out string real, out string why)
+    {
+        real = null; why = null;
+        if (string.IsNullOrEmpty(path)) { why = "need path"; return false; }
+        string full;
+        try { full = System.IO.Path.GetFullPath(path); } catch { why = "bad path"; return false; }
+        if (!System.IO.File.Exists(full)) { why = "file not found"; return false; }
+        string root = System.IO.Path.GetFullPath(ShotDir).TrimEnd('\\');
+        if (!full.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase)) { why = "path outside screenshots dir (安全限制)"; return false; }
+        // R8-1 实战修正: GetFinalPathNameByHandle 对 junction 不跟随(返回原路径, 实测绕过) → 逐段查 reparse 属性,
+        // 文件本体或任一中间目录是 junction/符号链接即拒 (字符串前缀 + reparse 双断)
+        try
+        {
+            if ((System.IO.File.GetAttributes(full) & System.IO.FileAttributes.ReparsePoint) != 0) { why = "文件是符号链接/junction, 拒绝"; return false; }
+            string dir = System.IO.Path.GetDirectoryName(full);
+            while (!string.IsNullOrEmpty(dir) && dir.Length >= root.Length && dir.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                if ((new System.IO.DirectoryInfo(dir).Attributes & System.IO.FileAttributes.ReparsePoint) != 0) { why = "路径中间目录含 junction/符号链接, 拒绝"; return false; }
+                string parent = System.IO.Path.GetDirectoryName(dir);
+                if (parent == dir) break;
+                dir = parent;
+            }
+        }
+        catch (Exception ex) { why = "reparse check fail: " + ex.Message; return false; }
+        real = full;
+        return true;
+    }
+
     // /ocr?path=<png>&wait=1 — 后台 OCR (复用 OcrProvider/qwen3-vl): 截图文件进、文本出, agent 无 UI 依赖
     static string OcrFile(string path, int waitMs)
     {
         try
         {
-            if (string.IsNullOrEmpty(path)) return "{\"ok\":false,\"error\":\"need path\"}";
-            string full;
-            try { full = System.IO.Path.GetFullPath(path); } catch { return "{\"ok\":false,\"error\":\"bad path\"}"; }
-            if (!System.IO.File.Exists(full)) return "{\"ok\":false,\"error\":\"file not found\"}";
-            if (!full.StartsWith(System.IO.Path.GetFullPath(ShotDir), StringComparison.OrdinalIgnoreCase))
-                return "{\"ok\":false,\"error\":\"path outside screenshots dir (安全限制)\"}";
+            string realP, whyP;
+            if (!SafeShotPath(path, out realP, out whyP)) return "{\"ok\":false,\"error\":\"" + JsonEscape(whyP) + "\"}";
             Bitmap bmp;
-            using (Bitmap src = new Bitmap(full)) bmp = new Bitmap(src); // 拷出释放文件句柄
+            using (Bitmap src = new Bitmap(realP)) bmp = new Bitmap(src); // 拷出释放文件句柄
             string text = null; string err = null;
             try
             {
@@ -248,14 +301,10 @@ public partial class ShotService
     {
         try
         {
-            if (string.IsNullOrEmpty(path)) return "{\"ok\":false,\"error\":\"need path\"}";
-            string full;
-            try { full = System.IO.Path.GetFullPath(path); } catch { return "{\"ok\":false,\"error\":\"bad path\"}"; }
-            if (!System.IO.File.Exists(full)) return "{\"ok\":false,\"error\":\"file not found\"}";
-            if (!full.StartsWith(System.IO.Path.GetFullPath(ShotDir), StringComparison.OrdinalIgnoreCase))
-                return "{\"ok\":false,\"error\":\"path outside screenshots dir (安全限制)\"}";
+            string realP, whyP;
+            if (!SafeShotPath(path, out realP, out whyP)) return "{\"ok\":false,\"error\":\"" + JsonEscape(whyP) + "\"}";
             Bitmap img;
-            using (Bitmap src = new Bitmap(full)) img = new Bitmap(src);
+            using (Bitmap src = new Bitmap(realP)) img = new Bitmap(src);
             var vs = SystemInformation.VirtualScreen;
             if (x == -1 || y == -1) { x = vs.X + vs.Width / 2 - img.Width / 2; y = vs.Y + vs.Height / 2 - img.Height / 2; }
             Rectangle r = new Rectangle(x, y, img.Width, img.Height);
@@ -1152,6 +1201,7 @@ public partial class ShotService
                 q[key] = val;
             }
 
+            bool headerOverflow = got >= buf.Length && req.IndexOf("\r\n\r\n") < 0; // R8-2: 16KB 截断不再静默假成功
             bool needUserSession = path.StartsWith("/mouse") || path.StartsWith("/keyboard") || path == "/shot" || path.StartsWith("/app") || path == "/open-repo" || path.StartsWith("/record") || path.StartsWith("/ui") || path.StartsWith("/win");
             bool control = path.StartsWith("/mouse") || path.StartsWith("/keyboard");
             int code = 200;
@@ -1160,7 +1210,12 @@ public partial class ShotService
 
             try
             {
-                if (needUserSession && MySession == 0)
+                if (headerOverflow)
+                {
+                    code = 413;
+                    body = "{\"ok\":false,\"error\":\"request too large: URL 超过 16KB 已截断(不会静默部分生效)。长文本请分段传输或先落盘再按 path 引用\"}";
+                }
+                else if (needUserSession && MySession == 0)
                 {
                     code = 503; body = "{\"ok\":false,\"error\":\"running in session 0, cannot access user desktop\"}";
                 }

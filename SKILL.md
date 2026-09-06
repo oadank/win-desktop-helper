@@ -178,3 +178,10 @@ int n = Math.Min(all.Count, max);                                       // 之�
 
 - **X1 不成立于服务侧**：manifest 已 PerMonitorV2；实测 /win/move 回报 1200×800 → /shot 真实像素 1200×800（两独立信源物理自洽）。workbuddy 独立进程读 533×400 = 其探针（PowerShell5/普通 python.exe 默认 DPI unaware）被系统 ÷1.5 virtualize。**纪律：跨进程验证窗口坐标，探针自身必须先 SetProcessDpiAwarenessContext(-4)/manifest aware，否则读到缩放假值。**
 - **X2 已修**：服务启动 4s 后后台 ping Ollama 预热（日志 ocr warmup done，实测预热后首调 /ocr 10.6s 返回不再超时）；/ocr 超时响应现带 retryable:true + waitedMs。
+
+### R8-1/R8-2 修复状态（zcode 14:1x build，PoC 复跑通过）
+
+- **R8-1 已修**（方案修正： 对 junction **不跟随**，首版仍被绕；改**逐段 reparse 属性检查**——文件本体+ShotDir 以下每个中间目录命中 ReparsePoint 即拒）。复跑：直连外部拒 / 经 junction  拒 / 经 junction  拒 / 正常文件 PASS。
+- **R8-2 已修**：请求头超 16KB（未读到 header 终止）→ 直接 413 明确拒绝，不再静默部分生效。复验：20000 字 → ，剪贴板未被截断值污染。
+- X1 探针教训（SetProcessDpiAwarenessContext(-4) 后读值逐字一致）双方已对齐，纪律有效。
+
