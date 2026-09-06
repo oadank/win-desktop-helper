@@ -1332,71 +1332,37 @@ partial class ShotService
 
         void BuildPropBar()
         {
-            // PixPin 式属性栏: 只显示当前工具相关属性 (样式/粗细收成下拉按钮, 不再全量平铺一排)
+            // 终版 PixPin: 箭头样式=6 图标条(图1); 序号=[N⇅][格式▾][大小][字号]+色板(图2); 文字=[字体▾][大小][字号]+色板(图3); 只显当前工具相关
             propBar = new ToolbarPanel();
             string[] lineTools = { "rect", "ellipse", "arrow", "pen" };
             string[] textTools = { "text", "seq" };
-            // [箭头样式 ▾] 下拉 (仅箭头工具)
-            ToolbarPanel.Btn styBtn = null;
-            styBtn = propBar.AddText(StyleShort(curArrowStyle), "箭头样式 (点选切换)", delegate
-            {
-                ContextMenuStrip m = DarkMenu();
-                int[] sv = { Annot.S_ARROW, Annot.S_BOTH, Annot.S_LINE, Annot.S_CALLOUT };
-                string[] sl = { "实线箭头", "双向箭头", "直线 (无箭头)", "标注线 (两端竖杠)" };
-                for (int i = 0; i < sv.Length; i++)
-                {
-                    int v = sv[i]; string lab = sl[i];
-                    ToolStripItem it = m.Items.Add(lab, null, delegate { curArrowStyle = v; MarkProp(); });
-                    if (curArrowStyle == v) it.Font = new Font(it.Font, FontStyle.Bold);
-                }
-                m.Show(propBar, styBtn.Rect.X, styBtn.Rect.Bottom + 2);
-            }, new[] { "arrow" });
-            styBtn.ToolKey = "styd";
+            string[] arrowOnly = { "arrow" };
+            string[] seqOnly = { "seq" };
+            // ---- 箭头样式 6 图标条 (图1) ----
+            propBar.Add("sty_arrow", "实线箭头", delegate { curArrowStyle = Annot.S_ARROW; MarkProp(); }, true, arrowOnly).ToolKey = "sty_arrow";
+            propBar.Add("sty_both", "双向箭头", delegate { curArrowStyle = Annot.S_BOTH; MarkProp(); }, true, arrowOnly).ToolKey = "sty_both";
+            propBar.Add("sty_thin", "细尾锥形", delegate { curArrowStyle = Annot.S_THIN; MarkProp(); }, true, arrowOnly).ToolKey = "sty_thin";
+            propBar.Add("sty_hollow", "空心箭头", delegate { curArrowStyle = Annot.S_HOLLOW; MarkProp(); }, true, arrowOnly).ToolKey = "sty_hollow";
+            propBar.Add("sty_line", "直线 (无箭头)", delegate { curArrowStyle = Annot.S_LINE; MarkProp(); }, true, arrowOnly).ToolKey = "sty_line";
+            propBar.Add("sty_callout", "标注线 (两端竖杠)", delegate { curArrowStyle = Annot.S_CALLOUT; MarkProp(); }, true, arrowOnly).ToolKey = "sty_callout";
             propBar.AddSep(lineTools);
-            // [线宽 ▾] 下拉 (线条类工具)
-            ToolbarPanel.Btn wdBtn = null;
-            wdBtn = propBar.AddText(WidthShort(curWidth), "线条粗细", delegate
+            // ---- 粗细 3 图标 ----
+            propBar.Add("w_thin", "细线", delegate { curWidth = 2f; MarkProp(); }, true, lineTools).ToolKey = "w_thin";
+            propBar.Add("w_mid", "中线", delegate { curWidth = 3.5f; MarkProp(); }, true, lineTools).ToolKey = "w_mid";
+            propBar.Add("w_bold", "粗线", delegate { curWidth = 6f; MarkProp(); }, true, lineTools).ToolKey = "w_bold";
+            propBar.AddSep(seqOnly);
+            // ---- 序号组 (图2): [N⇅] [格式▾] ----
+            ToolbarPanel.Btn startBtn = null;
+            startBtn = propBar.AddSpinner(seqNext.ToString(), "序号起始数字 (▲+1 / ▼-1)", delegate(bool up)
             {
-                ContextMenuStrip m = DarkMenu();
-                float[] wv = { 2f, 3.5f, 6f };
-                string[] wl = { "细线", "中线", "粗线" };
-                for (int i = 0; i < wv.Length; i++)
-                {
-                    float v = wv[i]; string lab = wl[i];
-                    ToolStripItem it = m.Items.Add(lab, null, delegate { curWidth = v; MarkProp(); });
-                    if (curWidth == v) it.Font = new Font(it.Font, FontStyle.Bold);
-                }
-                m.Show(propBar, wdBtn.Rect.X, wdBtn.Rect.Bottom + 2);
-            }, lineTools);
-            wdBtn.ToolKey = "wd";
-            propBar.AddSep(textTools);
-            // [字号] [字体] (文字/序号)
-            fontBtn = propBar.AddText(curFontPt.ToString(), "字号 (文字/序号)", delegate { ShowFontMenu(); }, textTools);
-            fontBtn.ToolKey = "f_size";
-            familyBtn = propBar.AddText(FamilyShort(curFontFamily), "字体 (文字/序号)", delegate { ShowFamilyMenu(); }, textTools);
-            familyBtn.ToolKey = "f_family";
-            propBar.AddSep();
-            // [颜色] 全工具
-            Color[] cols =
-            {
-                Color.FromArgb(242, 80, 59),   // 红 (PixPin 默认)
-                Color.FromArgb(235, 130, 50),  // 橙
-                Color.FromArgb(245, 198, 60),  // 黄
-                Color.FromArgb(94, 176, 100),  // 绿
-                Color.FromArgb(59, 125, 216),  // 蓝
-                Color.FromArgb(150, 150, 150), // 灰
-                Color.FromArgb(255, 255, 255), // 白
-            };
-            string[] cnames = { "红色", "橙色", "黄色", "绿色", "蓝色", "灰色", "白色" };
-            for (int i = 0; i < cols.Length; i++)
-            {
-                Color c = cols[i];
-                propBar.AddColor(c, cnames[i], delegate { curColor = c; MarkProp(); }).ToolKey = "col" + i;
-            }
-            // [格式] [从N⇅] (仅序号)
-            propBar.AddSep(new[] { "seq" });
+                if (up) { if (seqNext < 99) seqNext++; }
+                else { if (seqNext > 1) seqNext--; }
+                startBtn.DrawStr = seqNext.ToString(); propBar.RelayoutNow();
+                Log("capture: seq start=" + seqNext);
+            }, seqOnly);
+            startBtn.ToolKey = "seqstart";
             ToolbarPanel.Btn fmtBtn = null;
-            fmtBtn = propBar.AddText("1.2.3", "序号格式", delegate
+            fmtBtn = propBar.AddText("1.2.3 ▾", "序号格式", delegate
             {
                 ContextMenuStrip m = DarkMenu();
                 string[][] fmts = { new string[] { "1", "1.2.3" }, new string[] { "I", "I.II.III" }, new string[] { "a", "a.b.c" }, new string[] { "A", "A.B.C" } };
@@ -1406,43 +1372,61 @@ partial class ShotService
                     ToolStripItem it = m.Items.Add(label, null, delegate
                     {
                         curSeqFmt = f;
-                        if (fmtBtn != null) { fmtBtn.DrawStr = label; propBar.RelayoutNow(); }
+                        if (fmtBtn != null) { fmtBtn.DrawStr = label + " ▾"; propBar.RelayoutNow(); }
                     });
                     if (f == curSeqFmt) it.Font = new Font(it.Font, FontStyle.Bold);
                 }
                 m.Show(propBar, fmtBtn.Rect.X, fmtBtn.Rect.Bottom + 2);
-            }, new[] { "seq" });
+            }, seqOnly);
             fmtBtn.ToolKey = "seqfmt";
-            ToolbarPanel.Btn startBtn = null;
-            startBtn = propBar.AddSpinner("从" + seqNext, "序号起始数字 (▲+1 / ▼-1)", delegate(bool up)
+            propBar.AddSep(textTools);
+            // ---- 字体/大小 (图2/图3): [字体▾] [大小] [字号] ----
+            familyBtn = propBar.AddText(FamilyShort(curFontFamily) + " ▾", "字体 (文字/序号)", delegate { ShowFamilyMenu(); }, textTools);
+            familyBtn.ToolKey = "f_family";
+            propBar.AddLabel("大小", textTools);
+            fontBtn = propBar.AddText(curFontPt.ToString(), "字号 (点选切换)", delegate { ShowFontMenu(); }, textTools);
+            fontBtn.ToolKey = "f_size";
+            propBar.AddSep();
+            // ---- 色板 (图2 右下: 黑红橙黄绿蓝紫灰白) ----
+            Color[] cols =
             {
-                if (up) { if (seqNext < 99) seqNext++; }
-                else { if (seqNext > 1) seqNext--; }
-                startBtn.DrawStr = "从" + seqNext; propBar.RelayoutNow();
-                Log("capture: seq start=" + seqNext);
-            }, new[] { "seq" });
-            startBtn.ToolKey = "seqstart";
+                Color.FromArgb(17, 17, 17),    // 黑
+                Color.FromArgb(242, 80, 59),   // 红 (默认)
+                Color.FromArgb(235, 130, 50),  // 橙
+                Color.FromArgb(245, 198, 60),  // 黄
+                Color.FromArgb(94, 176, 100),  // 绿
+                Color.FromArgb(59, 125, 216),  // 蓝
+                Color.FromArgb(150, 90, 200),  // 紫
+                Color.FromArgb(150, 150, 150), // 灰
+                Color.FromArgb(255, 255, 255), // 白
+            };
+            string[] cnames = { "黑色", "红色", "橙色", "黄色", "绿色", "蓝色", "紫色", "灰色", "白色" };
+            for (int i = 0; i < cols.Length; i++)
+            {
+                Color c = cols[i];
+                propBar.AddColor(c, cnames[i], delegate { curColor = c; MarkProp(); }).ToolKey = "col" + i;
+            }
             Controls.Add(propBar);
             propBar.Visible = false;
+            MarkProp();
         }
-
-        static string StyleShort(int style)
-        {
-            if (style == Annot.S_BOTH) return "双向↔ ▾";
-            if (style == Annot.S_LINE) return "直线— ▾";
-            if (style == Annot.S_CALLOUT) return "标注线 ⊾ ▾";
-            return "实线箭头 ▾";
-        }
-        static string WidthShort(float w) { return (w <= 2.5f ? "细线" : (w <= 4.5f ? "中线" : "粗线")) + " ▾"; }
 
         void MarkProp()
         {
             foreach (var b in propBar.Btns)
             {
                 if (b.ToolKey == null) continue;
-                if (b.ToolKey == "styd") b.DrawStr = StyleShort(curArrowStyle);        // 下拉按钮回显当前样式
-                else if (b.ToolKey == "wd") b.DrawStr = WidthShort(curWidth);          // 下拉按钮回显当前线宽
-                else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;     // 色块选中圈
+                if (b.ToolKey.StartsWith("sty")) b.On =
+                    (b.ToolKey == "sty_arrow" && curArrowStyle == Annot.S_ARROW) ||
+                    (b.ToolKey == "sty_both" && curArrowStyle == Annot.S_BOTH) ||
+                    (b.ToolKey == "sty_thin" && curArrowStyle == Annot.S_THIN) ||
+                    (b.ToolKey == "sty_hollow" && curArrowStyle == Annot.S_HOLLOW) ||
+                    (b.ToolKey == "sty_line" && curArrowStyle == Annot.S_LINE) ||
+                    (b.ToolKey == "sty_callout" && curArrowStyle == Annot.S_CALLOUT);
+                else if (b.ToolKey.StartsWith("w_")) b.On = (b.ToolKey == "w_thin" && curWidth <= 2.5f) ||
+                                                            (b.ToolKey == "w_mid" && curWidth > 2.5f && curWidth <= 4.5f) ||
+                                                            (b.ToolKey == "w_bold" && curWidth > 4.5f);
+                else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
             }
             propBar.RelayoutNow();
         }
@@ -1963,6 +1947,15 @@ partial class ShotService
                         g.DrawLine(w, 4, 4.5f, 4, 13.5f);
                         g.DrawLine(w, 14, 4.5f, 14, 13.5f);
                         break;
+                    case "sty_thin": // 细尾锥形 (PixPin 图1: 尾细头宽实心三角)
+                        using (SolidBrush b = new SolidBrush(w.Color))
+                            g.FillPolygon(b, new PointF[] { new PointF(1.5f, 8.4f), new PointF(1.5f, 9.6f), new PointF(16.5f, 5.5f), new PointF(16.5f, 12.5f) });
+                        break;
+                    case "sty_hollow": // 空心箭头 (描边V头+细杆)
+                        g.DrawLine(w, 2, 9, 10, 9);
+                        using (Pen hp = new Pen(w.Color, 1.6f))
+                            g.DrawPolygon(hp, new PointF[] { new PointF(8f, 4.5f), new PointF(16.5f, 9f), new PointF(8f, 13.5f) });
+                        break;
                     case "w_thin": // 细
                         using (Pen p2 = new Pen(w.Color, 1.3f)) g.DrawLine(p2, 2, 9, 16, 9);
                         break;
@@ -2030,6 +2023,13 @@ partial class ShotService
         {
             Btn b = new Btn();
             b.Icon = icon; b.Tip = tipText; b.OnClick = onClick; b.IsToggle = toggle; b.ForTools = forTools;
+            Btns.Add(b); Relayout(); Invalidate(); return b;
+        }
+
+        public Btn AddLabel(string str, string[] forTools = null)
+        {
+            // 分组标签 (PixPin "大小"式): 灰字不可点, OnClick=null 天然无害
+            Btn b = new Btn { Icon = "#text", DrawStr = str, Tip = str, OnClick = null, Enabled = false, ForTools = forTools };
             Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
@@ -2183,8 +2183,8 @@ partial class ShotService
                 }
                 if (b.DrawStr != null)
                 {
-                    TextRenderer.DrawText(g, b.DrawStr, new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold), b.Rect,
-                                          b.Enabled ? Color.FromArgb(232, 234, 240) : Color.FromArgb(110, 114, 120),
+                    TextRenderer.DrawText(g, b.DrawStr, new Font("Microsoft YaHei UI", 10.5f, b.Enabled ? FontStyle.Bold : FontStyle.Regular), b.Rect,
+                                          b.Enabled ? Color.FromArgb(232, 234, 240) : Color.FromArgb(128, 132, 140),
                                           TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                     continue;
                 }
