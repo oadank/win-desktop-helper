@@ -871,6 +871,15 @@ partial class ShotService
             }
         }
 
+        static PointF[] LocalArrow(PointF[] local, float ox, float oy, float ang)
+        {
+            float cs = (float)Math.Cos(ang), sn = (float)Math.Sin(ang);
+            PointF[] outp = new PointF[local.Length];
+            for (int i = 0; i < local.Length; i++)
+                outp[i] = new PointF(ox + local[i].X * cs - local[i].Y * sn, oy + local[i].X * sn + local[i].Y * cs);
+            return outp;
+        }
+
         static void DrawArrowHead(Graphics g, Pen p, float tipX, float tipY, float ang, float hl)
         {
             PointF a1 = new PointF(tipX - hl * (float)Math.Cos(ang - 0.45), tipY - hl * (float)Math.Sin(ang - 0.45));
@@ -904,29 +913,65 @@ partial class ShotService
 
             if (style == Annot.S_THIN)
             {
-                // 细尾锥形: 尾尖 -> 头底渐宽 (填充) + 大实心头 (PixPin 特色款)
-                float bx = (float)(x2 - hl * 0.6 * dxc), by = (float)(y2 - hl * 0.6 * dyc);
-                float th = Math.Max(2f, w * 0.8f);
-                using (SolidBrush b = new SolidBrush(p.Color))
-                    g.FillPolygon(b, new PointF[] {
-                        new PointF(x1, y1),
-                        new PointF((float)(bx + pxc * th), (float)(by + pyc * th)),
-                        new PointF(x2, y2),
-                        new PointF((float)(bx - pxc * th), (float)(by - pyc * th)),
-                    });
-                DrawArrowHead(g, p, x2, y2, (float)ang, hl);
+                // 样式① 实心渐变柳叶箭头 (Snipaste/微信风): 尾收尖点 → 杆细到粗 → 大后掠实心三角翼, 单个填充多边形无描边
+                float L = (float)Math.Sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
+                if (L < 4) return;
+                float hhl = Math.Max(18f, L * 0.22f);           // 头长
+                if (hhl > L * 0.6f) hhl = L * 0.6f;
+                float hs2 = L - hhl;                            // 头底 x
+                float hhw = Math.Max(2.5f, w * 2.2f);           // 头底处杆半宽 (500px/默认粗≈9 → 18px 全宽)
+                float chw = hhw * 2.75f;                        // 翼半宽 = 杆端 2.5~3 倍
+                float sweep = hhl * 0.45f;                      // 倒钩后掠
+                PointF[] local = new PointF[] {
+                    new PointF(0, 0),                           // 尖尾 (1px 收尖由多边形自然成)
+                    new PointF(hs2, -hhw),
+                    new PointF(hs2 - sweep, -chw),
+                    new PointF(L, 0),
+                    new PointF(hs2 - sweep, chw),
+                    new PointF(hs2, hhw),
+                };
+                PointF[] screen = LocalArrow(local, x1, y1, (float)ang);
+                using (SolidBrush b = new SolidBrush(p.Color)) g.FillPolygon(b, screen);
                 return;
             }
 
             if (style == Annot.S_HOLLOW)
             {
-                float bx = (float)(x2 - hl * 0.9 * dxc), by = (float)(y2 - hl * 0.9 * dyc);
-                g.DrawLine(p, x1, y1, bx, by);
-                g.DrawPolygon(p, new PointF[] {
-                    new PointF(x2, y2),
-                    new PointF((float)(bx + pxc * half), (float)(by + pyc * half)),
-                    new PointF((float)(bx - pxc * half), (float)(by - pyc * half)),
-                });
+                // 样式② 空心线框箭头: 圆头封闭尾帽 + 上下平行杆线(均匀) + V 形开口双倒钩翼; 一条连续描边路径
+                float L = (float)Math.Sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
+                if (L < 4) return;
+                float lw2 = Math.Max(2.5f, w * 1.5f);           // 全程均匀线宽 = 粗细×1.5 (用户规格)
+                float bw = Math.Max(5.5f, w * 2.4f);            // 杆半宽
+                float hhl = Math.Max(20f, L * 0.2f);
+                if (hhl > L * 0.6f) hhl = L * 0.6f;
+                float hs2 = L - hhl;
+                float sw = hhl * 0.5f, fl = bw * 1.3f;          // 倒钩后掠/外展
+                float taper = Math.Max(10f, L * 0.12f);         // 尾部尖角张开区段
+                using (GraphicsPath gp = new GraphicsPath())
+                {
+                    // 尾尖 V 收口 (用户: 左侧尖尖不要圆头) → 平行杆线 → V 形开口大倒钩 → 头尖, 一圈闭合线框
+                    gp.AddPolygon(new PointF[] {
+                        new PointF(0, 0),
+                        new PointF(taper, -bw),
+                        new PointF(hs2, -bw),
+                        new PointF(hs2 - sw, -(bw + fl)),
+                        new PointF(L, 0),
+                        new PointF(hs2 - sw, bw + fl),
+                        new PointF(hs2, bw),
+                        new PointF(taper, bw),
+                    });
+                    using (Matrix mx = new Matrix())
+                    {
+                        mx.Rotate((float)(ang * 57.29578), MatrixOrder.Append);
+                        mx.Translate(x1, y1, MatrixOrder.Append);
+                        gp.Transform(mx);
+                    }
+                    using (Pen fp = new Pen(p.Color, lw2))
+                    {
+                        fp.StartCap = LineCap.Round; fp.EndCap = LineCap.Round; fp.LineJoin = LineJoin.Round;
+                        g.DrawPath(fp, gp);
+                    }
+                }
                 return;
             }
 
@@ -1357,21 +1402,42 @@ partial class ShotService
             string[] textTools = { "text", "seq" };
             string[] arrowOnly = { "arrow" };
             string[] seqOnly = { "seq" };
-            // ---- 箭头样式两行网格 (图2: 5+1 格, 选中蓝底, 预览线加长) ----
+            // ---- 箭头样式下拉 (竖向菜单+长预览, 用户钦点) ----
             int[] styleOrder = { Annot.S_ARROW, Annot.S_BOTH, Annot.S_THIN, Annot.S_HOLLOW, Annot.S_LINE, Annot.S_CALLOUT };
-            propBar.AddStyleGrid(arrowOnly, styleOrder,
-                delegate(int v) { curArrowStyle = v; MarkProp(); },
-                delegate(int gi) { return gi >= 0 && gi < styleOrder.Length && styleOrder[gi] == curArrowStyle; });
-            propBar.AddSep(lineTools);
-            // ---- 线宽竖排列表 (图1: 3 行, 选中行高亮, 长预览线按实际粗细) ----
-            float[] widthVals = { 2f, 3.5f, 6f };
-            propBar.AddWidthList(lineTools, widthVals,
-                delegate(int ri) { curWidth = widthVals[ri]; MarkProp(); },
-                delegate(int ri)
+            string[] styleNames = { "实线箭头", "双向箭头", "细尾锥形", "空心箭头", "直线", "标注线" };
+            ToolbarPanel.Btn styBtn = null;
+            styBtn = propBar.AddPreviewDropdown("箭头样式 (点选切换)", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                m.ShowImageMargin = true; m.ImageScalingSize = new Size(78, 22);
+                for (int i = 0; i < styleOrder.Length; i++)
                 {
-                    float wv = widthVals[ri];
-                    return (wv <= 2.5f && curWidth <= 2.5f) || (wv > 2.5f && wv <= 4.5f && curWidth > 2.5f && curWidth <= 4.5f) || (wv > 4.5f && curWidth > 4.5f);
-                });
+                    int v = styleOrder[i]; string lab = styleNames[i];
+                    ToolStripItem it = m.Items.Add(lab, ToolbarPanel.MakeStylePreviewBmp(v, true), delegate { curArrowStyle = v; MarkProp(); });
+                    if (curArrowStyle == v) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, styBtn.Rect.X, styBtn.Rect.Bottom + 2);
+            }, arrowOnly);
+            styBtn.ToolKey = "styd";
+            propBar.AddSep(lineTools);
+            // ---- 粗细下拉 (竖排菜单: 每项一条按实际粗细的长预览线) ----
+            float[] widthVals = { 2f, 3.5f, 6f };
+            string[] widthNames = { "细线", "中线", "粗线" };
+            ToolbarPanel.Btn wdBtn = null;
+            wdBtn = propBar.AddPreviewDropdown("线条粗细", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                m.ShowImageMargin = true; m.ImageScalingSize = new Size(78, 22);
+                for (int i = 0; i < widthVals.Length; i++)
+                {
+                    float v = widthVals[i]; string lab = widthNames[i];
+                    ToolStripItem it = m.Items.Add(lab, ToolbarPanel.MakeWidthPreviewBmp(v, true), delegate { curWidth = v; MarkProp(); });
+                    bool cur = (v <= 2.5f && curWidth <= 2.5f) || (v > 2.5f && v <= 4.5f && curWidth > 2.5f && curWidth <= 4.5f) || (v > 4.5f && curWidth > 4.5f);
+                    if (cur) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, wdBtn.Rect.X, wdBtn.Rect.Bottom + 2);
+            }, lineTools);
+            wdBtn.ToolKey = "wd";
             propBar.AddSep(seqOnly);
             // ---- 序号组 (图2): [N⇅] [格式▾] ----
             ToolbarPanel.Btn startBtn = null;
@@ -1438,16 +1504,8 @@ partial class ShotService
             foreach (var b in propBar.Btns)
             {
                 if (b.ToolKey == null) continue;
-                if (b.ToolKey.StartsWith("sty")) b.On =
-                    (b.ToolKey == "sty_arrow" && curArrowStyle == Annot.S_ARROW) ||
-                    (b.ToolKey == "sty_both" && curArrowStyle == Annot.S_BOTH) ||
-                    (b.ToolKey == "sty_thin" && curArrowStyle == Annot.S_THIN) ||
-                    (b.ToolKey == "sty_hollow" && curArrowStyle == Annot.S_HOLLOW) ||
-                    (b.ToolKey == "sty_line" && curArrowStyle == Annot.S_LINE) ||
-                    (b.ToolKey == "sty_callout" && curArrowStyle == Annot.S_CALLOUT);
-                else if (b.ToolKey.StartsWith("w_")) b.On = (b.ToolKey == "w_thin" && curWidth <= 2.5f) ||
-                                                            (b.ToolKey == "w_mid" && curWidth > 2.5f && curWidth <= 4.5f) ||
-                                                            (b.ToolKey == "w_bold" && curWidth > 4.5f);
+                if (b.ToolKey == "styd") { var po = b.Preview; b.Preview = ToolbarPanel.MakeStylePreviewBmp(curArrowStyle, false); if (po != null) po.Dispose(); }
+                else if (b.ToolKey == "wd") { var po = b.Preview; b.Preview = ToolbarPanel.MakeWidthPreviewBmp(curWidth, false); if (po != null) po.Dispose(); }
                 else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
             }
             propBar.RelayoutNow();
@@ -1458,6 +1516,10 @@ partial class ShotService
             if (propBar == null || bar == null) return;
             Rectangle vs = SystemInformation.VirtualScreen;
             int x = bar.Left, y = bar.Bottom + 4;
+            // X1 (workbuddy): 主条被顶到选区上方时(选区贴屏底), 属性栏放主条下方会压住选区右下正在标的标注/正文 → 翻到主条上方(选区外)
+            Rectangle cand = new Rectangle(x, y, propBar.Width, propBar.Height);
+            Rectangle selv = RectangleToClient(sel);
+            if (cand.IntersectsWith(selv)) y = bar.Top - propBar.Height - 4;
             if (x + propBar.Width > vs.Right - 4) x = vs.Right - propBar.Width - 4;
             if (y + propBar.Height > vs.Bottom - 4) y = bar.Top - propBar.Height - 4;
             if (y < vs.Top + 4) y = vs.Top + 4;
@@ -2004,6 +2066,7 @@ partial class ShotService
             public Action<bool> OnSpin;        // 一体化微调框: true=上三角(+1) false=下三角(-1)
             public bool IsToggle, On, Enabled = true;
             public bool IsSpinner;             // PixPin 同款: 左半当前值文字 + 右半上▲下▼三角
+            public Image Preview;              // 下拉按钮的当前预览图 (非空: 画图+右侧▾)
             public Rectangle Rect;
             public Color Swatch = Color.Empty; // 颜色圆点按钮 (非空时画色块而非图标)
             public string DrawStr;             // 文字按钮 (非空时画文字而非图标, 如字号/字体当前值)
@@ -2067,6 +2130,89 @@ partial class ShotService
             Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
+        // 下拉按钮: 左侧当前预览图 + 右侧▾; 点击弹菜单由调用方闭包实现 (菜单项带长预览图)
+        public Btn AddPreviewDropdown(string tipText, Action onClick, string[] forTools = null)
+        {
+            Btn b = new Btn { Icon = "#prev", Tip = tipText, OnClick = onClick, ForTools = forTools };
+            Btns.Add(b); Relayout(); Invalidate(); return b;
+        }
+
+        // 下拉菜单项/按钮用的长预览图 (用户: "展示的长度稍微长点, 太短看不清楚")
+        public static Bitmap MakeStylePreviewBmp(int style, bool forMenu)
+        {
+            int W = forMenu ? 76 : 46, H = forMenu ? 22 : 18;
+            Bitmap bmp = new Bitmap(W, H);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                float cy = H / 2f, x1 = 3, x2 = W - 3;
+                Color c = Color.FromArgb(232, 234, 240);
+                using (Pen p = new Pen(c, 2.4f))
+                {
+                    if (style == Annot.S_ARROW)
+                    {
+                        g.DrawLine(p, x1, cy, x2 - 8, cy);
+                        using (SolidBrush b = new SolidBrush(c)) g.FillPolygon(b, new PointF[] { new PointF(x2, cy), new PointF(x2 - 10f, cy - 5.5f), new PointF(x2 - 10f, cy + 5.5f) });
+                    }
+                    else if (style == Annot.S_BOTH)
+                    {
+                        g.DrawLine(p, x1 + 8, cy, x2 - 8, cy);
+                        using (SolidBrush b = new SolidBrush(c))
+                        {
+                            g.FillPolygon(b, new PointF[] { new PointF(x2, cy), new PointF(x2 - 10f, cy - 5.5f), new PointF(x2 - 10f, cy + 5.5f) });
+                            g.FillPolygon(b, new PointF[] { new PointF(x1, cy), new PointF(x1 + 10f, cy - 5.5f), new PointF(x1 + 10f, cy + 5.5f) });
+                        }
+                    }
+                    else if (style == Annot.S_LINE) g.DrawLine(p, x1, cy, x2, cy);
+                    else if (style == Annot.S_CALLOUT)
+                    {
+                        g.DrawLine(p, x1 + 5, cy, x2 - 5, cy);
+                        g.DrawLine(p, x1 + 5, cy - 7, x1 + 5, cy + 7);
+                        g.DrawLine(p, x2 - 5, cy - 7, x2 - 5, cy + 7);
+                    }
+                    else if (style == Annot.S_THIN)
+                    {
+                        float LL = x2 - x1, hhl2 = LL * 0.34f, hs3 = LL - hhl2;
+                        float hhw2 = 2.6f, chw2 = hhw2 * 2.6f, sw3 = hhl2 * 0.45f;
+                        using (SolidBrush b = new SolidBrush(c))
+                            g.FillPolygon(b, new PointF[] {
+                                new PointF(x1, cy), new PointF(x1 + hs3, cy - hhw2), new PointF(x1 + hs3 - sw3, cy - chw2),
+                                new PointF(x2, cy), new PointF(x1 + hs3 - sw3, cy + chw2), new PointF(x1 + hs3, cy + hhw2) });
+                    }
+                    else if (style == Annot.S_HOLLOW)
+                    {
+                        float bw2 = 3.4f, hs3 = (x2 - x1) * 0.68f, sw3 = 5.5f, fl2 = 4.2f, tp2 = (x2 - x1) * 0.13f;
+                        using (GraphicsPath gp = new GraphicsPath())
+                        {
+                            gp.AddPolygon(new PointF[] {
+                                new PointF(x1, cy), new PointF(x1 + tp2, cy - bw2), new PointF(x1 + hs3, cy - bw2),
+                                new PointF(x1 + hs3 - sw3, cy - bw2 - fl2), new PointF(x2, cy),
+                                new PointF(x1 + hs3 - sw3, cy + bw2 + fl2), new PointF(x1 + hs3, cy + bw2), new PointF(x1 + tp2, cy + bw2) });
+                            using (Pen hp = new Pen(c, 1.9f)) { hp.LineJoin = LineJoin.Round; g.DrawPath(hp, gp); }
+                        }
+                    }
+                }
+            }
+            return bmp;
+        }
+
+        public static Bitmap MakeWidthPreviewBmp(float lw, bool forMenu)
+        {
+            int W = forMenu ? 76 : 46, H = forMenu ? 22 : 18;
+            Bitmap bmp = new Bitmap(W, H);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                float cy = H / 2f;
+                using (Pen p = new Pen(Color.FromArgb(232, 234, 240), lw))
+                {
+                    p.StartCap = System.Drawing.Drawing2D.LineCap.Round; p.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                    g.DrawLine(p, 3, cy, W - 3, cy);
+                }
+            }
+            return bmp;
+        }
+
         public Btn AddLabel(string str, string[] forTools = null)
         {
             // 分组标签 (PixPin "大小"式): 灰字不可点, OnClick=null 天然无害
@@ -2124,8 +2270,7 @@ partial class ShotService
             {
                 if (!b.Visible) { b.Rect = Rectangle.Empty; continue; } // 按工具隐藏: 不占位
                 if (b.Icon == "|") { b.Rect = new Rectangle(x, Height > 48 ? 20 : 12, 1, Height > 48 ? 48 : 24); x += 13; }
-                else if (b.GridKind == 1) { b.Rect = new Rectangle(x, 4, 5 * 40, 80); x += 5 * 40; }
-                else if (b.GridKind == 2) { b.Rect = new Rectangle(x, 4, 52, 80); x += 52; }
+                else if (b.Icon == "#prev") { int pw = b.Preview != null ? b.Preview.Width + 22 : 64; b.Rect = new Rectangle(x, 4, Math.Max(56, pw), 40); x += Math.Max(56, pw); }
                 else if (b.Icon == "#text" && !string.IsNullOrEmpty(b.DrawStr))
                 {
                     // 文字按钮按实际文字宽布局, 否则"从12"/"I.II.III"被裁成"从1"/"I.II"
@@ -2279,6 +2424,17 @@ partial class ShotService
                             lp.StartCap = System.Drawing.Drawing2D.LineCap.Round; lp.EndCap = System.Drawing.Drawing2D.LineCap.Round;
                             g.DrawLine(lp, rowR.X + 8, rowR.Y + rh / 2f, rowR.Right - 8, rowR.Y + rh / 2f);
                         }
+                    }
+                    continue;
+                }
+                if (b.Icon == "#prev")
+                {
+                    if (b.Preview != null)
+                        g.DrawImage(b.Preview, b.Rect.X + 4, b.Rect.Y + (b.Rect.Height - b.Preview.Height) / 2);
+                    using (Pen dp = new Pen(Color.FromArgb(200, 204, 212), 1.6f))
+                    {
+                        float dx = b.Rect.Right - 11;
+                        g.DrawPolygon(dp, new PointF[] { new PointF(dx, b.Rect.Y + 17), new PointF(dx + 7, b.Rect.Y + 17), new PointF(dx + 3.5f, b.Rect.Y + 24) });
                     }
                     continue;
                 }
