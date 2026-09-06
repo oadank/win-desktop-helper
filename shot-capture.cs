@@ -1499,7 +1499,8 @@ partial class ShotService
         {
             if (propBar == null || bar == null) return;
             Rectangle vs = SystemInformation.VirtualScreen;
-            int x = bar.Left, y = bar.Bottom + 4;
+            // X1 (workbuddy): 主条 Height 被钳 88 但 WinForms 内部维持 96 → bar.Bottom 虚高 16px, 属性栏悬空压标注区 — 用真实底边 bar.Top+88
+            int x = bar.Left, y = bar.Top + 88 + (bar.Height > 48 ? 8 : 4);
             // X1 (workbuddy): 主条被顶到选区上方时(选区贴屏底), 属性栏放主条下方会压住选区右下正在标的标注/正文 → 翻到主条上方(选区外)
             Rectangle cand = new Rectangle(x, y, propBar.Width, propBar.Height);
             Rectangle selv = RectangleToClient(sel);
