@@ -1338,18 +1338,21 @@ partial class ShotService
             string[] textTools = { "text", "seq" };
             string[] arrowOnly = { "arrow" };
             string[] seqOnly = { "seq" };
-            // ---- 箭头样式 6 图标条 (图1) ----
-            propBar.Add("sty_arrow", "实线箭头", delegate { curArrowStyle = Annot.S_ARROW; MarkProp(); }, true, arrowOnly).ToolKey = "sty_arrow";
-            propBar.Add("sty_both", "双向箭头", delegate { curArrowStyle = Annot.S_BOTH; MarkProp(); }, true, arrowOnly).ToolKey = "sty_both";
-            propBar.Add("sty_thin", "细尾锥形", delegate { curArrowStyle = Annot.S_THIN; MarkProp(); }, true, arrowOnly).ToolKey = "sty_thin";
-            propBar.Add("sty_hollow", "空心箭头", delegate { curArrowStyle = Annot.S_HOLLOW; MarkProp(); }, true, arrowOnly).ToolKey = "sty_hollow";
-            propBar.Add("sty_line", "直线 (无箭头)", delegate { curArrowStyle = Annot.S_LINE; MarkProp(); }, true, arrowOnly).ToolKey = "sty_line";
-            propBar.Add("sty_callout", "标注线 (两端竖杠)", delegate { curArrowStyle = Annot.S_CALLOUT; MarkProp(); }, true, arrowOnly).ToolKey = "sty_callout";
+            // ---- 箭头样式两行网格 (图2: 5+1 格, 选中蓝底, 预览线加长) ----
+            int[] styleOrder = { Annot.S_ARROW, Annot.S_BOTH, Annot.S_THIN, Annot.S_HOLLOW, Annot.S_LINE, Annot.S_CALLOUT };
+            propBar.AddStyleGrid(arrowOnly, styleOrder,
+                delegate(int v) { curArrowStyle = v; MarkProp(); },
+                delegate(int gi) { return gi >= 0 && gi < styleOrder.Length && styleOrder[gi] == curArrowStyle; });
             propBar.AddSep(lineTools);
-            // ---- 粗细 3 图标 ----
-            propBar.Add("w_thin", "细线", delegate { curWidth = 2f; MarkProp(); }, true, lineTools).ToolKey = "w_thin";
-            propBar.Add("w_mid", "中线", delegate { curWidth = 3.5f; MarkProp(); }, true, lineTools).ToolKey = "w_mid";
-            propBar.Add("w_bold", "粗线", delegate { curWidth = 6f; MarkProp(); }, true, lineTools).ToolKey = "w_bold";
+            // ---- 线宽竖排列表 (图1: 3 行, 选中行高亮, 长预览线按实际粗细) ----
+            float[] widthVals = { 2f, 3.5f, 6f };
+            propBar.AddWidthList(lineTools, widthVals,
+                delegate(int ri) { curWidth = widthVals[ri]; MarkProp(); },
+                delegate(int ri)
+                {
+                    float wv = widthVals[ri];
+                    return (wv <= 2.5f && curWidth <= 2.5f) || (wv > 2.5f && wv <= 4.5f && curWidth > 2.5f && curWidth <= 4.5f) || (wv > 4.5f && curWidth > 4.5f);
+                });
             propBar.AddSep(seqOnly);
             // ---- 序号组 (图2): [N⇅] [格式▾] ----
             ToolbarPanel.Btn startBtn = null;
@@ -1987,6 +1990,11 @@ partial class ShotService
             public string DrawStr;             // 文字按钮 (非空时画文字而非图标, 如字号/字体当前值)
             public bool Visible = true;        // 属性栏按工具显隐 (PixPin 式), false 时 Relayout/Hit 跳过
             public string[] ForTools;          // 仅这些工具可见; null = 全工具可见
+            public int GridKind;               // 0=普通; 1=箭头样式两行网格(图2); 2=线宽竖排列表(图1)
+            public Action<int> OnPick;         // 点中第 N 格(样式=箭头style值; 列表=行号)
+            public int[] Values;               // GridKind1: 格位->style值; GridKind2: 行号->width*10
+            public Func<bool> IsSelGrid;       // 第 N 格是否选中 (Func 闭包带 gi? 简化: Func<int,bool>)
+            public System.Func<int, bool> SelAt; // 格位/行号 -> 是否当前选中
         }
 
         public Btn AddText(string str, string tipText, Action onClick, string[] forTools = null)
@@ -2023,6 +2031,20 @@ partial class ShotService
         {
             Btn b = new Btn();
             b.Icon = icon; b.Tip = tipText; b.OnClick = onClick; b.IsToggle = toggle; b.ForTools = forTools;
+            Btns.Add(b); Relayout(); Invalidate(); return b;
+        }
+
+        // 箭头样式两行网格 (PixPin 图2): 6 格 (5+1), 选中蓝底, 格内画放大的样式预览
+        public Btn AddStyleGrid(string[] forTools, int[] styleOrder, Action<int> onPick, System.Func<int, bool> selAt)
+        {
+            Btn b = new Btn { Icon = "grid", Tip = "箭头样式", GridKind = 1, Values = styleOrder, OnPick = onPick, ForTools = forTools, SelAt = selAt };
+            Btns.Add(b); Relayout(); Invalidate(); return b;
+        }
+
+        // 线宽竖排列表 (PixPin 图1): 3 行, 每行一条放大加粗的预览线, 选中行高亮
+        public Btn AddWidthList(string[] forTools, float[] widths, Action<int> onPick, System.Func<int, bool> selAt)
+        {
+            Btn b = new Btn { Icon = "wlist", Tip = "线条粗细", GridKind = 2, Values = Array.ConvertAll(widths, w => (int)(w * 10)), OnPick = onPick, ForTools = forTools, SelAt = selAt };
             Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
@@ -2082,7 +2104,9 @@ partial class ShotService
             foreach (Btn b in Btns)
             {
                 if (!b.Visible) { b.Rect = Rectangle.Empty; continue; } // 按工具隐藏: 不占位
-                if (b.Icon == "|") { b.Rect = new Rectangle(x, 12, 1, 24); x += 13; }
+                if (b.Icon == "|") { b.Rect = new Rectangle(x, Height > 48 ? 20 : 12, 1, Height > 48 ? 48 : 24); x += 13; }
+                else if (b.GridKind == 1) { b.Rect = new Rectangle(x, 4, 5 * 40, 80); x += 5 * 40; }
+                else if (b.GridKind == 2) { b.Rect = new Rectangle(x, 4, 52, 80); x += 52; }
                 else if (b.Icon == "#text" && !string.IsNullOrEmpty(b.DrawStr))
                 {
                     // 文字按钮按实际文字宽布局, 否则"从12"/"I.II.III"被裁成"从1"/"I.II"
@@ -2095,7 +2119,15 @@ partial class ShotService
                 else { b.Rect = new Rectangle(x, 4, 40, 40); x += 40; }
             }
             if (tf != null) try { tf.Dispose(); } catch { }
-            Width = x + 6; Height = 48;
+            bool tall = false;
+            foreach (Btn b in Btns) if (b.Visible && b.GridKind != 0) { tall = true; break; }
+            Width = x + 6; Height = tall ? 88 : 48;
+            foreach (Btn b in Btns) // 普通按钮垂直居中 (面板变高时)
+                if (b.Visible && b.GridKind == 0 && b.Icon != "|" && b.Icon != "#text" && !string.IsNullOrEmpty(b.Icon) && b.Icon != "color" && b.Rect.Height == 40)
+                    b.Rect = new Rectangle(b.Rect.X, (Height - b.Rect.Height) / 2, b.Rect.Width, b.Rect.Height);
+            foreach (Btn b in Btns)
+                if (b.Visible && b.GridKind == 0 && b.Icon != "|" && b.Rect.Height == 40 && (b.Icon == "color" || b.Icon == "#text"))
+                    b.Rect = new Rectangle(b.Rect.X, (Height - 40) / 2, b.Rect.Width, 40);
             // 宽度变化后钳回父窗内, 防右端按钮(从N/▲▼)被推出屏幕 — 用户实测"10显示不出来"的真凶
             if (Parent != null)
             {
@@ -2119,6 +2151,49 @@ partial class ShotService
                 if (b.Visible && b.Icon != "|" && b.Rect.Contains(p)) return i;
             }
             return -1;
+        }
+
+        // 样式预览 (网格格内, 加长放大): 在 cell 中央画 -16..+16 的线型
+        static void DrawStylePreview(Graphics g, Rectangle cell, int style, Color c)
+        {
+            float cx = cell.X + cell.Width / 2f, cy = cell.Y + cell.Height / 2f;
+            float x1 = cx - 15, x2 = cx + 15;
+            using (Pen p = new Pen(c, 2.4f))
+            {
+                switch (style)
+                {
+                    case Annot.S_ARROW:
+                        g.DrawLine(p, x1, cy, x2 - 7, cy);
+                        using (SolidBrush b = new SolidBrush(c))
+                            g.FillPolygon(b, new PointF[] { new PointF(x2, cy), new PointF(x2 - 9f, cy - 5.5f), new PointF(x2 - 9f, cy + 5.5f) });
+                        break;
+                    case Annot.S_BOTH:
+                        g.DrawLine(p, x1 + 7, cy, x2 - 7, cy);
+                        using (SolidBrush b = new SolidBrush(c))
+                        {
+                            g.FillPolygon(b, new PointF[] { new PointF(x2, cy), new PointF(x2 - 9f, cy - 5.5f), new PointF(x2 - 9f, cy + 5.5f) });
+                            g.FillPolygon(b, new PointF[] { new PointF(x1, cy), new PointF(x1 + 9f, cy - 5.5f), new PointF(x1 + 9f, cy + 5.5f) });
+                        }
+                        break;
+                    case Annot.S_LINE:
+                        g.DrawLine(p, x1, cy, x2, cy);
+                        break;
+                    case Annot.S_CALLOUT:
+                        g.DrawLine(p, x1 + 4, cy, x2 - 4, cy);
+                        g.DrawLine(p, x1 + 4, cy - 7, x1 + 4, cy + 7);
+                        g.DrawLine(p, x2 - 4, cy - 7, x2 - 4, cy + 7);
+                        break;
+                    case Annot.S_THIN: // 细尾锥形
+                        using (SolidBrush b = new SolidBrush(c))
+                            g.FillPolygon(b, new PointF[] { new PointF(x1, cy - 1.2f), new PointF(x1, cy + 1.2f), new PointF(x2, cy - 6f), new PointF(x2, cy + 6f) });
+                        break;
+                    case Annot.S_HOLLOW: // 空心: 细杆 + 描边箭头
+                        g.DrawLine(p, x1, cy, x2 - 8, cy);
+                        using (Pen hp = new Pen(c, 2f))
+                            g.DrawPolygon(hp, new PointF[] { new PointF(x2 - 9f, cy - 6.5f), new PointF(x2, cy), new PointF(x2 - 9f, cy + 6.5f) });
+                        break;
+                }
+            }
         }
 
         static void RoundFill(Graphics g, Brush br, Rectangle r, int rad)
@@ -2147,7 +2222,7 @@ partial class ShotService
             {
                 Btn b = Btns[i];
                 if (b.Icon == "|" || !b.Visible) continue;
-                if (i == hoverIdx || b.On)
+                if ((i == hoverIdx || b.On) && b.GridKind == 0)
                 {
                     using (SolidBrush br = new SolidBrush(b.On ? Color.FromArgb(58, 62, 74) : (i == hoverIdx ? Color.FromArgb(64, 68, 80) : Color.Transparent)))
                         RoundFill(g, br, b.Rect, 8);
@@ -2156,6 +2231,37 @@ partial class ShotService
                         using (Pen ring = new Pen(Color.FromArgb(235, 238, 244), 2f))
                             g.DrawEllipse(ring, b.Rect.X + 7, b.Rect.Y + 7, 26, 26);
                     }
+                }
+                if (b.GridKind == 1)
+                {
+                    // 箭头样式网格 (图2): 格 40x40, 5 列两行, 选中格蓝底, 预览线加长
+                    for (int gi = 0; gi < b.Values.Length; gi++)
+                    {
+                        int col = gi % 5, row = gi / 5;
+                        Rectangle cell = new Rectangle(b.Rect.X + col * 40, b.Rect.Y + row * 40, 40, 40);
+                        bool sel = b.SelAt != null && b.SelAt(gi);
+                        if (sel) { using (SolidBrush hb = new SolidBrush(Color.FromArgb(52, 122, 214))) RoundFill(g, hb, cell, 6); }
+                        DrawStylePreview(g, cell, b.Values[gi], sel ? Color.White : Color.FromArgb(222, 226, 232));
+                    }
+                    continue;
+                }
+                if (b.GridKind == 2)
+                {
+                    // 线宽竖排列表 (图1): 3 行, 选中行高亮, 每行一条按实际宽度的长预览线
+                    int rows = b.Values.Length, rh = b.Rect.Height / rows;
+                    for (int ri = 0; ri < rows; ri++)
+                    {
+                        Rectangle rowR = new Rectangle(b.Rect.X, b.Rect.Y + ri * rh, b.Rect.Width, rh);
+                        float wv = b.Values[ri] / 10f;
+                        bool sel = b.SelAt != null && b.SelAt(ri);
+                        if (sel) { using (SolidBrush hb = new SolidBrush(Color.FromArgb(52, 122, 214))) RoundFill(g, hb, rowR, 6); }
+                        using (Pen lp = new Pen(sel ? Color.White : Color.FromArgb(222, 226, 232), wv))
+                        {
+                            lp.StartCap = System.Drawing.Drawing2D.LineCap.Round; lp.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                            g.DrawLine(lp, rowR.X + 8, rowR.Y + rh / 2f, rowR.Right - 8, rowR.Y + rh / 2f);
+                        }
+                    }
+                    continue;
                 }
                 if (b.Swatch != Color.Empty)
                 {
@@ -2244,7 +2350,17 @@ partial class ShotService
             if (e.Button == MouseButtons.Left && h >= 0 && h == hoverIdx)
             {
                 Btn b = Btns[h];
-                if (b.Enabled && b.IsSpinner && b.OnSpin != null)
+                if (b.Enabled && b.GridKind == 1 && b.OnPick != null)
+                {
+                    int col = (e.X - b.Rect.X) / 40, row = (e.Y - b.Rect.Y) / 40, gi = row * 5 + col;
+                    if (gi >= 0 && gi < b.Values.Length) { b.OnPick(b.Values[gi]); Log("style pick " + b.Values[gi]); }
+                }
+                else if (b.Enabled && b.GridKind == 2 && b.OnPick != null)
+                {
+                    int ri = (e.Y - b.Rect.Y) / (b.Rect.Height / b.Values.Length);
+                    if (ri >= 0 && ri < b.Values.Length) { b.OnPick(ri); Log("width pick " + b.Values[ri]); }
+                }
+                else if (b.Enabled && b.IsSpinner && b.OnSpin != null)
                     b.OnSpin(e.Y < b.Rect.Top + b.Rect.Height / 2); // 上半=+1 下半=-1
                 else if (b.Enabled && b.OnClick != null) b.OnClick();
             }
