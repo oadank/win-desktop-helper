@@ -83,14 +83,44 @@
 
 ---
 
-## 待处理（涉及架构，未动）
+## ✅ 修复后独立复测（2026-09-06 08:0x，workbuddy 独立跑，不采信 zcode 数据）
 
-- **#4 app_run**：异步化 or 换 `UseShellExecute=false`
-- **#5 / #6 close**：返回值校验 + 排查响应写不回
+服务端新版 build `09-06 07:58`（含 kernel32 修复），提交 `a9c7b75`。**6 个 bug 全部关闭。**
+
+| # | 修复前 | 独立复测结果 | zcode 自报 |
+|---|---|---|---|
+| 4 | app_run 卡 40-50s | **mspaint 0.55s / 记事本 0.29s**，返回 `{"ok":true,"pid":..,"window":{hwnd,pid,title,process}}` | 0.82s |
+| 6 | close 卡 35s | **0.23s**，`{"ok":true,"closed":true}`，关闭后窗口数 0 | 0.28s |
+| 5 | 脏窗口返回 ok 但没关 | **2.03s**，`{"ok":true,"closed":false,"hint":"window still alive - 可能有未保存对话框, 用 ui_find name=保存 定位处理"}`，剩余窗口=1 | 同 |
+| 3 | activate 后台窗口 500 | **3/3 + 1 次补充全成功**，0.0~0.05s，`via:"direct"`，不再 500 | 0.05s via=alt |
+| 1/2 | bridge 动词映射 + move 丢 w/h | 实测 maximize→rect `2578×1398`、move→rect 精确 `150,120,900,650` | — |
+
+### 诚实标注（未覆盖点）
+**#3 的 fallback 分支（`via=alt/attach`）没能构造触发** —— 所有测试都是 `via:"direct"`（`SetForegroundWindow` 首次就成功）。
+因此 `GetCurrentThreadId` 那行代码路径**未被直接执行验证**，只是 500 现象消失 + API 归属（kernel32）属常识性正确。
+**后续若遇到 `via=alt` 场景，才算真正覆盖该分支。**
 
 ## 未测
 
 - `app_runas`（弹 UAC 需人工确认）
+
+## 🔴 测试事故与经验（重要）
+
+**盲打污染**：复测中 `keyboard_type` 时前台是 **WorkBuddy**，16 字符 `DIRTY-VERIFY-999` 被打进了用户正在使用的输入框。
+
+**根本原因**：`active_window` 工具的 HTTP 端点是 **`/active`**，不是字面上的 `/active_window`。前面几轮一直调 `/active_window`（返回 404），**前台确认环节形同虚设**——这才是盲打的真因，不是"忘了确认"。
+
+**正确做法（已验证有效）**：
+```python
+def activate_until_front(title, want_proc, maxtry=6):
+    for _ in range(maxtry):
+        call("/win/activate?title=" + quote(title))
+        sleep(1.2)
+        if json.loads(call("/active")).get("process") == want_proc:
+            return True
+    return False   # 确认不了就不许打字
+```
+用这个模板：1 次确认成功，打字后 `front` 字段回显 `Notepad`，零污染。
 
 
 ---
