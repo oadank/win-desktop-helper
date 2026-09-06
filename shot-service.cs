@@ -194,7 +194,35 @@ public partial class ShotService
     static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern uint GetFinalPathNameByHandleW(IntPtr h, StringBuilder sb, uint len, uint flags);
-    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandleW(IntPtr h);
+    [DllImport("kernel32.dll", EntryPoint = "CloseHandle", SetLastError = true)] static extern bool CloseHandleW(IntPtr h); // kernel32 导出名是 CloseHandle (W 后缀不存在→EntryPointNotFound 静默吞进 catch)
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandle(IntPtr h, out BY_HANDLE_FILE_INFORMATION info);
+    [StructLayout(LayoutKind.Sequential, Pack = 4)] // FILETIME 用 long 会被 Pack=8 对齐插 padding → nNumberOfLinks 读错位 (硬链接漏检根因)
+    struct BY_HANDLE_FILE_INFORMATION
+    {
+        public uint dwFileAttributes;
+        public long ftCreationTime, ftLastAccessTime, ftLastWriteTime;
+        public uint dwVolumeSerialNumber, nFileSizeHigh, nFileSizeLow, nNumberOfLinks, nFileIndexHigh, nFileIndexLow;
+    }
+
+    // R9-1: NTFS 硬链接无 ReparsePoint 属性位、路径也在白名单内 — 唯一可靠信号是 link count>1 (正常截图产物恒为 1)
+    static int GetHardLinkCount(string path)
+    {
+        try
+        {
+            IntPtr h = CreateFileW(path, 0x80000000, 1, IntPtr.Zero, 3, 0, IntPtr.Zero); // GENERIC_READ (纯 READ_ATTRIBUTES 在紧 ACL 下 err=5) + share READ; BACKUP_SEMANTICS 开文件需特权→恒失败 (实测 linkcount=-1 根因)
+            if (h == new IntPtr(-1)) { Log("[hl] open fail err=" + System.Runtime.InteropServices.Marshal.GetLastWin32Error() + " path=" + path); return -1; }
+            try
+            {
+                BY_HANDLE_FILE_INFORMATION fi;
+                bool gi = GetFileInformationByHandle(h, out fi);
+                if (!gi) Log("[hl] getinfo fail err=" + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                return gi ? (int)fi.nNumberOfLinks : -1;
+            }
+            finally { CloseHandleW(h); }
+        }
+        catch (Exception ex) { Log("[hl] exception: " + ex.GetType().Name + ": " + ex.Message); return -1; }
+    }
 
     // R8-1: 打开句柄取"解析后真实路径"(junction/symlink/reparse 全部还原), 必须落在截图目录内。
     // 纯字符串 StartsWith(GetFullPath) 不解析 reparse, 目录内建 junction 指向外部即可绕过 (workbuddy R8 PoC)
@@ -203,12 +231,16 @@ public partial class ShotService
     {
         try
         {
-            IntPtr h = CreateFileW(p, 0x8000000, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero); // READ_ATTRIBUTES|BACKUP_SEMANTICS, OPEN_EXISTING
-            if (h == new IntPtr(-1)) return null;
+            IntPtr h = CreateFileW(p, 0x80000000, 1, IntPtr.Zero, 3, 0, IntPtr.Zero); // 文件版 GENERIC_READ; 目录失败再退 BACKUP_SEMANTICS
+            if (h == new IntPtr(-1))
+            {
+                h = CreateFileW(p, 0x8000000, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero); // 目录分支: BACKUP_SEMANTICS
+                if (h == new IntPtr(-1)) return null;
+            }
             try
             {
                 StringBuilder sb = new StringBuilder(1024);
-                uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
+                uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 2); // FILE_NAME_RESOLVED_BIT: 解析 junction (workbuddy 勘误采纳)
                 if (n == 0 || n >= sb.Capacity) return null;
                 string r = sb.ToString();
                 if (r.StartsWith("\\\\?\\")) r = r.Substring(4);
@@ -226,6 +258,8 @@ public partial class ShotService
         string full;
         try { full = System.IO.Path.GetFullPath(path); } catch { why = "bad path"; return false; }
         if (!System.IO.File.Exists(full)) { why = "file not found"; return false; }
+        int hlc = GetHardLinkCount(full); Log("[safe] linkcount=" + hlc + " for " + full);
+        if (hlc > 1) { why = "hardlink (nNumberOfLinks>1) 拒绝"; return false; } // R9-1: 硬链接无 reparse 位/路径合法, 唯一信号=link count
         string root = System.IO.Path.GetFullPath(ShotDir).TrimEnd('\\');
         if (!full.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase)) { why = "path outside screenshots dir (安全限制)"; return false; }
         // R8-1 实战修正: GetFinalPathNameByHandle 对 junction 不跟随(返回原路径, 实测绕过) → 逐段查 reparse 属性,

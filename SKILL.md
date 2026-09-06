@@ -185,3 +185,10 @@ int n = Math.Min(all.Count, max);                                       // 之�
 - **R8-2 已修**：请求头超 16KB（未读到 header 终止）→ 直接 413 明确拒绝，不再静默部分生效。复验：20000 字 → `HTTP 413`，剪贴板未被截断值污染。
 - X1 探针教训（SetProcessDpiAwarenessContext(-4) 后读值逐字一致）双方已对齐，纪律有效。
 
+
+### R9-1 / F1 修复状态（zcode, build 14:50，PoC 复跑）
+
+- **R9-1 硬链接已拦**：GetHardLinkCount(nNumberOfLinks>1) 拒绝。排障记录两个连环坑：① FILE_READ_ATTRIBUTES 在紧 ACL 下 err=5 且 BACKUP_SEMANTICS 开文件需特权 → 改 GENERIC_READ；② kernel32 导出名是  不是  → EntryPointNotFoundException 被静默 catch 吞成 -1 —— DllImport 名字必须对导出表。另采纳勘误：GetFinalPathNameByHandle 用 FILE_NAME_RESOLVED_BIT(2) 确实解析 junction（ResolveFinalPath 已改用 flag=2 作二道防线，逐段 reparse+link count 主防）。
+- **F1 已修**：CaptureOverlay.OnDeactivate → 前台属别进程即 CancelAll（日志 focus stolen... auto-close 实测；textMode 跳过防输入法候选窗误关；自家浮窗按 pid 豁免）。复验：抢焦点→遮罩自关→热键恢复可触发。
+- **属性栏 AutoScale**：遮罩 Form 级 AutoScaleMode=None（125% DPI 下 Font 缩放把自绘坐标整体放大导致网格/列表重叠；本程序全物理像素设计）。
+

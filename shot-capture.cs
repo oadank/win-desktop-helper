@@ -214,6 +214,7 @@ partial class ShotService
 
         public CaptureOverlay(Bitmap preShot)
         {
+            AutoScaleMode = AutoScaleMode.None; // 125% DPI 下 Form 的 Font 缩放会整体放大子控件坐标 → 属性栏网格/列表错位重叠; 本程序全按物理像素设计
             frozen = preShot;
             // 性能关键 (PixPin 同款"反向遮罩"): 背景直接用冻结原图 (框内=原亮度透出),
             // 暗层在 OnPaint 里画成「选区外的 4 块纯色矩形」— 每帧零大图 DrawImage, 只填纯色。
@@ -322,6 +323,24 @@ partial class ShotService
                 using (SolidBrush wb = new SolidBrush(Color.White)) g.FillRectangle(wb, rc);
                 using (Pen bp = new Pen(Color.FromArgb(70, 130, 220), 1.5f)) g.DrawRectangle(bp, rc);
             }
+        }
+
+        // F1 (workbuddy R9): 遮罩失焦(被别进程抢焦点/UAC/通知) → Esc 打不到本窗, 热键 busy,ignore → 滞留全屏糊罩 DoS。
+        // 修法: 失焦且前台属别进程 → 自动关闭; textMode(输入法候选窗夺焦)/自家浮窗(结果/录屏菜单/历史窗) 不触发
+        protected override void OnDeactivate(EventArgs e)
+        {
+            base.OnDeactivate(e);
+            try
+            {
+                if (IsDisposed || textMode) return;
+                IntPtr fg = GetForegroundWindow();
+                if (fg == IntPtr.Zero || fg == Handle) return;
+                uint pid; GetWindowThreadProcessId(fg, out pid);
+                if (pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return; // 自家浮窗短暂夺焦
+                Log("capture: focus stolen by pid " + pid + ", auto-close to avoid stuck overlay");
+                CancelAll();
+            }
+            catch (Exception ex) { Log("deactivate err: " + ex.Message); }
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
