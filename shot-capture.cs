@@ -1722,7 +1722,7 @@ partial class ShotService
             bar.Add("translate", "翻译", delegate { ActTranslate(); });
             bar.Add("pin", "贴图 (钉到桌面)", delegate { ActPin(); });
             bar.Add("rec", "录屏 (延迟可选)", delegate { ShowRecMenu(); });
-            bar.Add("longshot", "长截图 (自动滚动拼接)", delegate { StartLongShot(sel, this); });
+            bar.Add("longshot", "长截图 (滚动拼接: 手动滚轮或自动↑↓, 可切横向)", delegate { StartLongShot(sel, this); });
             bar.Add("save", "保存到截图目录", delegate { ActSave(); });
             bar.AddSep();
             // [输出组]
@@ -2250,7 +2250,9 @@ partial class ShotService
                     string path = SaveToShotDir(bmp);
                     try { Clipboard.SetImage(bmp); } catch { }
                     Log("capture saved: " + path + " (image copied to clipboard)");
-                    ShowTrayInfo("已截图: " + path);
+                    // 老大要求: 不用点了没反应的系统气泡, 保存后直接打开图片
+                    try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
+                    catch (Exception ox) { Log("capture open err: " + ox.Message); ShowTrayInfo("已保存: " + path); }
                 }
                 Close();
             }
@@ -2472,13 +2474,14 @@ partial class ShotService
                         using (SolidBrush b2 = new SolidBrush(Color.FromArgb(235, 60, 50)))
                             g.FillRectangle(b2, 4.5f, 4.5f, 9, 9);
                         break;
-                    case "longshot": // 虚线框 + 向下箭头 (滚动长截图)
-                        w.DashStyle = DashStyle.Dash;
-                        g.DrawRectangle(w, 1.5f, 1.5f, 15, 12);
-                        w.DashStyle = DashStyle.Solid;   // ⚠ 不能用 DashPattern=null 复位, 会抛 ArgumentException
-                        g.DrawLine(w, 9, 5, 9, 13);
+                    case "longshot": // 页面 + 向下箭头 (滚动长截图拼接)
+                        g.DrawRectangle(w, 2.5f, 2f, 10, 13.5f);   // 页面
+                        g.DrawLine(w, 5, 5.5f, 10.5f, 5.5f);       // 文字行1
+                        g.DrawLine(w, 5, 8.5f, 10.5f, 8.5f);       // 文字行2
+                        g.DrawLine(w, 5, 11.5f, 8.5f, 11.5f);      // 文字行3(短)
+                        g.DrawLine(w, 15, 3.5f, 15, 11f);          // 箭头杆
                         using (SolidBrush b3 = new SolidBrush(w.Color))
-                            g.FillPolygon(b3, new PointF[] { new PointF(9f, 16.5f), new PointF(5.5f, 12f), new PointF(12.5f, 12f) });
+                            g.FillPolygon(b3, new PointF[] { new PointF(15f, 15.2f), new PointF(12f, 11.5f), new PointF(18f, 11.5f) });
                         break;
                     case "sty_arrow": // 实线箭头预览
                         g.DrawLine(w, 2, 9, 14, 9);

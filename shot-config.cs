@@ -124,6 +124,10 @@ partial class ShotService
         f.TopMost = true;
         f.BackColor = cBg;
         f.KeyPreview = true;
+        // 禁用 WinForms 自动缩放: 本窗体全是绝对像素布局+显式 pt 字体, 缩放交给 GDI 按 DPI 渲染即可。
+        // (2026-09-07 踩坑: 开机计划任务提权启动后, 启动时机太早, WinForms 按字体基准自动缩放抓错基准,
+        //  设置窗字体被放大 2 倍+控件互相叠。AutoScaleMode.None 一刀切死这个变量)
+        f.AutoScaleMode = AutoScaleMode.None;
 
         DarkUI.MakeTitleBar(f, "  设置");
 

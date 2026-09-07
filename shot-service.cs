@@ -58,6 +58,8 @@ public partial class ShotService
 
     // ---- Win32 ----
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);   // Win10 1703+; -4 = PerMonitorV2
+    [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int value);               // 2 = per-monitor
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll", SetLastError = true)]
@@ -2150,6 +2152,20 @@ public partial class ShotService
     [STAThread]
     public static void Main(string[] args)
     {
+        // DPI 感知必须最先设: 任何窗口创建之后再设会静默失败 (时好时坏的根源)。
+        // 优先 Per-Monitor V2 (不绑定启动时机, 任何时刻启动都按当前显示器真实 DPI 渲染)。
+        // (2026-09-07 踩坑: 改为开机计划任务提权启动后, 启动太早, 旧的 SetProcessDPIAware 绑错 DPI,
+        //  整个进程所有窗口被系统拉大——托盘菜单/设置窗全都巨大。PMv2 一刀根治)
+        try
+        {
+            if (!SetProcessDpiAwarenessContext(new IntPtr(-4))) throw new InvalidOperationException("pmv2 rejected");
+        }
+        catch
+        {
+            try { if (SetProcessDpiAwareness(2) != 0) throw new InvalidOperationException("shcore rejected"); }
+            catch { try { SetProcessDPIAware(); } catch { } }
+        }
+
         // 断言不再弹模态框 (服务弹 Debug.Assert 框会挂死整个 UI 线程, 还读不到内容) — 全部改写日志
         try
         {
@@ -2286,7 +2302,7 @@ public partial class ShotService
         }
         catch { }
 
-        try { SetProcessDPIAware(); } catch { }
+        // DPI 感知已在 Main 最顶设置 (必须在任何窗口创建之前, 见文件头说明)
         // .NET 4.8 默认 TLS1.0, GitHub API 需 TLS1.2 (否则更新检测失败)
         try { System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12; } catch { }
         Log("shot-service v" + APP_VERSION + " build=" + build + " session=" + MySession + " pid=" + Process.GetCurrentProcess().Id +
