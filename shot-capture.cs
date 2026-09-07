@@ -1722,6 +1722,7 @@ partial class ShotService
             bar.Add("translate", "翻译", delegate { ActTranslate(); });
             bar.Add("pin", "贴图 (钉到桌面)", delegate { ActPin(); });
             bar.Add("rec", "录屏 (延迟可选)", delegate { ShowRecMenu(); });
+            bar.Add("longshot", "长截图 (自动滚动拼接)", delegate { StartLongShot(sel, this); });
             bar.Add("save", "保存到截图目录", delegate { ActSave(); });
             bar.AddSep();
             // [输出组]
@@ -2470,6 +2471,14 @@ partial class ShotService
                     case "stop": // 红方块 (停止录制)
                         using (SolidBrush b2 = new SolidBrush(Color.FromArgb(235, 60, 50)))
                             g.FillRectangle(b2, 4.5f, 4.5f, 9, 9);
+                        break;
+                    case "longshot": // 虚线框 + 向下箭头 (滚动长截图)
+                        w.DashStyle = DashStyle.Dash;
+                        g.DrawRectangle(w, 1.5f, 1.5f, 15, 12);
+                        w.DashStyle = DashStyle.Solid;   // ⚠ 不能用 DashPattern=null 复位, 会抛 ArgumentException
+                        g.DrawLine(w, 9, 5, 9, 13);
+                        using (SolidBrush b3 = new SolidBrush(w.Color))
+                            g.FillPolygon(b3, new PointF[] { new PointF(9f, 16.5f), new PointF(5.5f, 12f), new PointF(12.5f, 12f) });
                         break;
                     case "sty_arrow": // 实线箭头预览
                         g.DrawLine(w, 2, 9, 14, 9);
