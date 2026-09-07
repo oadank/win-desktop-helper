@@ -60,7 +60,8 @@ partial class ShotService
         sb.Append("    \"enabled\": " + J(d["pick.enabled"]) + ",\n");
         sb.Append("    \"askEndpoint\": " + J(d["pick.askEndpoint"]) + ",\n");
         sb.Append("    \"askKey\": " + J(d["pick.askKey"]) + ",\n");
-        sb.Append("    \"askModel\": " + J(d["pick.askModel"]) + "\n");
+        sb.Append("    \"askModel\": " + J(d["pick.askModel"]) + ",\n");
+        sb.Append("    \"askPrompt\": " + J(d["pick.askPrompt"]) + "\n");
         sb.Append("  }\n");
         sb.Append("}\n");
         File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
@@ -105,6 +106,7 @@ partial class ShotService
         d["pick.askEndpoint"] = Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
         d["pick.askKey"] = Cfg("pick.askKey", "sk-200418");
         d["pick.askModel"] = Cfg("pick.askModel", "GwV4F");
+        d["pick.askPrompt"] = Cfg("pick.askPrompt", "");
 
         string loadedBaiduKey = d["translate.baiduKey"];
         string loadedApiKey = d["translate.apiKey"];
@@ -294,6 +296,16 @@ partial class ShotService
         pkShow.ForeColor = cDim; pkShow.Font = new Font("Microsoft YaHei UI", 9f);
         pkShow.CheckedChanged += (s, e) => { pkKey.PasswordChar = pkShow.Checked ? '\0' : '*'; };
         mkDim(pgPick, "翻译引擎沿用「翻译」页的设置; 问AI 默认走本机 litellm 网关(:4000)", LX, 196);
+        mkL(pgPick, "附加提示词:", LX, 226);
+        TextBox pkPrompt = new TextBox();
+        pkPrompt.Multiline = true;
+        pkPrompt.Left = FX; pkPrompt.Top = 223; pkPrompt.Width = PW - FX - 8; pkPrompt.Height = 88;
+        pkPrompt.BackColor = cField; pkPrompt.ForeColor = cText; pkPrompt.BorderStyle = BorderStyle.FixedSingle;
+        pkPrompt.Font = new Font("Microsoft YaHei UI", 9f);
+        pkPrompt.Text = d["pick.askPrompt"];
+        pkPrompt.ScrollBars = ScrollBars.Vertical;
+        pgPick.Controls.Add(pkPrompt);
+        mkDim(pgPick, "会拼在问AI问题前面, 定制回答风格/角色(如\"我是高中生, 用通俗比喻讲解, 尽量举例子\")。留空=默认风格", LX, 320);
 
         // 分类切换
         Panel[] pages = { pgTr, pgOcr, pgCap, pgClip, pgVol, pgPick };
@@ -391,6 +403,7 @@ partial class ShotService
             d["pick.askModel"] = pkModel.Text.Trim();
             // 密钥留空 = 不修改已存值 (和翻译页同款逻辑)
             d["pick.askKey"] = pkKey.Text.Trim().Length > 0 ? pkKey.Text.Trim() : loadedPickKey;
+            d["pick.askPrompt"] = pkPrompt.Text.Trim();
             try
             {
                 SaveCfgDict(d);

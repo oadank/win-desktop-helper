@@ -389,14 +389,15 @@ const TOOLS = [
   },
   {
     name: 'pick_config',
-    description: '划词悬浮球配置（常驻功能，取代豆包划词）。enabled=0/1 开关划词(立即生效+持久化)；askEndpoint/askKey/askModel 改「问AI」后端(默认本机 litellm :4000 / GwV4F)。带参修改，不带参返回当前状态。翻译引擎沿用「翻译」设置。',
+    description: '划词悬浮球配置（常驻功能，取代豆包划词）。enabled=0/1 开关划词(立即生效+持久化)；askEndpoint/askKey/askModel 改「问AI」后端(默认本机 litellm :4000 / GwV4F)；askPrompt 问AI附加提示词(定制回答风格/角色, 传 "|" 清空回默认)。带参修改，不带参返回当前状态。翻译引擎沿用「翻译」设置。',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         enabled: { type: 'number', description: '0|1 开关划词悬浮球' },
         askEndpoint: { type: 'string', description: '问AI 的 /chat/completions 地址' },
         askKey: { type: 'string', description: '问AI 的 API Key' },
-        askModel: { type: 'string', description: '问AI 模型名' }
+        askModel: { type: 'string', description: '问AI 模型名' },
+        askPrompt: { type: 'string', description: '问AI 附加提示词(拼在问题前, 定制风格/角色); 传 "|" 清空' }
       }
     }
   },
@@ -662,6 +663,7 @@ function buildUrl(name, a) {
       if (a.askEndpoint) qs.push('askEndpoint=' + enc(a.askEndpoint));
       if (a.askKey) qs.push('askKey=' + enc(a.askKey));
       if (a.askModel) qs.push('askModel=' + enc(a.askModel));
+      if (a.askPrompt !== undefined) qs.push('askPrompt=' + enc(a.askPrompt));
       return { path: '/pick-config', qs };
     }
     default: return null;

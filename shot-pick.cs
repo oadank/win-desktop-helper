@@ -244,6 +244,10 @@ partial class ShotService
     // 任意参数传空字符串 = 不修改该项; 返回当前生效配置
     static string PickConfig(int enabled, string askEndpoint, string askKey, string askModel, int save)
     {
+        return PickConfig(enabled, askEndpoint, askKey, askModel, "", save);
+    }
+    static string PickConfig(int enabled, string askEndpoint, string askKey, string askModel, string askPrompt, int save)
+    {
         if (enabled >= 0) pickEnabled = enabled == 1 ? 1 : 0;
         try
         {
@@ -261,6 +265,9 @@ partial class ShotService
             d["pick.askEndpoint"] = askEndpoint.Length > 0 ? askEndpoint : Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
             d["pick.askKey"] = askKey.Length > 0 ? askKey : Cfg("pick.askKey", "sk-200418");
             d["pick.askModel"] = askModel.Length > 0 ? askModel : Cfg("pick.askModel", "GwV4F");
+            // 附加提示词: 允许显式清空(传空格再 trim 为空)—— 与其余"空=不改"约定不同, 用前导 '|' 表示"清空为默认"
+            if (askPrompt == "|") d["pick.askPrompt"] = "";
+            else d["pick.askPrompt"] = askPrompt.Length > 0 ? askPrompt : Cfg("pick.askPrompt", "");
             if (save == 1) SaveCfgDict(d);
         }
         catch (Exception ex) { Log("pick config err: " + ex.Message); }
@@ -268,7 +275,8 @@ partial class ShotService
         return "{\"ok\":true,\"enabled\":" + pickEnabled + ",\"askEndpoint\":\"" + JsonEscape(Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions")) +
                "\",\"askModel\":\"" + JsonEscape(Cfg("pick.askModel", "GwV4F")) +
                "\",\"askKeySet\":" + (Cfg("pick.askKey", "").Length > 0 ? "true" : "false") +
-               ",\"saved\":" + save + "}";
+               ",\"askPrompt\":\"" + JsonEscape(Cfg("pick.askPrompt", "")) +
+               "\",\"saved\":" + save + "}";
     }
 
     static string PickOneLine(string s)
@@ -603,7 +611,9 @@ partial class ShotService
                 string ep = Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
                 string key = Cfg("pick.askKey", "sk-200418");
                 string model = Cfg("pick.askModel", "GwV4F");
-                string prompt = "简明回答下面内容（中文，不超过 300 字，直接给结论，不要复述问题）：\n\n" + text;
+                // 附加提示词(设置页「划词」/pick_config askPrompt 可配): 作为 system 消息前置, 定制回答风格/角色/侧重点
+                string extra = (Cfg("pick.askPrompt", "") ?? "").Trim();
+                string prompt = (extra.Length > 0 ? extra + "\n\n" : "") + "简明回答下面内容（中文，不超过 300 字，直接给结论，不要复述问题）：\n\n" + text;
                 string json = "{\"model\":" + EscapeJson(model) + ",\"messages\":[{\"role\":\"user\",\"content\":" + EscapeJson(prompt) + "}],\"max_tokens\":800}";
                 using (var wc = new WebClient())
                 {
