@@ -336,6 +336,19 @@ const TOOLS = [
     description: '查询录屏状态 {recording,seconds,file}',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} }
   },
+  {
+    name: 'longshot',
+    description: '长截图(滚动拼接, AI 直达无 UI): 对屏幕区域自动滚动并拼接成整图, 存文件返回 path。x,y,w,h=屏幕物理坐标必填; dir=down/up/left/right(默认down, 即滚动方向); max_screens=上限(默认60); timeout_ms=超时(默认120000)。自动滚到内容尽头停止。调用前建议先把目标窗口置前并算好客户区屏幕坐标',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' },
+        dir: { type: 'string', enum: ['down', 'up', 'left', 'right'] },
+        max_screens: { type: 'number' }, timeout_ms: { type: 'number' }
+      },
+      required: ['x', 'y', 'w', 'h']
+    }
+  },
   // ---- 应用 ----
   {
     name: 'app_run',
@@ -629,6 +642,13 @@ function buildUrl(name, a) {
     }
     case 'record_stop': return { path: '/record/stop', qs: [] };
     case 'record_status': return { path: '/record/status', qs: [] };
+    case 'longshot': {
+      const qs = ['x=' + a.x, 'y=' + a.y, 'w=' + a.w, 'h=' + a.h];
+      if (a.dir) qs.push('dir=' + enc(a.dir));
+      if (a.max_screens !== undefined) qs.push('max_screens=' + a.max_screens);
+      if (a.timeout_ms !== undefined) qs.push('timeout_ms=' + a.timeout_ms);
+      return { path: '/longshot', qs };
+    }
     case 'app_run': {
       let qs = ['path=' + enc(a.path)];
       if (a.args) qs.push('args=' + enc(a.args));

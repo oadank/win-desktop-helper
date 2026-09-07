@@ -1512,7 +1512,7 @@ public partial class ShotService
             }
 
             bool headerOverflow = got >= buf.Length && req.IndexOf("\r\n\r\n") < 0; // R8-2: 16KB 截断不再静默假成功
-            bool needUserSession = path.StartsWith("/mouse") || path.StartsWith("/keyboard") || path == "/shot" || path.StartsWith("/app") || path == "/open-repo" || path.StartsWith("/record") || path.StartsWith("/ui") || path.StartsWith("/win");
+            bool needUserSession = path.StartsWith("/mouse") || path.StartsWith("/keyboard") || path == "/shot" || path.StartsWith("/app") || path == "/open-repo" || path.StartsWith("/record") || path.StartsWith("/ui") || path.StartsWith("/win") || path == "/longshot";
             bool control = path.StartsWith("/mouse") || path.StartsWith("/keyboard");
             int code = 200;
             string body = "";
@@ -1923,6 +1923,17 @@ public partial class ShotService
                 }
                 else if (path == "/record/stop") { body = RecordStop(); CaptureOverlay.CloseRecordHud(); CloseRecBorder(); Log("[rec] stop"); }
                 else if (path == "/record/status") { body = RecordStatus(); }
+                else if (path == "/longshot")
+                {
+                    // AI 直达长截图: x,y,w,h 必填(屏幕物理坐标), dir=down/up/left/right, max_screens/timeout_ms 可选
+                    int lx = 0, ly = 0, lw = 0, lh = 0, lms = 0, ltmo = 0;
+                    TryInt(q, "x", out lx); TryInt(q, "y", out ly); TryInt(q, "w", out lw); TryInt(q, "h", out lh);
+                    TryInt(q, "max_screens", out lms); TryInt(q, "timeout_ms", out ltmo);
+                    string ldir = q.ContainsKey("dir") ? q["dir"] : "down";
+                    if (lw <= 0 || lh <= 0) { code = 400; body = "{\"ok\":false,\"error\":\"need x,y,w,h (屏幕物理坐标)\"}"; }
+                    else body = LongShotAutoJson(lx, ly, lw, lh, ldir, lms, ltmo);
+                    Log("[longshot] http " + ldir + " " + lx + "," + ly + " " + lw + "x" + lh);
+                }
                 else if (path == "/app/exit")
                 {
                     // 优雅退出: 录制中会先触发 ProcessExit 钩子关 stdin 让 ffmpeg 落盘 (需显式 confirm 防误触)
@@ -2952,6 +2963,13 @@ public partial class ShotService
                 }
                 case "record_stop": return McpText(RecordStop(), false);
                 case "record_status": return McpText(RecordStatus(), false);
+                case "longshot":
+                {
+                    // AI 直达: 区域自动滚动长截图, 存文件返回 path
+                    int lx = McpParamInt(a, "x"), ly = McpParamInt(a, "y"), lw = McpParamInt(a, "w"), lh = McpParamInt(a, "h");
+                    if (lw <= 0 || lh <= 0) return McpText("{\"ok\":false,\"error\":\"need x,y,w,h (屏幕物理坐标), dir=down/up/left/right\"}", false);
+                    return McpText(LongShotAutoJson(lx, ly, lw, lh, McpParam(a, "dir"), McpParamInt(a, "max_screens"), McpParamInt(a, "timeout_ms")), false);
+                }
                 case "app_runas": return McpText(AppRunAs(McpParam(a, "path"), McpParam(a, "args")), false);
                 default: return McpText("unknown tool: " + name, true);
             }
