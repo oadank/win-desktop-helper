@@ -387,6 +387,19 @@ const TOOLS = [
       }
     }
   },
+  {
+    name: 'pick_config',
+    description: '划词悬浮球配置（常驻功能，取代豆包划词）。enabled=0/1 开关划词(立即生效+持久化)；askEndpoint/askKey/askModel 改「问AI」后端(默认本机 litellm :4000 / GwV4F)。带参修改，不带参返回当前状态。翻译引擎沿用「翻译」设置。',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        enabled: { type: 'number', description: '0|1 开关划词悬浮球' },
+        askEndpoint: { type: 'string', description: '问AI 的 /chat/completions 地址' },
+        askKey: { type: 'string', description: '问AI 的 API Key' },
+        askModel: { type: 'string', description: '问AI 模型名' }
+      }
+    }
+  },
   // ---- SKILL 手册 (强制闸门的唯一入口, 必须暴露给客户端, 否则死锁) ----
   {
     name: 'get_skill',
@@ -642,6 +655,14 @@ function buildUrl(name, a) {
       if (a.step !== undefined) qs.push('step=' + a.step);
       if (a.reverse !== undefined) qs.push('reverse=' + a.reverse);
       return { path: '/taskbar-volume', qs };
+    }
+    case 'pick_config': {
+      let qs = [];
+      if (a.enabled !== undefined) qs.push('enabled=' + a.enabled);
+      if (a.askEndpoint) qs.push('askEndpoint=' + enc(a.askEndpoint));
+      if (a.askKey) qs.push('askKey=' + enc(a.askKey));
+      if (a.askModel) qs.push('askModel=' + enc(a.askModel));
+      return { path: '/pick-config', qs };
     }
     default: return null;
   }

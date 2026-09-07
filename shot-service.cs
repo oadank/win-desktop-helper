@@ -839,6 +839,7 @@ public partial class ShotService
         {
             if (nCode != HC_ACTION) return CallNextHookEx(volHook, nCode, wParam, lParam);
             MSLLHOOKSTRUCT ms = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+            PickOnMouse((int)wParam, ms.pt.x, ms.pt.y); // 划词检测: 必须在 volEnabled 判断之前, 音量关了划词也要能用 (回调内只记坐标, 1ms 内返回)
             if (volEnabled != 1) return CallNextHookEx(volHook, nCode, wParam, lParam);
             if ((int)wParam == WM_MBUTTONDOWN && IsPointOnTaskbar(ms.pt))
             {
@@ -1017,6 +1018,7 @@ public partial class ShotService
         {
             try
             {
+                if (pickBusy == 1) { Thread.Sleep(150); continue; } // 划词取词中: 跳过本轮, 别把 Ctrl+C 的临时内容记进剪贴板历史
                 if (clipEnabled == 1 && Clipboard.ContainsImage())
                 {
                     // 图片入历史: MD5 命名入库(同图去重精确到字节, 3采样点漏检已根治), 条目 "[图片] 路径" (AI 可 Read 该图/OCR/传多模态)
@@ -1550,6 +1552,17 @@ public partial class ShotService
                     body = "{\"ok\":true,\"enabled\":" + volEnabled + ",\"reverse\":" + volReverse + ",\"step\":" + volStep +
                            ",\"triggers\":" + Interlocked.Read(ref volTriggers) + ",\"calls\":" + Interlocked.Read(ref volCalls) + ",\"taskbarWnds\":" + taskbarWnds.Length + ",\"rects\":\"" + dr.ToString() + "\",\"wheel\":{\"pt\":" + Interlocked.Read(ref volLastWheelPtX) + "," + Interlocked.Read(ref volLastWheelPtY) + ",\"hit\":" + Interlocked.Read(ref volLastWheelHit) + ",\"tick\":" + Interlocked.Read(ref volLastWheelTicks) + "},\"hook\":\"" + volHook + "\"}";
                 }
+                else if (path == "/pick-config")
+                {
+                    // 划词悬浮球配置: GET 查状态; ?enabled=0|1 开关; ?askModel/?askEndpoint/?askKey 改「问AI」后端
+                    // 写回 shot-service.json (设置页同一份配置, 保存即两边可见)
+                    int pen = -1;
+                    if (q.ContainsKey("enabled")) { int v; if (int.TryParse(q["enabled"], out v)) pen = v == 1 ? 1 : 0; }
+                    string sEp = q.ContainsKey("askEndpoint") ? q["askEndpoint"] : "";
+                    string sKey = q.ContainsKey("askKey") ? q["askKey"] : "";
+                    string sModel = q.ContainsKey("askModel") ? q["askModel"] : "";
+                    body = PickConfig(pen, sEp, sKey, sModel, 1);
+                }
                 else if (path == "/clipboard/history")
                 {
                     // 剪贴板历史: GET 返回最近 N 条(默认全部, ?limit=N 截断)。给 AI 查询/复用粘贴内容
@@ -1955,8 +1968,10 @@ public partial class ShotService
             int ve; if (int.TryParse(Cfg("volume.enabled", "1"), out ve)) volEnabled = ve == 1 ? 1 : 0;
             int vs; if (int.TryParse(Cfg("volume.step", "2"), out vs) && vs >= 1 && vs <= 20) volStep = vs;
             int vr; if (int.TryParse(Cfg("volume.reverse", "0"), out vr)) volReverse = vr == 1 ? 1 : 0;
+            int pe; if (int.TryParse(Cfg("pick.enabled", "1"), out pe)) pickEnabled = pe == 1 ? 1 : 0;
             Log("runtime settings: dir=" + ShotDir + " clipMax=" + clipMax + " clipEnabled=" + clipEnabled +
-                " vol[en=" + volEnabled + " step=" + volStep + " rev=" + volReverse + "]");
+                " vol[en=" + volEnabled + " step=" + volStep + " rev=" + volReverse + "]" +
+                " pick[en=" + pickEnabled + " ask=" + Cfg("pick.askModel", "GwV4F") + "]");
         }
         catch (Exception ex) { Log("load runtime settings err: " + ex.Message); }
     }
@@ -2290,6 +2305,7 @@ public partial class ShotService
             hookT.IsBackground = true;
             hookT.Start();
             Log("mouse hook thread started");
+            PickInit(); // 划词悬浮球(豆包替代): 专属 STA 线程, 剪贴板取词需要 STA
         }
         catch (Exception ex) { Log("mouse hook thread err: " + ex.Message); }
 
@@ -2773,6 +2789,14 @@ public partial class ShotService
                     if (McpParam(a, "reverse") == "0") volReverse = 0;
                     return McpText("{\"ok\":true,\"enabled\":" + volEnabled + ",\"reverse\":" + volReverse + ",\"step\":" + volStep + ",\"taskbarWnds\":" + taskbarWnds.Length + "}", false);
                 }
+                case "pick_config":
+                {
+                    // 划词悬浮球: enabled=0|1 开关(立即生效); askEndpoint/askKey/askModel 改「问AI」后端; 不带参=查询
+                    // 写回 shot-service.json 持久化(设置页同步可见)。任一参数留空=不改动该项
+                    int pen = -1; string ev = McpParam(a, "enabled");
+                    if (ev == "0") pen = 0; else if (ev == "1") pen = 1;
+                    return McpText(PickConfig(pen, McpParam(a, "askEndpoint"), McpParam(a, "askKey"), McpParam(a, "askModel"), 1), false);
+                }
                 case "ocr_image": return McpText(OcrFile(McpParam(a, "path"), McpParamInt(a, "wait")), false);
                 case "pin_image":
                 {
@@ -2931,6 +2955,7 @@ public partial class ShotService
             "{\"name\":\"keyboard_press\",\"description\":\"按组合键，如 ctrl+shift+a / enter / alt+f4 / win / ctrl+s\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"}},\"required\":[\"keys\"]}}," +
             "{\"name\":\"app_run\",\"description\":\"运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见。多进程应用(微信/Electron)启动后会换进程换窗, 返回的 hwnd 可能是过渡态: 建议 wait=3000 + process=进程名, 服务端会等窗口 rect 稳定后再返回并带 stable 标记\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"},\"wait\":{\"type\":\"number\",\"description\":\"找到窗口后额外等待稳定的毫秒数(建议 3000), 0=不等待(旧行为)\"},\"process\":{\"type\":\"string\",\"description\":\"只认该进程名的窗口, 如 Weixin\"}},\"required\":[\"path\"]}}," +
             "{\"name\":\"taskbar_volume\",\"description\":\"任务栏滚轮调音量（常驻功能）。enabled=0/1 开关，step=每次滚轮音量变化百分比(1-20,默认2)，reverse=1 反向(滚轮上=减小)。不带参返回当前状态。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"enabled\":{\"type\":\"number\"},\"step\":{\"type\":\"number\"},\"reverse\":{\"type\":\"number\"}}}}," +
+            "{\"name\":\"pick_config\",\"description\":\"划词悬浮球配置。enabled=0/1 开关划词功能(立即生效并持久化); askEndpoint/askKey/askModel 改「问AI」后端(默认 litellm :4000 / GwV4F)。不带参返回当前状态。翻译引擎在设置页「翻译」节配置。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"enabled\":{\"type\":\"number\"},\"askEndpoint\":{\"type\":\"string\"},\"askKey\":{\"type\":\"string\"},\"askModel\":{\"type\":\"string\"}}}}," +
             "{\"name\":\"clipboard_history\",\"description\":\"读取剪贴板历史（常驻监听，最多50条，最新在前）。limit=返回条数(可选)。给AI复用刚复制的内容。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"limit\":{\"type\":\"number\"}}}}," +
             "{\"name\":\"win_manage\",\"description\":\"窗口管理。verb=activate|max|min|restore|close|move|wait|list。activate置前台(先解除最小化)；move需x,y,w,h；wait轮询等title窗口出现(timeout毫秒,上限60s)；list按pid列窗口\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"verb\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\",\"description\":\"窗口句柄, 优先于 title (list_apps 采样, 最可靠)\"},\"title\":{\"type\":\"string\"},\"pid\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"timeout\":{\"type\":\"number\"}},\"required\":[\"verb\"]}," +
             "{\"name\":\"mouse_down\",\"description\":\"按住鼠标键不松。button=left(默认)/right/middle。与mouse_up配对可自定义拖拽\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"button\":{\"type\":\"string\"}}}," +

@@ -55,7 +55,13 @@ partial class ShotService
         sb.Append("    \"hotkeyPin\": " + J(d["capture.hotkeyPin"]) + "\n");
         sb.Append("  },\n");
         sb.Append("  \"clipboard\": { \"enabled\": " + J(d["clipboard.enabled"]) + ", \"max\": " + J(d["clipboard.max"]) + " },\n");
-        sb.Append("  \"volume\": { \"enabled\": " + J(d["volume.enabled"]) + ", \"step\": " + J(d["volume.step"]) + ", \"reverse\": " + J(d["volume.reverse"]) + " }\n");
+        sb.Append("  \"volume\": { \"enabled\": " + J(d["volume.enabled"]) + ", \"step\": " + J(d["volume.step"]) + ", \"reverse\": " + J(d["volume.reverse"]) + " },\n");
+        sb.Append("  \"pick\": {\n");
+        sb.Append("    \"enabled\": " + J(d["pick.enabled"]) + ",\n");
+        sb.Append("    \"askEndpoint\": " + J(d["pick.askEndpoint"]) + ",\n");
+        sb.Append("    \"askKey\": " + J(d["pick.askKey"]) + ",\n");
+        sb.Append("    \"askModel\": " + J(d["pick.askModel"]) + "\n");
+        sb.Append("  }\n");
         sb.Append("}\n");
         File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
         Log("config saved: " + path + " (provider=" + d["translate.provider"] + ")");
@@ -95,9 +101,14 @@ partial class ShotService
         d["volume.enabled"] = Cfg("volume.enabled", "1");
         d["volume.step"] = Cfg("volume.step", "2");
         d["volume.reverse"] = Cfg("volume.reverse", "0");
+        d["pick.enabled"] = Cfg("pick.enabled", "1");
+        d["pick.askEndpoint"] = Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
+        d["pick.askKey"] = Cfg("pick.askKey", "sk-200418");
+        d["pick.askModel"] = Cfg("pick.askModel", "GwV4F");
 
         string loadedBaiduKey = d["translate.baiduKey"];
         string loadedApiKey = d["translate.apiKey"];
+        string loadedPickKey = d["pick.askKey"];
 
         Color cBg = Color.FromArgb(35, 36, 40), cPanel = Color.FromArgb(28, 29, 33), cField = Color.FromArgb(22, 23, 27),
               cText = Color.FromArgb(225, 228, 232), cDim = Color.FromArgb(130, 136, 146),
@@ -120,7 +131,7 @@ partial class ShotService
         cats.BorderStyle = BorderStyle.FixedSingle;
         cats.BackColor = cPanel; cats.ForeColor = cText;
         cats.Font = new Font("Microsoft YaHei UI", 9.5f);
-        cats.Items.AddRange(new object[] { "翻译", "OCR", "截图", "剪贴板", "任务栏音量" });
+        cats.Items.AddRange(new object[] { "翻译", "OCR", "截图", "剪贴板", "任务栏音量", "划词" });
         f.Controls.Add(cats);
 
         // ---- 右侧页面容器 (486 宽) ----
@@ -130,7 +141,7 @@ partial class ShotService
             Panel p = new Panel(); p.Left = PX; p.Top = PY; p.Size = new Size(PW, PH);
             p.BackColor = cBg; p.Visible = false; f.Controls.Add(p); return p;
         };
-        Panel pgTr = mkPage("tr"), pgOcr = mkPage("ocr"), pgCap = mkPage("cap"), pgClip = mkPage("clip"), pgVol = mkPage("vol");
+        Panel pgTr = mkPage("tr"), pgOcr = mkPage("ocr"), pgCap = mkPage("cap"), pgClip = mkPage("clip"), pgVol = mkPage("vol"), pgPick = mkPage("pick");
 
         // 深色控件工厂 (页面内)
         Func<Panel, string, int, int, Label> mkL = (p, text, x, y) =>
@@ -268,8 +279,24 @@ partial class ShotService
         volRev.Checked = d["volume.reverse"] == "1";
         mkDim(pgVol, "保存后立即生效, 无需重启", LX, 118);
 
+        // ==================== 页 6: 划词悬浮球 ====================
+        CheckBox pickEn = mkC(pgPick); pickEn.Text = "启用划词悬浮球 (选中文字后光标旁出现小点)"; pickEn.Left = LX; pickEn.Top = 14; pickEn.AutoSize = true;
+        pickEn.Checked = d["pick.enabled"] == "1";
+        mkDim(pgPick, "小点: 划过停留 300ms 展开工具条 (翻译 / 问AI / 复制); 直接点 = 立即翻译。全程不抢焦点", LX, 44);
+        mkDim(pgPick, "取词两级: UIA 选区(无副作用) → 剪贴板兜底(发一次全局 Ctrl+C, 有安全阀防投错窗口)", LX, 64);
+        mkL(pgPick, "问AI 地址:", LX, 100);
+        TextBox pkEp = mkT(pgPick); pkEp.Left = FX; pkEp.Top = 97; pkEp.Width = FW; pkEp.Text = d["pick.askEndpoint"];
+        mkL(pgPick, "模型名:", LX, 132);
+        TextBox pkModel = mkT(pgPick); pkModel.Left = FX; pkModel.Top = 129; pkModel.Width = FW; pkModel.Text = d["pick.askModel"];
+        mkL(pgPick, "API Key:", LX, 164);
+        TextBox pkKey = mkT(pgPick); pkKey.Left = FX; pkKey.Top = 161; pkKey.Width = 200; pkKey.PasswordChar = '*'; pkKey.Text = d["pick.askKey"];
+        CheckBox pkShow = mkC(pgPick); pkShow.Text = "显示"; pkShow.Left = 340; pkShow.Top = 163; pkShow.AutoSize = true;
+        pkShow.ForeColor = cDim; pkShow.Font = new Font("Microsoft YaHei UI", 9f);
+        pkShow.CheckedChanged += (s, e) => { pkKey.PasswordChar = pkShow.Checked ? '\0' : '*'; };
+        mkDim(pgPick, "翻译引擎沿用「翻译」页的设置; 问AI 默认走本机 litellm 网关(:4000)", LX, 196);
+
         // 分类切换
-        Panel[] pages = { pgTr, pgOcr, pgCap, pgClip, pgVol };
+        Panel[] pages = { pgTr, pgOcr, pgCap, pgClip, pgVol, pgPick };
         Action showPage = delegate
         {
             for (int i = 0; i < pages.Length; i++) pages[i].Visible = (cats.SelectedIndex == i);
@@ -359,6 +386,11 @@ partial class ShotService
             d["volume.enabled"] = volEn.Checked ? "1" : "0";
             int vsv; d["volume.step"] = (int.TryParse(volStepT.Text.Trim(), out vsv) && vsv >= 1 && vsv <= 20) ? vsv.ToString() : "2";
             d["volume.reverse"] = volRev.Checked ? "1" : "0";
+            d["pick.enabled"] = pickEn.Checked ? "1" : "0";
+            d["pick.askEndpoint"] = pkEp.Text.Trim();
+            d["pick.askModel"] = pkModel.Text.Trim();
+            // 密钥留空 = 不修改已存值 (和翻译页同款逻辑)
+            d["pick.askKey"] = pkKey.Text.Trim().Length > 0 ? pkKey.Text.Trim() : loadedPickKey;
             try
             {
                 SaveCfgDict(d);
