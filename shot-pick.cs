@@ -81,6 +81,10 @@ partial class ShotService
                 pickDownOnBar = PickHit(PickBarRect, x, y);
                 pickDownOnCard = PickHit(PickCardRect, x, y);
                 pickDownOnCardLive = pickDownOnCard;
+                // 问AI 提问框(能拿焦点的正当窗): 框内点击=正常打字/编辑, 完全放行给 WinForms
+                pickDownOnAsk = PickHit(PickAskRect, x, y);
+                bool askWasOpen = PickAskRect != null;
+                if (pickDownOnAsk) { pickDownOnAskLive = true; return; }
                 if (pickDownOnCard)
                 {
                     int dx0 = x, dy0 = y;
@@ -88,8 +92,10 @@ partial class ShotService
                     if (sd != null && sd.IsHandleCreated)
                         sd.BeginInvoke(new MethodInvoker(delegate { PickCardDragStart(dx0, dy0); }));
                 }
-                // 点在小点/工具条/卡片自己身上时不能 dismiss(否则自己把自己关掉)
-                if (!pickDownOnDot && !pickDownOnBar && !pickDownOnCard) PickDismiss();
+                // 2026-09-07 老大: "鼠标点击的时候别消失" —— 按下不再一律 dismiss。
+                //   谁收掉交给 UP 判定: 划词会重画(ShowPickDot 内部先 dismiss), 单击只尝试取词;
+                //   两者都没命中就让元素按 4s/60s 超时自然收起, 点别处不再"一碰就没"。
+                if (askWasOpen) pickDownOnAskLive = true;   // 提问框刚被这一下关掉: 本轮手势不再触发二次取词
                 return;
             }
             if (msg == PICK_MOVE)
@@ -101,6 +107,11 @@ partial class ShotService
             if (msg != PICK_UP) return;
             if (!pickDownFlag) return;
             pickDownFlag = false;
+            // 本轮手势的"刚关掉提问框 / 刚在卡片上按住过"闩锁在这里一次性取走并清零。
+            // 以前是留到下一次才清, 于是"点一下卡片正文/点一下关掉提问框"之后, 紧接着那次真正的
+            // 划词会被误当成重复取词吞掉(要划第二次才出小点)。
+            bool askJustClosed = pickDownOnAskLive; pickDownOnAskLive = false;
+            bool cardWasTouched = pickDownOnCardLive; pickDownOnCardLive = false;
             int dx = x - pickX0, dy = y - pickY0;
             bool isClick = dx * dx + dy * dy < PICK_MOVE_MIN2;
             int ux = x, uy = y;
@@ -109,14 +120,30 @@ partial class ShotService
 
             if (isClick)
             {
+                // 提问框里单击 = 正常放光标打字, 不触发任何取词/展开
+                if (pickDownOnAsk) { pickDownOnAsk = false; return; }
                 if (pickDownOnDot) { s.BeginInvoke(new MethodInvoker(delegate { PickDotActivated(); })); return; }
                 if (pickDownOnBar)
                 {
                     string act = PickBarActionAt(ux, uy);
                     if (act.Length > 0) { s.BeginInvoke(new MethodInvoker(delegate { PickBarFire(act); })); return; }
+                    return;   // 工具条空白处: 什么也不做(不 dismiss, 等 4s 超时)
                 }
                 if (pickDownOnCard) { int px0 = pickX0, py0 = pickY0; s.BeginInvoke(new MethodInvoker(delegate { PickCardUp(px0, py0, ux, uy); })); return; }
-                return;   // 单击空白处: 上面 DOWN 时已 dismiss
+                // 差一点没点到小点/工具条(26px 的目标手抖就 miss, 老逻辑一 miss 就整组消失 =
+                // 老大说的"鼠标点击的时候它消失"): 容差内当作点中小点 -> 展开工具条。
+                if (PickNear(PickDotRect, ux, uy, PICK_TOL) && !pickExpanded)
+                {
+                    s.BeginInvoke(new MethodInvoker(delegate { PickDotActivated(); }));
+                    return;
+                }
+                if (PickNear(PickBarRect, ux, uy, PICK_TOL) || PickNear(PickCardRect, ux, uy, PICK_TOL) ||
+                    PickNear(PickAskRect, ux, uy, PICK_TOL)) return;   // 贴着元素: 不动它
+                // 这一下是"顺手关掉提问框"(DOWN 时它还开着): 不再二次触发取词
+                if (askJustClosed) return;
+                // 单击别处: 也弹悬浮球(见 PickHandle click 模式 —— 只读 UIA 现有选区, 绝不发 Ctrl+C)
+                s.BeginInvoke(new MethodInvoker(delegate { PickHandle(ux, uy, true); }));
+                return;
             }
             if (pickDownOnCard)
             {
@@ -124,7 +151,9 @@ partial class ShotService
                 s.BeginInvoke(new MethodInvoker(delegate { PickCardUp(dx0, dy0, ux2, uy2); }));
                 return;
             }
-            if (pickDownOnCardLive) { pickDownOnCardLive = false; return; }   // 刚在卡片上划完字: 不重复取词
+            if (pickDownOnAsk) { pickDownOnAsk = false; return; }               // 提问框里拖选文字: 正常编辑, 不触发取词
+            if (askJustClosed) return;                                          // 提问框刚被这一下关掉: 本轮手势不取词
+            if (cardWasTouched) return;                                         // 刚在卡片上按住过: 不重复取词
             s.BeginInvoke(new MethodInvoker(delegate { PickHandle(ux, uy); }));
         }
         catch { }
@@ -133,6 +162,9 @@ partial class ShotService
     // ---- 命中矩形(物理像素, 由 UI 线程更新; 钩子线程只读) ----
     static int[] PickDotRect, PickBarRect, PickCardRect;
     static bool pickDownOnDot, pickDownOnBar, pickDownOnCard;
+    static bool pickDownOnAsk, pickDownOnAskLive;   // 问AI 提问框(可获焦): 框内点击/划选不触发 dismiss 和二次取词
+    static Form pickAskWin;
+    static int[] PickAskRect;
     static volatile bool pickOverDot, pickOverBar, pickOverCard;
     static long pickTrackSeen;         // 钩子收到过的 MOVE 数(诊断: 真实拖动有没有 MOVE 进来)
     static int pickHoverSince = -1;    // 指针开始停在小点的 TickCount(-1=不在)
@@ -183,6 +215,15 @@ partial class ShotService
         return x >= r[0] && x < r[2] && y >= r[1] && y < r[3];
     }
 
+    const int PICK_TOL = 8;   // 悬浮球只有 26px, 手抖一点就 miss —— 容差内当作点中
+
+    // 点是否落在矩形内或紧贴其四周(外扩 tol)
+    static bool PickNear(int[] r, int x, int y, int tol)
+    {
+        if (r == null || r.Length != 4) return false;
+        return x >= r[0] - tol && x < r[2] + tol && y >= r[1] - tol && y < r[3] + tol;
+    }
+
     // 工具条按钮命中: 用 ShowPickBar 时记下的按钮 x 区间换算回物理坐标
     static int PickBarActionIndex(int x, int y)
     {
@@ -207,11 +248,34 @@ partial class ShotService
         catch { return ""; }
     }
 
-    static void PickHandle(int x, int y)
+    static void PickHandle(int x, int y) { PickHandle(x, y, false); }
+
+    // click=true = 用户只是**单击**(没有划选)。2026-09-07 老大要的"点击时也弹出悬浮球"。
+    // 只允许无副作用取词: ①UIA 拿光标所在的那个词(Word 单元) ②退一步读现有选区。
+    // **绝不发 Ctrl+C**: 单击不产生选区, 这时全局复制 = 把用户刚点中的输入框里的东西/别处内容当"词"抓走。
+    // 取不到词就什么都不动(元素交给 4s/60s 超时自然收起), 而不是"一碰就没"。
+    static void PickHandle(int x, int y, bool click)
     {
         if (Interlocked.Exchange(ref pickBusy, 1) == 1) return;
         try
         {
+            if (click)
+            {
+                // 结果卡片/工具条正开着: 用户可能还在看/按按钮, 别用新小点把它顶掉
+                if (pickCard != null || pickBarWin != null) return;
+                string w = "";
+                try { w = PickWordAtPoint(x, y); } catch { }
+                if (string.IsNullOrWhiteSpace(w)) { try { w = PickTextUia(x, y); } catch { } }
+                if (string.IsNullOrWhiteSpace(w)) return;   // 单击空白处(桌面/图片): 不打扰
+                w = w.Trim();
+                if (w.Length > 200) w = w.Substring(0, 200);
+                pickSel = w;
+                pickLastX = x; pickLastY = y;
+                pickShownAt = Environment.TickCount;
+                Log("pick(click): " + w.Length + " chars | " + PickOneLine(w));
+                ShowPickDot(x, y);
+                return;
+            }
             string text = "", how = "";
             int actBase = pickUserAct;
             IntPtr fgAt = GetForegroundWindow();
@@ -307,6 +371,33 @@ partial class ShotService
                     }
                 }
             }
+        }
+        catch { }
+        return "";
+    }
+
+    // ---- 取词 1b: UIA 光标所在处的"词"(单击用, 无副作用) ----
+    // 单击不会产生选区, 所以只能问文本控件"我这个坐标上是什么词": RangeFromPoint 命中字符 ->
+    // ExpandToEnclosingUnit(Word) 扩成整词。取不到就返回空(不猜、不去 Ctrl+C)。
+    static string PickWordAtPoint(int x, int y)
+    {
+        try
+        {
+            System.Windows.Automation.AutomationElement el =
+                System.Windows.Automation.AutomationElement.FromPoint(new System.Windows.Point(x, y));
+            if (el == null) return "";
+            object pat;
+            if (!el.TryGetCurrentPattern(System.Windows.Automation.TextPattern.Pattern, out pat)) return "";
+            System.Windows.Automation.TextPattern tp =
+                pat as System.Windows.Automation.TextPattern;
+            if (tp == null) return "";
+            System.Windows.Automation.Text.TextPatternRange r = tp.RangeFromPoint(new System.Windows.Point(x, y));
+            if (r == null) return "";
+            r.ExpandToEnclosingUnit(System.Windows.Automation.Text.TextUnit.Word);
+            string s = r.GetText(-1);
+            if (string.IsNullOrWhiteSpace(s)) return "";
+            s = s.Trim();
+            return s.Length <= 1 ? "" : s;   // 单字符/标点当作没取到, 别为它弹球
         }
         catch { }
         return "";
@@ -409,10 +500,11 @@ partial class ShotService
                     if (Environment.TickCount - pickHoverSince >= 300) { PickDotActivated(); return; }
                 }
                 else pickHoverSince = -1;
-                if (!pickOverDot && Environment.TickCount - pickShownAt > 4000) PickDismiss();
+                // 提问框开着(用户正在打字)时不许超时收起整组
+                if (!pickOverDot && pickAskWin == null && Environment.TickCount - pickShownAt > 4000) PickDismiss();
             }
             Form b = pickBarWin;
-            if (b != null && !b.IsDisposed && !pickOverBar && !pickDragging && Environment.TickCount - pickShownAt > 4000) PickDismiss();
+            if (b != null && !b.IsDisposed && !pickOverBar && !pickDragging && pickAskWin == null && Environment.TickCount - pickShownAt > 4000) PickDismiss();
             Form c = pickCard as Form;
             // 卡片: 结果没回来(busy)或指针在上面或正在拖 都不收; 空闲 60s 才自动关
             if (c != null && !c.IsDisposed && !pickOverCard && !pickCardBusy && !pickDragging &&
@@ -500,8 +592,45 @@ partial class ShotService
         Log("pick action: " + act);
         PickDismiss();
         if (act == "translate") PickDoTranslate();
-        else if (act == "ask") PickDoAsk();
+        else if (act == "ask") PickShowAsk();
         else if (act == "copy") { try { Clipboard.SetText(pickSel); } catch { } TrayNotify("已复制", PickOneLine(pickSel)); }
+    }
+
+    // ---- 问 AI 前先弹提问框(2026-09-07 老大要的: 每次可以问不同的话) ----
+    // 全套悬浮窗里唯一允许抢焦点的窗(要打字)。回车=带这次的问题发问; 留空回车=按内置默认直接解释;
+    // Esc/点外面=取消。关掉后把前台焦点还给用户原来的窗口。
+    static IntPtr pickAskPrevFg;
+    static void PickShowAsk()
+    {
+        try
+        {
+            PickAskPrevFg();
+            PickAskForm a = new PickAskForm(pickSel);
+            Point loc = PickPlace(pickLastX, pickLastY, PickAskForm.ASK_W, PickAskForm.ASK_H);
+            a.Location = loc;
+            a.Show();
+            PickTopMost(a);
+            pickAskWin = a;
+            PickAskRect = new int[] { loc.X, loc.Y, loc.X + PickAskForm.ASK_W, loc.Y + PickAskForm.ASK_H };
+            a.FormClosed += delegate { PickAskClosed(a); };
+            Log("pick ask box shown @ " + loc.X + "," + loc.Y);
+        }
+        catch (Exception ex) { Log("pick ask err: " + ex.Message); }
+    }
+    static void PickAskPrevFg() { try { pickAskPrevFg = GetForegroundWindow(); } catch { } }
+    static void PickAskClosed(PickAskForm a)
+    {
+        try
+        {
+            bool go = a.Confirmed; string q = a.Result;
+            if (pickAskWin == (Form)a) { pickAskWin = null; PickAskRect = null; }
+            pickDownOnAsk = false;
+            if (go) PickDoAsk(q);
+            else Log("pick ask cancelled");
+            // 把前台还给用户原来的窗口(我们短暂抢过焦点打字)
+            try { if (pickAskPrevFg != IntPtr.Zero) SetForegroundWindow(pickAskPrevFg); } catch { }
+        }
+        catch (Exception ex) { Log("pick ask closed err: " + ex.Message); }
     }
 
     // 卡片上松开鼠标: 点按钮就执行动作, 否则结束"按住标题栏/原文行"的拖动
@@ -522,6 +651,7 @@ partial class ShotService
     static void PickCardButton(PickCardForm c, int btn)
     {
         if (btn == PickCardForm.HIT_CLOSE) { PickDismiss(); return; }
+        if (btn == PickCardForm.HIT_SWAP) { PickTranslateReverse(c); return; }
         if (btn == PickCardForm.HIT_COPY)
         {
             try { Clipboard.SetText(c.BodyText); TrayNotify("已复制", "结果已复制到剪贴板"); } catch { }
@@ -541,6 +671,7 @@ partial class ShotService
         switch (c.HitButton(x - r[0], y - r[1]))
         {
             case PickCardForm.HIT_CLOSE: PickDismiss(); break;
+            case PickCardForm.HIT_SWAP: PickTranslateReverse(c); break;
             case PickCardForm.HIT_COPY:
                 try { Clipboard.SetText(c.BodyText); TrayNotify("已复制", "结果已复制到剪贴板"); } catch { }
                 break;
@@ -565,24 +696,46 @@ partial class ShotService
     {
         try { if (pickDot != null) { pickDot.Close(); pickDot = null; } } catch { }
         try { if (pickBarWin != null) { pickBarWin.Close(); pickBarWin = null; } } catch { }
+        try { if (pickAskWin != null) { pickAskWin.Close(); pickAskWin = null; } } catch { }
         try { if (pickCard != null) { pickCard.Close(); pickCard = null; } } catch { }
-        PickDotRect = null; PickBarRect = null; PickCardRect = null; pickBarBtnXs = null;
+        PickDotRect = null; PickBarRect = null; PickCardRect = null; PickAskRect = null; pickBarBtnXs = null;
         pickHoverSince = -1; pickDragging = false; pickExpanded = false; pickDownOnCardLive = false;
     }
 
     // ---- 翻译 ----
+    // 自动判方向偶尔不合意(中英混排被判反), 所以卡片上有「反转翻译」: 拿当前结果按反方向再翻一次。
+    static string pickTransTo = "";
+
     static void PickDoTranslate()
     {
         string text = pickSel;
         if (string.IsNullOrWhiteSpace(text)) return;
+        pickTransTo = PickHasCJK(text) ? "en" : "zh";
         PickShowCard("翻译中…", text);
+        PickTranslateAsync(text, pickTransTo, text, pickTransTo == "en" ? "中→英" : "英→中");
+    }
+
+    // 卡片「反转翻译」: 源 = 现在正文里的译文, 目标 = 与上次相反的语言; 原文行仍保留用户最初划的词
+    static void PickTranslateReverse(PickCardForm c)
+    {
+        if (pickCardBusy) return;   // 上一次请求还没回来: 别叠加(此时正文还是原文)
+        string body = c == null ? "" : c.BodyText;
+        if (string.IsNullOrWhiteSpace(body)) return;
+        string to = pickTransTo == "en" ? "zh" : "en";
+        pickTransTo = to;
+        string srcLine = string.IsNullOrWhiteSpace(pickSel) ? body : pickSel;
+        c.SetTitle("反转中…");
+        PickTranslateAsync(body, to, srcLine, to == "en" ? "中→英(反转)" : "英→中(反转)");
+    }
+
+    static void PickTranslateAsync(string text, string to, string srcLine, string label)
+    {
         ThreadPool.QueueUserWorkItem(delegate
         {
-            string to = PickHasCJK(text) ? "en" : "zh";
             string outText;
             try { outText = TranslateProvider().TranslateAsync(text, to).Result; }
             catch (Exception ex) { outText = "翻译失败: " + ex.Message; }
-            PickSetCard("翻译 (" + (to == "en" ? "中→英" : "英→中") + ")", outText, text);
+            PickSetCard("翻译 (" + label + ")", outText, srcLine);
         });
     }
 
@@ -598,10 +751,13 @@ partial class ShotService
     }
 
     // ---- 问 AI (litellm 127.0.0.1:4000) ----
-    static void PickDoAsk()
+    // question = 本次在提问框里现输入的话(可空)。非空时优先按它问, 划选文本作为上下文附上;
+    // 留空则走内置默认提示词(简明解释划选内容)。设置页全局附加提示词(askPrompt)两种情况都前置。
+    static void PickDoAsk(string question)
     {
         string text = pickSel;
-        if (string.IsNullOrWhiteSpace(text)) return;
+        if (string.IsNullOrWhiteSpace(text) && string.IsNullOrWhiteSpace(question)) return;
+        question = (question ?? "").Trim();
         PickShowCard("AI 思考中…", text);
         ThreadPool.QueueUserWorkItem(delegate
         {
@@ -611,9 +767,15 @@ partial class ShotService
                 string ep = Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
                 string key = Cfg("pick.askKey", "sk-200418");
                 string model = Cfg("pick.askModel", "GwV4F");
-                // 附加提示词(设置页「划词」/pick_config askPrompt 可配): 作为 system 消息前置, 定制回答风格/角色/侧重点
+                // 附加提示词(设置页「划词」/pick_config askPrompt 可配): 全局固定的风格/角色前缀
                 string extra = (Cfg("pick.askPrompt", "") ?? "").Trim();
-                string prompt = (extra.Length > 0 ? extra + "\n\n" : "") + "简明回答下面内容（中文，不超过 300 字，直接给结论，不要复述问题）：\n\n" + text;
+                string ctx = string.IsNullOrWhiteSpace(text) ? "" : "【划选内容】" + text;
+                string prompt;
+                if (question.Length > 0)
+                    prompt = "请回答下面的问题。" + (ctx.Length > 0 ? ctx + "\n" : "") + "【问题】" + question;
+                else
+                    prompt = "简明回答下面内容（中文，不超过 300 字，直接给结论，不要复述问题）：\n\n" + text;
+                if (extra.Length > 0) prompt = extra + "\n\n" + prompt;
                 string json = "{\"model\":" + EscapeJson(model) + ",\"messages\":[{\"role\":\"user\",\"content\":" + EscapeJson(prompt) + "}],\"max_tokens\":800}";
                 using (var wc = new WebClient())
                 {

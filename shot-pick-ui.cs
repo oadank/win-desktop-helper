@@ -67,7 +67,16 @@ static class PickStyle
         return p;
     }
 
-    public static Font F(float size, FontStyle st) { return new Font("Microsoft YaHei UI", size, st); }
+    // ★ 字体一律用【像素】单位, 绝不用 Point —— 布局是 AutoScaleMode.None 按物理像素写死的,
+    //   而 Point 是逻辑单位会被系统 DPI 缩放(本机 125%)放大 1.25 倍 → 字变大而行高不变 →
+    //   文字互相挤压重叠, 肉眼看着就是"字太大+像乱码"(2026-09-07 老大截图实锤)。
+    //   参数值 = 期望的物理像素字号(原磅值 × 96/72 换算)。
+    public static Font F(float px, FontStyle st) { return new Font("Microsoft YaHei UI", px, st, GraphicsUnit.Pixel); }
+    public const float FS_TITLE = 13f;   // 原 9.5pt 粗体
+    public const float FS_BODY = 14f;    // 原 10.5pt
+    public const float FS_MID = 12f;     // 原 9pt
+    public const float FS_SMALL = 11f;   // 原 8.5pt
+    public const float FS_TINY = 10f;    // 原 7.5pt
 }
 
 // ==================== 小圆点 ====================
@@ -134,7 +143,7 @@ sealed class PickBarForm : Form
         b.FlatAppearance.BorderSize = 0;
         b.BackColor = PickStyle.Btn;
         b.ForeColor = PickStyle.InkHi;
-        b.Font = PickStyle.F(9f, FontStyle.Regular);
+        b.Font = PickStyle.F(PickStyle.FS_MID, FontStyle.Regular);
         b.Cursor = Cursors.Hand;
         b.TabStop = false;
         // 不订阅 Click: 免激活窗收不到, 且会与钩子命中双触发
@@ -164,11 +173,11 @@ sealed class PickCardForm : Form
     const int SRC_H = 46;
     const int BTN_Y = SRC_Y + SRC_H + 8;         // 254
     const int BTN_H = 28;
-    const int BTN_W = 86;
+    const int BTN_W = 76;                        // 三个按钮(反转翻译/复制结果/复制原文)要放得下
 
     Label titleL;
     TextBox body, src;
-    Button copyB, copySrcB, closeB;
+    Button swapB, copyB, copySrcB, closeB;
 
     public string BodyText { get { return body == null ? "" : body.Text; } }
     public string SourceText { get { return src == null ? "" : src.Text; } }
@@ -178,24 +187,25 @@ sealed class PickCardForm : Form
         PickStyle.ApplyChrome(this);
         Size = new Size(CARD_W, CARD_H);
         DoubleBuffered = true;
-        Font = PickStyle.F(9f, FontStyle.Regular);
+        Font = PickStyle.F(PickStyle.FS_MID, FontStyle.Regular);
 
         closeB = MakeBtn("×", CARD_W - 34, 8, 26, 22);
-        copyB = MakeBtn("复制结果", PAD, BTN_Y, BTN_W, BTN_H);
-        copySrcB = MakeBtn("复制原文", PAD + BTN_W + 8, BTN_Y, BTN_W, BTN_H);
+        swapB = MakeBtn("反转翻译", PAD, BTN_Y, BTN_W, BTN_H);
+        copyB = MakeBtn("复制结果", PAD + BTN_W + 6, BTN_Y, BTN_W, BTN_H);
+        copySrcB = MakeBtn("复制原文", PAD + (BTN_W + 6) * 2, BTN_Y, BTN_W, BTN_H);
 
         titleL = new Label();
         titleL.Text = "处理中";
         titleL.ForeColor = Color.FromArgb(205, 210, 216);
         titleL.BackColor = Color.Transparent;
-        titleL.Font = PickStyle.F(9.5f, FontStyle.Bold);
+        titleL.Font = PickStyle.F(PickStyle.FS_TITLE, FontStyle.Bold);
         titleL.Location = new Point(PAD + 24, 0);
         titleL.Size = new Size(CARD_W - (PAD + 24) - 40, HEAD_H);
         titleL.TextAlign = ContentAlignment.MiddleLeft;
         Controls.Add(titleL);
 
-        body = MakeField(PAD, BODY_Y, CARD_W - PAD * 2, BODY_H, PickStyle.InkHi, 10.5f);
-        src = MakeField(PAD, SRC_Y, CARD_W - PAD * 2, SRC_H, PickStyle.InkMid, 9f);
+        body = MakeField(PAD, BODY_Y, CARD_W - PAD * 2, BODY_H, PickStyle.InkHi, PickStyle.FS_BODY);
+        src = MakeField(PAD, SRC_Y, CARD_W - PAD * 2, SRC_H, PickStyle.InkMid, PickStyle.FS_MID);
     }
 
     Button MakeBtn(string text, int x, int y, int w, int h)
@@ -208,7 +218,7 @@ sealed class PickCardForm : Form
         b.FlatAppearance.BorderSize = 0;
         b.BackColor = PickStyle.Btn;
         b.ForeColor = PickStyle.InkHi;
-        b.Font = PickStyle.F(9f, FontStyle.Regular);
+        b.Font = PickStyle.F(PickStyle.FS_MID, FontStyle.Regular);
         b.Cursor = Cursors.Hand;
         b.TabStop = false;
         Controls.Add(b);   // 命中统一走 HitButton(钩子驱动), 不订阅 Click
@@ -240,18 +250,21 @@ sealed class PickCardForm : Form
         body.Text = text ?? "";
         try { body.SelectionStart = 0; body.ScrollToCaret(); } catch { }
         src.Text = string.IsNullOrEmpty(source) ? "" : "原文：" + source;
+        // 「反转翻译」只对翻译结果有意义(把译文再翻回去), AI 回答上隐藏
+        if (swapB != null) swapB.Visible = (title ?? "").IndexOf("翻译") >= 0;
     }
     public void SetTitle(string title) { if (titleL != null) titleL.Text = title; }
 
     // ---- 命中(本地坐标, 由 shot-pick.cs 换算物理坐标) ----
-    public const int HIT_NONE = 0, HIT_CLOSE = 1, HIT_COPY = 2, HIT_COPY_SRC = 3;
+    public const int HIT_NONE = 0, HIT_CLOSE = 1, HIT_COPY = 2, HIT_COPY_SRC = 3, HIT_SWAP = 4;
     public int HitButton(int lx, int ly)
     {
         if (lx >= CARD_W - 34 && lx <= CARD_W - 8 && ly >= 8 && ly <= 30) return HIT_CLOSE;
         if (ly >= BTN_Y && ly <= BTN_Y + BTN_H)
         {
-            if (lx >= PAD && lx <= PAD + BTN_W) return HIT_COPY;
-            if (lx >= PAD + BTN_W + 8 && lx <= PAD + BTN_W * 2 + 8) return HIT_COPY_SRC;
+            if (lx >= PAD && lx <= PAD + BTN_W) return HIT_SWAP;
+            if (lx >= PAD + BTN_W + 6 && lx <= PAD + BTN_W * 2 + 6) return HIT_COPY;
+            if (lx >= PAD + (BTN_W + 6) * 2 && lx <= PAD + BTN_W * 3 + 12) return HIT_COPY_SRC;
         }
         return HIT_NONE;
     }
@@ -280,14 +293,100 @@ sealed class PickCardForm : Form
                 g.FillEllipse(br, PAD + 3 + i * 5, HEAD_H / 2 - 2, 3, 3);   // 拖动抓手
         DrawField(e, PAD, BODY_Y, CARD_W - PAD * 2, BODY_H);
         DrawField(e, PAD, SRC_Y, CARD_W - PAD * 2, SRC_H);
-        using (var fnt = PickStyle.F(7.5f, FontStyle.Regular))
+        using (var fnt = PickStyle.F(PickStyle.FS_TINY, FontStyle.Regular))
         using (var br = new SolidBrush(PickStyle.InkDim))
-            g.DrawString("按住标题栏/原文行可拖动", fnt, br, CARD_W - 172, BTN_Y + 8);
+            g.DrawString("按住标题栏/原文行可拖动", fnt, br, CARD_W - 158, BTN_Y + 8);
     }
     void DrawField(PaintEventArgs e, int x, int y, int w, int h)
     {
         using (var pen = new Pen(PickStyle.Border, 1f))
         using (var path = PickStyle.Round(w - 1, h - 1, 8))
             e.Graphics.DrawPath(pen, path);
+    }
+}
+
+// ==================== 问 AI 提问框 ====================
+// 划词后点「问 AI」弹出: 允许本次现输入要问的话(每次可不同), 回车发送;
+// 留空回车 = 按内置默认提示词直接解释划选内容; Esc / 点框外 = 取消。
+// ★ 这是全套悬浮窗里【唯一允许抢焦点(正常 Show 激活)】的窗 —— 因为要让用户打字。
+//   所以刻意不加 WS_EX_NOACTIVATE, 也不 ShowWithoutActivation。
+sealed class PickAskForm : Form
+{
+    public const int ASK_W = 400, ASK_H = 96;
+    public bool Confirmed;                       // 回车=true, Esc/点外面=false
+    public string Result = "";                   // KeyDown 里先存好(FormClosed 时控件可能已释放)
+    public string Question { get { return input == null ? Result : input.Text.Trim(); } }
+    TextBox input;
+
+    public PickAskForm(string srcPreview)
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        AutoScaleMode = AutoScaleMode.None;
+        BackColor = PickStyle.Key;
+        TransparencyKey = PickStyle.Key;
+        Size = new Size(ASK_W, ASK_H);
+        TopMost = true;
+        DoubleBuffered = true;
+        Font = PickStyle.F(PickStyle.FS_MID, FontStyle.Regular);
+
+        Label hint = new Label();
+        hint.Text = "问 AI：可补充这次要问的话（回车发送 · 留空=按默认 · Esc 取消）";
+        hint.ForeColor = PickStyle.InkMid;
+        hint.BackColor = Color.Transparent;
+        hint.Font = PickStyle.F(PickStyle.FS_SMALL, FontStyle.Regular);
+        hint.Location = new Point(12, 9);
+        hint.Size = new Size(ASK_W - 24, 16);
+        Controls.Add(hint);
+
+        input = new TextBox();
+        input.Multiline = false;
+        input.BorderStyle = BorderStyle.None;
+        input.BackColor = PickStyle.Field;
+        input.ForeColor = PickStyle.InkHi;
+        input.Font = PickStyle.F(PickStyle.FS_BODY, FontStyle.Regular);
+        input.Location = new Point(12, 34);
+        input.Size = new Size(ASK_W - 24, 22);
+        input.KeyDown += delegate(object s, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter) { Result = input.Text.Trim(); Confirmed = true; e.SuppressKeyPress = true; Close(); }
+            else if (e.KeyCode == Keys.Escape) { Result = ""; Confirmed = false; e.SuppressKeyPress = true; Close(); }
+        };
+        Controls.Add(input);
+
+        string pv = srcPreview ?? "";
+        if (pv.Length > 34) pv = pv.Substring(0, 34) + "…";
+        Label eg = new Label();
+        eg.Text = "划选内容：" + pv;
+        eg.ForeColor = PickStyle.InkDim;
+        eg.BackColor = Color.Transparent;
+        eg.Font = PickStyle.F(PickStyle.FS_TINY, FontStyle.Regular);
+        eg.Location = new Point(12, 66);
+        eg.Size = new Size(ASK_W - 24, 14);
+        Controls.Add(eg);
+
+        Shown += delegate
+        {
+            try
+            {
+                Activate();
+                input.Focus();
+                // 激活成功后才"武装"失焦自关: 用户点别处 = 取消提问
+                BeginInvoke(new MethodInvoker(delegate { _armed = true; }));
+            }
+            catch { }
+        };
+        Deactivate += delegate { if (_armed) { try { Close(); } catch { } } };
+    }
+    bool _armed;
+    protected override CreateParams CreateParams
+    {
+        // 只加 TOOLWINDOW(不占任务栏) —— 不加 NOACTIVATE, 这个窗要拿焦点打字
+        get { CreateParams cp = base.CreateParams; cp.ExStyle |= 0x00000080; return cp; }
+    }
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        PickStyle.PaintPanel(this, e, ASK_W, ASK_H, 12);
     }
 }
