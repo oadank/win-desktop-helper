@@ -839,7 +839,8 @@ public partial class ShotService
         {
             if (nCode != HC_ACTION) return CallNextHookEx(volHook, nCode, wParam, lParam);
             MSLLHOOKSTRUCT ms = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
-            PickOnMouse((int)wParam, ms.pt.x, ms.pt.y); // 划词检测: 必须在 volEnabled 判断之前, 音量关了划词也要能用 (回调内只记坐标, 1ms 内返回)
+            int wd0 = (int)wParam == 0x020A ? (short)((long)wParam >> 16) : 0;   // 滚轮 delta(高位字)
+            PickOnMouse((int)wParam, ms.pt.x, ms.pt.y, wd0); // 划词检测: 必须在 volEnabled 判断之前, 音量关了划词也要能用 (回调内只记坐标, 1ms 内返回)
             if (volEnabled != 1) return CallNextHookEx(volHook, nCode, wParam, lParam);
             if ((int)wParam == WM_MBUTTONDOWN && IsPointOnTaskbar(ms.pt))
             {

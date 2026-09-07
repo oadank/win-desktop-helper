@@ -66,7 +66,7 @@ partial class ShotService
     // 鼠标钩子回调入口: 只记坐标 + 纯内存判定命中矩形, 立刻返回(1ms 限制)
     // 小点/工具条的 hover 与点击全部由这里驱动 —— WinForms 的 MouseEnter/MouseClick 在
     // WS_EX_NOACTIVATE|TOOLWINDOW 的免激活窗上实测收不到(点了没反应), 低级钩子能看到全局鼠标消息。
-    static void PickOnMouse(int msg, int x, int y)
+    static void PickOnMouse(int msg, int x, int y, int wheelDelta = 0)
     {
         if (pickEnabled != 1) return;
         try
@@ -74,6 +74,17 @@ partial class ShotService
             if (msg == PICK_DOWN || msg == PICK_UP || msg == PICK_RBUTTONDOWN ||
                 msg == PICK_RBUTTONUP || msg == PICK_WHEEL || msg == PICK_MOVE)
                 pickUserAct = Environment.TickCount;
+            if (msg == PICK_WHEEL)
+            {
+                // 悬浮窗永远免激活没焦点, 子控件收不到 WM_MOUSEWHEEL —— 滚轮由钩子喂给卡片正文
+                if (PickHit(PickCardRect, x, y))
+                {
+                    int wd = wheelDelta; Control sw = pickSync;
+                    if (sw != null && sw.IsHandleCreated)
+                        sw.BeginInvoke(new MethodInvoker(delegate { PickCardWheel(x, y, wd); }));
+                }
+                return;
+            }
             if (msg == PICK_DOWN)
             {
                 pickDownFlag = true; pickX0 = x; pickY0 = y;
@@ -141,8 +152,8 @@ partial class ShotService
                     PickNear(PickAskRect, ux, uy, PICK_TOL)) return;   // 贴着元素: 不动它
                 // 这一下是"顺手关掉提问框"(DOWN 时它还开着): 不再二次触发取词
                 if (askJustClosed) return;
-                // 单击别处: 也弹悬浮球(见 PickHandle click 模式 —— 只读 UIA 现有选区, 绝不发 Ctrl+C)
-                s.BeginInvoke(new MethodInvoker(delegate { PickHandle(ux, uy, true); }));
+                // 单击别处: 也弹悬浮球(见 PickHandleAsync click 模式 —— 只读 UIA 现有选区, 绝不发 Ctrl+C)
+                s.BeginInvoke(new MethodInvoker(delegate { PickHandleAsync(ux, uy, true); }));
                 return;
             }
             if (pickDownOnCard)
@@ -248,59 +259,88 @@ partial class ShotService
         catch { return ""; }
     }
 
-    static void PickHandle(int x, int y) { PickHandle(x, y, false); }
+    static void PickHandle(int x, int y) { PickHandleAsync(x, y, false); }
 
-    // click=true = 用户只是**单击**(没有划选)。2026-09-07 老大要的"点击时也弹出悬浮球"。
-    // 只允许无副作用取词: ①UIA 拿光标所在的那个词(Word 单元) ②退一步读现有选区。
-    // **绝不发 Ctrl+C**: 单击不产生选区, 这时全局复制 = 把用户刚点中的输入框里的东西/别处内容当"词"抓走。
-    // 取不到词就什么都不动(元素交给 4s/60s 超时自然收起), 而不是"一碰就没"。
-    static void PickHandle(int x, int y, bool click)
+    // ★ 取词绝不能在 UI 线程跑 (2026-09-07 老大: "刚开始跟手, 然后延迟很大, 最后消失了像崩溃")
+    //   UIA FromPoint/GetSelection 是跨进程 COM 调用, 目标程序(Chromium/记事本)正忙时会挂几秒到几十秒;
+    //   剪贴板法更是直接 Thread.Sleep 轮询。这两个都发生在悬浮窗 UI 线程上的话,
+    //   驱动拖动的 Timer 就无法触发 → 拖动滞后、心跳积压、末尾一次性收起 = 看着像卡死。
+    //   日志实锤: 19:56:20 点「问AI」, 19:56:49 才出卡片 —— UI 线程被取词占了 29 秒。
+    // 这里在 UI 线程只做"取快照 + 丢后台", 取词全在 ThreadPool, 拿到词再 BeginInvoke 回来画小点。
+    static void PickHandleAsync(int x, int y, bool click)
     {
         if (Interlocked.Exchange(ref pickBusy, 1) == 1) return;
         try
         {
+            if (click && (pickCard != null || pickBarWin != null)) { Interlocked.Exchange(ref pickBusy, 0); return; }
+            IntPtr fgAt = GetForegroundWindow();
             if (click)
             {
-                // 结果卡片/工具条正开着: 用户可能还在看/按按钮, 别用新小点把它顶掉
-                if (pickCard != null || pickBarWin != null) return;
-                string w = "";
-                try { w = PickWordAtPoint(x, y); } catch { }
-                if (string.IsNullOrWhiteSpace(w)) { try { w = PickTextUia(x, y); } catch { } }
-                if (string.IsNullOrWhiteSpace(w)) return;   // 单击空白处(桌面/图片): 不打扰
-                w = w.Trim();
-                if (w.Length > 200) w = w.Substring(0, 200);
-                pickSel = w;
-                pickLastX = x; pickLastY = y;
-                pickShownAt = Environment.TickCount;
-                Log("pick(click): " + w.Length + " chars | " + PickOneLine(w));
-                ShowPickDot(x, y);
-                return;
+                // 限流: 单击取词是跨进程 UIA COM, 高频点击(连点/双击)会连环发起, 拖慢全系统
+                int now = Environment.TickCount;
+                if (now - pickLastClickCap < 400) { Interlocked.Exchange(ref pickBusy, 0); return; }
+                pickLastClickCap = now;
+                // 目标窗口挂死(UI 未响应)时 UIA 调用会阻塞很久 —— 直接跳过
+                if (fgAt != IntPtr.Zero && IsHungAppWindow(fgAt))
+                { Interlocked.Exchange(ref pickBusy, 0); Log("pick(click): target hung, skip"); return; }
             }
-            string text = "", how = "";
             int actBase = pickUserAct;
-            IntPtr fgAt = GetForegroundWindow();
-            try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
-            if (string.IsNullOrWhiteSpace(text))
+            ThreadPool.QueueUserWorkItem(delegate { PickCaptureWork(x, y, click, fgAt, actBase); });
+        }
+        catch (Exception ex) { Interlocked.Exchange(ref pickBusy, 0); Log("pick dispatch err: " + ex.Message); }
+    }
+    static int pickLastClickCap = -10000;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool IsHungAppWindow(IntPtr hwnd);
+
+    // click=true = 用户只是**单击**(没有划选)。2026-09-07 老大要的"点击时也弹出悬浮球"。
+    // 只允许无副作用取词: ①UIA 拿光标所在的那个词(Word 单元) ②退一步读现有选区。
+    // **绝不发 Ctrl+C**: 单击不产生选区, 这时全局复制 = 把用户刚点中的输入框里的东西/别处内容当"词"抓走。
+    static void PickCaptureWork(int x, int y, bool click, IntPtr fgAt, int actBase)
+    {
+        string text = "", how = "";
+        int t0 = Environment.TickCount;
+        try
+        {
+            if (click)
             {
-                // 剪贴板法会发一次全局 Ctrl+C —— 用户一旦移开指针/换窗, 这次复制就落到别处
-                // (实测: 划完词顺手点到抖音评论区, 字被"粘贴"进输入框)。安全阀不满足就直接不试。
-                if (!PickClipboardSafe(actBase, fgAt, x, y))
-                    Log("pick: clipboard fallback skipped (user moved on) — 避免把词投进别的应用");
-                else
+                try { text = PickWordAtPoint(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia词"; } catch { }
+                if (string.IsNullOrWhiteSpace(text))
                 {
-                    try { text = PickTextClipboard(actBase, fgAt); if (!string.IsNullOrWhiteSpace(text)) how = "clipboard"; } catch { }
+                    try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia选区"; } catch { }
+                }
+                if (string.IsNullOrWhiteSpace(text)) return;   // 单击空白处(桌面/图片): 不打扰
+                if (text.Trim().Length > 200) text = text.Substring(0, 200);
+            }
+            else
+            {
+                try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    // 剪贴板法会发一次全局 Ctrl+C —— 用户一旦移开指针/换窗, 这次复制就落到别处
+                    // (实测: 划完词顺手点到抖音评论区, 字被"粘贴"进输入框)。安全阀不满足就直接不试。
+                    if (!PickClipboardSafe(actBase, fgAt, x, y))
+                        Log("pick: clipboard fallback skipped (user moved on) — 避免把词投进别的应用");
+                    else
+                    {
+                        try { text = PickTextClipboardSta(actBase, fgAt); if (!string.IsNullOrWhiteSpace(text)) how = "clipboard"; } catch { }
+                    }
                 }
             }
-            if (string.IsNullOrWhiteSpace(text)) { Log("pick: no text captured"); return; }
+            if (string.IsNullOrWhiteSpace(text)) { Log("pick: no text captured (" + (Environment.TickCount - t0) + "ms)"); return; }
             text = text.Trim();
             if (text.Length > 2000) text = text.Substring(0, 2000);
             pickSel = text;
             pickLastX = x; pickLastY = y;
             pickShownAt = Environment.TickCount;
-            Log("pick: " + text.Length + " chars via " + how + " | " + PickOneLine(text));
-            ShowPickDot(x, y);
+            Log("pick" + (click ? "(click)" : "") + ": " + text.Length + " chars via " + how +
+                " in " + (Environment.TickCount - t0) + "ms | " + PickOneLine(text));
+            Control s = pickSync;
+            if (s != null && s.IsHandleCreated)
+                s.BeginInvoke(new MethodInvoker(delegate { ShowPickDot(x, y); }));
         }
-        catch (Exception ex) { Log("pick handle err: " + ex.Message); }
+        catch (Exception ex) { Log("pick capture err: " + ex.Message); }
         finally { Interlocked.Exchange(ref pickBusy, 0); }
     }
 
@@ -422,6 +462,22 @@ partial class ShotService
     }
 
     // ---- 取词 2: 剪贴板法 (通用兜底, 短暂占用剪贴板后还原) ----
+    // 现在从后台线程调用(PickCaptureWork), WinForms Clipboard 要求 STA —— 单开一条 STA 短线程跑,
+    // 绝不能回 UI 线程跑, 那正是"拖动先跟手后延迟最后像崩溃"的元凶。
+    static string PickTextClipboardSta(int actBase, IntPtr fgAt)
+    {
+        string outText = "";
+        Thread st = new Thread(new ThreadStart(delegate
+        {
+            try { outText = PickTextClipboard(actBase, fgAt); } catch (Exception ex) { Log("pick clipboard sta err: " + ex.Message); }
+        }));
+        st.SetApartmentState(ApartmentState.STA);
+        st.IsBackground = true;
+        st.Start();
+        if (!st.Join(1600)) { Log("pick clipboard sta timeout"); return ""; }
+        return outText ?? "";
+    }
+
     static string PickTextClipboard(int actBase, IntPtr fgAt)
     {
         string result = "";
@@ -437,7 +493,6 @@ partial class ShotService
             for (int i = 0; i < 25; i++)             // 最多等 500ms
             {
                 Thread.Sleep(20);
-                Application.DoEvents();              // 让消息泵转, 目标应用才能写入剪贴板
                 // 期间用户换窗/挪指针 = 这次 Ctrl+C 可能已经投到他正在用的输入框 -> 立刻收手
                 if (GetForegroundWindow() != fgAt) { Log("pick clipboard aborted: foreground changed"); break; }
                 try { if (Clipboard.ContainsText()) { result = Clipboard.GetText(); break; } } catch { }
@@ -514,6 +569,16 @@ partial class ShotService
     }
 
     // ---- 卡片拖动(钩子按住 + 心跳跟随; 免激活窗自己收不到拖拽消息) ----
+    // 钩子喂来的滚轮 -> 卡片正文滚动(标题栏上不滚)
+    static void PickCardWheel(int x, int y, int delta)
+    {
+        PickCardForm c = pickCard as PickCardForm;
+        int[] r = PickCardRect;
+        if (c == null || r == null || !c.IsHandleCreated) return;
+        if (y - r[1] <= PickCardForm.HEAD_H) return;
+        c.ScrollBody(delta);
+    }
+
     static void PickCardDragStart(int x, int y)
     {
         PickCardForm c = pickCard as PickCardForm;

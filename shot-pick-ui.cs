@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -13,8 +14,10 @@ using System.Windows.Forms;
 // 另外: 构造函数里设的 TopMost=true 会被 ShowWithoutActivation 路径丢掉, 必须 Show() 之后
 // 显式 SetWindowPos(HWND_TOPMOST) —— 见 shot-pick.cs 的 PickTopMost。
 //
-// 圆角用 TransparencyKey + 自绘实现(不用 Region): Region 在 PerMonitorV2 下会被 Show() 时
-// 的 DPI suggested rect 改写尺寸, 导致内容被裁 —— 这个坑 annotation 弹层已经踩过。
+// 圆角改用 Region(Show 之后设置) + BackColor=卡面色自绘。~~TransparencyKey 品红抠色~~ 已废弃:
+// 子控件 BackColor=Transparent 在 WinForms 里是"拿父窗 BackColor 刷底", 品红被刷进面板,
+// 而 ColorKey 抠不掉子控件表面 → 圆角处出现"里面白线外面粉框"两条边(2026-09-07 老大截图)。
+// Region 在 PerMonitorV2 下的旧坑(Show 时被 suggested rect 改写 → 内容被裁)靠【Show 之后再设】绕开。
 
 static class PickStyle
 {
@@ -28,7 +31,13 @@ static class PickStyle
     public static readonly Color Btn = Color.FromArgb(52, 55, 64);
     public static readonly Color Accent = Color.FromArgb(24, 110, 210);
 
-    // 免激活悬浮窗统一关 DPI 自动缩放: 命中矩形按物理像素算, 缩放会让点击偏位
+    // ★ 圆角改用 Region 裁窗口, 不再用 TransparencyKey (2026-09-07 老大: "看到两条边界线,
+    //   一白一粉")。粉边的成因: BackColor=Key(品红) + 子 Label 用 BackColor=Transparent,
+    //   WinForms 的"透明"是拿【父窗 BackColor】给自己刷底 —— 于是品红被刷进面板里;
+    //   而 ColorKey 抠除只对父窗自己画的像素有效, 子控件表面抠不掉 → 粉块/粉框。
+    //   解法: BackColor 直接就是卡面色(CardBg), 多余角落用 Region 真裁掉, 不存在"透出色"。
+    //   Region 的旧坑(PerMonitorV2 下 Show() 时被 DPI suggested rect 改尺寸 → 内容被裁)
+    //   用「Show 之后再设 Region + SizeChanged 重设」避开, 见 ApplyRegion。
     public static void ApplyChrome(Form f)
     {
         f.FormBorderStyle = FormBorderStyle.None;
@@ -36,18 +45,42 @@ static class PickStyle
         f.TopMost = true;
         f.StartPosition = FormStartPosition.Manual;
         f.AutoScaleMode = AutoScaleMode.None;
-        f.BackColor = Key;
-        f.TransparencyKey = Key;
+        f.BackColor = CardBg;
+    }
+
+    // 在 Show() 之后调用: 按当前实际尺寸裁圆角/圆形
+    public static void ApplyRegion(Form f, GraphicsPath shape)
+    {
+        try
+        {
+            if (f == null || f.IsDisposed) return;
+            Region old = f.Region;
+            f.Region = new Region(shape);
+            if (old != null) old.Dispose();
+        }
+        catch (Exception) { try { f.Region = null; } catch { } }
+    }
+
+    public static GraphicsPath RoundPath(int w, int h, int r)
+    {
+        return Round(w, h, r);
+    }
+
+    // 按窗体实际客户区尺寸裁圆角(Show 后调用; 尺寸变化时重调)
+    public static void RoundRegion(Form f, int r)
+    {
+        ApplyRegion(f, Round(f.ClientSize.Width, f.ClientSize.Height, r));
     }
 
     public static void PaintPanel(Form f, PaintEventArgs e, int w, int h, int radius)
     {
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        e.Graphics.Clear(Key);
-        using (var path = Round(w, h, radius))
+        // 背景直接填卡面色(不透明), 圆角由 Region 裁 —— 画面上不存在"透出色",
+        // 任何抗锯齿混合都发生在卡面色系内部, 永远不会出粉/红边。
+        e.Graphics.SmoothingMode = SmoothingMode.None;
         using (var bg = new SolidBrush(CardBg))
-            e.Graphics.FillPath(bg, path);
-        using (var pen = new Pen(Border, 1f))
+            e.Graphics.FillRectangle(bg, 0, 0, w, h);
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var pen = new Pen(Border, 1.5f))
         using (var p2 = Round(w - 1, h - 1, radius))
             e.Graphics.DrawPath(pen, p2);
     }
@@ -101,7 +134,7 @@ sealed class PickDotForm : Form
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(PickStyle.Key);
+        g.Clear(PickStyle.CardBg);   // 圆形 Region 裁边, 不再用品红透色
         using (var sh = new SolidBrush(Color.FromArgb(70, 0, 0, 0)))
             g.FillEllipse(sh, 4, 5, DOT - 7, DOT - 7);          // 投影
         using (var br = new SolidBrush(PickStyle.Accent))
@@ -109,6 +142,15 @@ sealed class PickDotForm : Form
         using (var pen = new Pen(Color.White, 2f))
             g.DrawEllipse(pen, 3, 3, DOT - 7, DOT - 7);         // 白描边, 深浅背景都能看见
         g.FillEllipse(Brushes.White, DOT / 2 - 2, DOT / 2 - 2, 4, 4);
+    }
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        using (var p = new System.Drawing.Drawing2D.GraphicsPath())
+        {
+            p.AddEllipse(0, 0, DOT, DOT);
+            PickStyle.ApplyRegion(this, p);
+        }
     }
 }
 
@@ -158,6 +200,7 @@ sealed class PickBarForm : Form
     {
         PickStyle.PaintPanel(this, e, BAR_W, BAR_H, 10);
     }
+    protected override void OnShown(EventArgs e) { base.OnShown(e); PickStyle.RoundRegion(this, 10); }
 }
 
 // ==================== 结果卡片 ====================
@@ -173,14 +216,18 @@ sealed class PickCardForm : Form
     const int SRC_H = 46;
     const int BTN_Y = SRC_Y + SRC_H + 8;         // 254
     const int BTN_H = 28;
-    const int BTN_W = 76;                        // 三个按钮(反转翻译/复制结果/复制原文)要放得下
+    const int BTN_W = 96;                        // 底部两个按钮(复制结果/复制原文)
+
+    // 标题栏按钮区: 反转翻译(仅翻译卡) + 关闭×
+    const int SWAP_W = 64, SWAP_X = CARD_W - 34 - SWAP_W - 6;   // ×左边
+    const int SWAP_Y = 8, SWAP_H = 22;
 
     Label titleL;
-    TextBox body, src;
+    PickTextView body, src;
     Button swapB, copyB, copySrcB, closeB;
 
-    public string BodyText { get { return body == null ? "" : body.Text; } }
-    public string SourceText { get { return src == null ? "" : src.Text; } }
+    public string BodyText { get { return body == null ? "" : body.Body; } }
+    public string SourceText { get { return src == null ? "" : src.Body; } }
 
     public PickCardForm()
     {
@@ -189,10 +236,11 @@ sealed class PickCardForm : Form
         DoubleBuffered = true;
         Font = PickStyle.F(PickStyle.FS_MID, FontStyle.Regular);
 
-        closeB = MakeBtn("×", CARD_W - 34, 8, 26, 22);
-        swapB = MakeBtn("反转翻译", PAD, BTN_Y, BTN_W, BTN_H);
-        copyB = MakeBtn("复制结果", PAD + BTN_W + 6, BTN_Y, BTN_W, BTN_H);
-        copySrcB = MakeBtn("复制原文", PAD + (BTN_W + 6) * 2, BTN_Y, BTN_W, BTN_H);
+        closeB = MakeBtn("×", CARD_W - 34, SWAP_Y, 26, SWAP_H);
+        swapB = MakeBtn("反转翻译", SWAP_X, SWAP_Y, SWAP_W, SWAP_H);
+        swapB.Font = PickStyle.F(PickStyle.FS_SMALL, FontStyle.Regular);
+        copyB = MakeBtn("复制结果", PAD, BTN_Y, BTN_W, BTN_H);
+        copySrcB = MakeBtn("复制原文", PAD + BTN_W + 8, BTN_Y, BTN_W, BTN_H);
 
         titleL = new Label();
         titleL.Text = "处理中";
@@ -200,12 +248,12 @@ sealed class PickCardForm : Form
         titleL.BackColor = Color.Transparent;
         titleL.Font = PickStyle.F(PickStyle.FS_TITLE, FontStyle.Bold);
         titleL.Location = new Point(PAD + 24, 0);
-        titleL.Size = new Size(CARD_W - (PAD + 24) - 40, HEAD_H);
+        titleL.Size = new Size(SWAP_X - (PAD + 24) - 4, HEAD_H);
         titleL.TextAlign = ContentAlignment.MiddleLeft;
         Controls.Add(titleL);
 
-        body = MakeField(PAD, BODY_Y, CARD_W - PAD * 2, BODY_H, PickStyle.InkHi, PickStyle.FS_BODY);
-        src = MakeField(PAD, SRC_Y, CARD_W - PAD * 2, SRC_H, PickStyle.InkMid, PickStyle.FS_MID);
+        body = MakeView(PAD, BODY_Y, CARD_W - PAD * 2, BODY_H, PickStyle.InkHi, PickStyle.FS_BODY);
+        src = MakeView(PAD, SRC_Y, CARD_W - PAD * 2, SRC_H, PickStyle.InkMid, PickStyle.FS_MID);
     }
 
     Button MakeBtn(string text, int x, int y, int w, int h)
@@ -225,21 +273,15 @@ sealed class PickCardForm : Form
         return b;
     }
 
-    TextBox MakeField(int x, int y, int w, int h, Color fg, float size)
+    PickTextView MakeView(int x, int y, int w, int h, Color fg, float size)
     {
-        var t = new TextBox();
-        t.Multiline = true;
-        t.ReadOnly = true;
-        t.ScrollBars = ScrollBars.Vertical;
-        t.BorderStyle = BorderStyle.None;
-        t.BackColor = PickStyle.Field;
-        t.ForeColor = fg;
-        t.Font = PickStyle.F(size, FontStyle.Regular);
+        var t = new PickTextView();
         t.Location = new Point(x, y);
         t.Size = new Size(w, h);
-        t.WordWrap = true;
+        t.ForeColor = fg;
+        t.BackColor = PickStyle.Field;
+        t.Font = PickStyle.F(size, FontStyle.Regular);
         t.TabStop = false;
-        t.Cursor = Cursors.Default;      // 只读展示: 别画文本光标
         Controls.Add(t);
         return t;
     }
@@ -247,31 +289,31 @@ sealed class PickCardForm : Form
     public void SetContent(string title, string text, string source)
     {
         titleL.Text = title;
-        body.Text = text ?? "";
-        try { body.SelectionStart = 0; body.ScrollToCaret(); } catch { }
-        src.Text = string.IsNullOrEmpty(source) ? "" : "原文：" + source;
+        body.Body = text ?? "";
+        src.Body = string.IsNullOrEmpty(source) ? "" : "原文：" + source;
         // 「反转翻译」只对翻译结果有意义(把译文再翻回去), AI 回答上隐藏
         if (swapB != null) swapB.Visible = (title ?? "").IndexOf("翻译") >= 0;
     }
     public void SetTitle(string title) { if (titleL != null) titleL.Text = title; }
+    public void ScrollBody(int delta) { if (body != null) body.ScrollBy(delta); }
 
     // ---- 命中(本地坐标, 由 shot-pick.cs 换算物理坐标) ----
     public const int HIT_NONE = 0, HIT_CLOSE = 1, HIT_COPY = 2, HIT_COPY_SRC = 3, HIT_SWAP = 4;
     public int HitButton(int lx, int ly)
     {
-        if (lx >= CARD_W - 34 && lx <= CARD_W - 8 && ly >= 8 && ly <= 30) return HIT_CLOSE;
+        if (lx >= CARD_W - 34 && lx <= CARD_W - 8 && ly >= SWAP_Y && ly <= SWAP_Y + SWAP_H) return HIT_CLOSE;
+        if (lx >= SWAP_X && lx <= SWAP_X + SWAP_W && ly >= SWAP_Y && ly <= SWAP_Y + SWAP_H) return HIT_SWAP;
         if (ly >= BTN_Y && ly <= BTN_Y + BTN_H)
         {
-            if (lx >= PAD && lx <= PAD + BTN_W) return HIT_SWAP;
-            if (lx >= PAD + BTN_W + 6 && lx <= PAD + BTN_W * 2 + 6) return HIT_COPY;
-            if (lx >= PAD + (BTN_W + 6) * 2 && lx <= PAD + BTN_W * 3 + 12) return HIT_COPY_SRC;
+            if (lx >= PAD && lx <= PAD + BTN_W) return HIT_COPY;
+            if (lx >= PAD + BTN_W + 8 && lx <= PAD + BTN_W * 2 + 8) return HIT_COPY_SRC;
         }
         return HIT_NONE;
     }
-    // 拖动区 = 标题栏(避开关闭按钮) + 原文行。正文留给选字/滚动。
+    // 拖动区 = 标题栏(避开反转/关闭两个按钮) + 原文行。正文留给滚动。
     public bool HitDraggable(int lx, int ly)
     {
-        if (ly < HEAD_H && !(lx >= CARD_W - 40)) return true;
+        if (ly < HEAD_H && !(lx >= SWAP_X)) return true;
         if (ly >= SRC_Y && ly <= SRC_Y + SRC_H) return true;
         return false;
     }
@@ -291,18 +333,13 @@ sealed class PickCardForm : Form
         using (var br = new SolidBrush(PickStyle.InkDim))
             for (int i = 0; i < 3; i++)
                 g.FillEllipse(br, PAD + 3 + i * 5, HEAD_H / 2 - 2, 3, 3);   // 拖动抓手
-        DrawField(e, PAD, BODY_Y, CARD_W - PAD * 2, BODY_H);
-        DrawField(e, PAD, SRC_Y, CARD_W - PAD * 2, SRC_H);
+        // 正文/原文背景由 PickTextView 自绘(无 AA 不混色), 这里不再画字段边框
         using (var fnt = PickStyle.F(PickStyle.FS_TINY, FontStyle.Regular))
         using (var br = new SolidBrush(PickStyle.InkDim))
             g.DrawString("按住标题栏/原文行可拖动", fnt, br, CARD_W - 158, BTN_Y + 8);
     }
-    void DrawField(PaintEventArgs e, int x, int y, int w, int h)
-    {
-        using (var pen = new Pen(PickStyle.Border, 1f))
-        using (var path = PickStyle.Round(w - 1, h - 1, 8))
-            e.Graphics.DrawPath(pen, path);
-    }
+    protected override void OnShown(EventArgs e) { base.OnShown(e); PickStyle.RoundRegion(this, 14); }
+    protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); PickStyle.RoundRegion(this, 14); }
 }
 
 // ==================== 问 AI 提问框 ====================
@@ -324,8 +361,7 @@ sealed class PickAskForm : Form
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.None;
-        BackColor = PickStyle.Key;
-        TransparencyKey = PickStyle.Key;
+        BackColor = PickStyle.CardBg;   // 圆角走 Region 裁, 不用品红透色
         Size = new Size(ASK_W, ASK_H);
         TopMost = true;
         DoubleBuffered = true;
@@ -388,5 +424,112 @@ sealed class PickAskForm : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         PickStyle.PaintPanel(this, e, ASK_W, ASK_H, 12);
+    }
+    protected override void OnShown(EventArgs e) { base.OnShown(e); PickStyle.RoundRegion(this, 12); }
+}
+
+// ---- 自绘只读文本视图: 取代原生 TextBox ----
+// 老大的反馈: 原生滚动条又粗又和卡片风格不搭, 圆角处还撑出两条边框弧线。
+// 这里全部自绘: 5px 细滚动条(同 Btn 色)、无原生 chrome、SmoothingMode.None 画矩形
+// (不产生抗锯齿混合像素, 也就不会有 TransparencyKey 的粉色描边)。
+sealed class PickTextView : Control
+{
+    string _body = "";
+    readonly List<string> _lines = new List<string>();
+    int _scroll;                       // 已滚动像素
+    const int SB_W = 5;                // 滚动条宽度
+    const int SB_PAD = 4;              // 文本左右留白
+
+    public PickTextView()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Default;
+        TabStop = false;
+    }
+
+    public string Body
+    {
+        get { return _body; }
+        set { _body = value ?? ""; _scroll = 0; Relayout(); }
+    }
+
+    // 滚轮经全局钩子转进来(免激活窗收不到 WM_MOUSEWHEEL)
+    public void ScrollBy(int delta)
+    {
+        int total = _lines.Count * Font.Height;
+        _scroll -= Math.Sign(delta) * 36;
+        if (_scroll < 0) _scroll = 0;
+        if (_scroll > MaxScroll(total)) _scroll = MaxScroll(total);
+        Invalidate();
+    }
+
+    protected override void OnFontChanged(EventArgs e) { base.OnFontChanged(e); Relayout(); }
+    protected override void OnResize(EventArgs e) { base.OnResize(e); Relayout(); }
+    protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); if (Visible) Relayout(); }
+
+    void Relayout()
+    {
+        _lines.Clear();
+        using (Graphics g = CreateGraphics())
+        {
+            foreach (string para in _body.Replace("\r", "").Split('\n'))
+            {
+                if (para.Length == 0) { _lines.Add(""); continue; }
+                string cur = "";
+                int i = 0;
+                while (i < para.Length)
+                {
+                    // 一次吞一个"词"(连续 ASCII)或一个字(CJK), 避免英文单词被拦腰截断
+                    string tk;
+                    if (i < para.Length && (char.IsLetterOrDigit(para[i]) || para[i] == '\''))
+                    {
+                        int j = i;
+                        while (j < para.Length && (char.IsLetterOrDigit(para[j]) || para[j] == '\'')) j++;
+                        tk = para.Substring(i, j - i); i = j;
+                    }
+                    else { tk = para.Substring(i, 1); i++; }
+                    string test = cur + tk;
+                    if (cur.Length > 0 && TextRenderer.MeasureText(test, Font).Width > Width - SB_PAD * 2 - SB_W)
+                    {
+                        _lines.Add(cur);
+                        cur = tk.TrimStart();
+                    }
+                    else cur = test;
+                }
+                if (cur.Length > 0) _lines.Add(cur);
+            }
+        }
+        int total = _lines.Count * Font.Height;
+        if (_scroll > MaxScroll(total)) _scroll = Math.Max(0, MaxScroll(total));
+        Invalidate();
+    }
+    int MaxScroll(int total) { return Math.Max(0, total - Height + 2); }
+
+    protected override void OnMouseWheel(MouseEventArgs e) { ScrollBy(e.Delta); base.OnMouseWheel(e); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        // 不抗锯齿画底: 矩形边缘是纯色像素, 不会和 TransparencyKey 混出粉边
+        e.Graphics.SmoothingMode = SmoothingMode.None;
+        using (var bg = new SolidBrush(BackColor)) e.Graphics.FillRectangle(bg, ClientRectangle);
+        int y = -_scroll;
+        foreach (string ln in _lines)
+        {
+            if (y + Font.Height > 0 && y < Height)
+                TextRenderer.DrawText(e.Graphics, ln, Font,
+                    new Point(SB_PAD, y), ForeColor, TextFormatFlags.NoPrefix);
+            y += Font.Height;
+        }
+        // 细滚动条: 内容超高才画
+        int total = _lines.Count * Font.Height;
+        if (total > Height)
+        {
+            float ratio = (float)Height / total;
+            int th = Math.Max(24, (int)(Height * ratio));
+            int ty = (int)((Height - th) * ((float)_scroll / Math.Max(1, MaxScroll(total))));
+            using (var sb = new SolidBrush(PickStyle.Btn))
+                e.Graphics.FillRectangle(sb, Width - SB_W - 1, ty, SB_W, th);
+        }
     }
 }
