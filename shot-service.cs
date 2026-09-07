@@ -664,6 +664,15 @@ public partial class ShotService
             }
             waitedMs = waitMs - Math.Max(0, deadline - Environment.TickCount);
         }
+        // 返回前刷新窗口终态: 首匹配可能是 Store 启动器 splash(标题如"记事本"), 真实窗标题("无标题 - Notepad")/pid 以其为准
+        if (lastHwnd != IntPtr.Zero && IsWindow(lastHwnd))
+        {
+            StringBuilder rf = new StringBuilder(256); GetWindowTextW(lastHwnd, rf, 256);
+            uint rpid = 0; GetWindowThreadProcessId(lastHwnd, out rpid);
+            string rproc = ""; try { rproc = Process.GetProcessById((int)rpid).ProcessName; } catch { }
+            RECT fr; GetWindowRect(lastHwnd, out fr);
+            winJson = "{\"hwnd\":" + lastHwnd.ToInt64() + ",\"pid\":" + rpid + ",\"title\":\"" + JsonEscape(rf.ToString()) + "\",\"process\":\"" + JsonEscape(rproc) + "\",\"rect\":{\"x\":" + fr.Left + ",\"y\":" + fr.Top + ",\"w\":" + (fr.Right - fr.Left) + ",\"h\":" + (fr.Bottom - fr.Top) + "}}";
+        }
         return "{\"ok\":true,\"pid\":" + runPid + ",\"name\":\"" + runName + "\",\"session\":" + Process.GetCurrentProcess().SessionId + ",\"window\":" + winJson + (waitMs > 0 ? ",\"stable\":" + (stable ? "true" : "false") + ",\"waitedMs\":" + waitedMs : "") + "}";
     }
 
