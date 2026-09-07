@@ -76,3 +76,13 @@
 4. 剪贴板取词法发全局 Ctrl+C 有投错窗口风险(实测把词粘进抖音评论区) —— 安全阀: 前台窗变化或指针离开按下点24px即拒走; 等待循环内前台变化立刻 abort。
 5. 给本服务加 MCP 工具三处都要动: shot-service.cs 的 McpCall switch case + McpToolsJson 条目 + **mcp-bridge.js 注册表数组与 buildUrl 路由**(bridge 有独立白名单, 漏改直接 unknown tool)。
 配置入口: 设置页「划词」节 / HTTP GET /pick-config?enabled=0|1 / MCP pick_config。开关立即生效+持久化到 shot-service.json pick 节。
+
+## 免激活浮窗拖动不跟手的根因与修法
+
+免激活浮窗"拖动不跟手"根因与修法 (2026-09-07 划词卡片实测, 跟随率 20/20=100%):
+不是电脑卡 —— 是跟随机制慢半拍。低级钩子在本机收不到 WM_MOUSEMOVE(moves=0), 拖动期间缓存的坐标是按下瞬间的陈旧值, 且只在 200ms 心跳应用一次 = 一步一卡。
+修法三件套:
+1. 拖动中直接 GetCursorPos 实时取坐标, 不依赖钩子 MOVE;
+2. Timer 心跳拖动期加密到 15ms(平时 200ms), 起拖瞬间立刻切 Interval 不等下一轮;
+3. 移动用单次 SetWindowPos(位置+HWND_TOPMOST 一步完成), 坐标没变整个跳过。
+验收脚本 _pick_drag_perf.py: 手动 mouse_event DOWN + 20 步 SetCursorPos + UP, 后台 5ms 采样卡片 rect, 数位置变化档位(>=12 为跟手)。别用 mouse_drag 工具测跟手度——它本身一步到位看不出卡顿。
