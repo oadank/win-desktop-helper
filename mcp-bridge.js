@@ -455,6 +455,12 @@ function buildUrl(name, a) {
       if (a.monitor) qs.push('monitor=' + enc(a.monitor));
       return { path: '/win/' + act, qs };
     }
+    case 'tray_click': {
+      const qs = ['name=' + enc(a.name)];
+      if (a.button) qs.push('button=' + a.button);
+      if (a.double) qs.push('double=' + a.double);
+      return { path: '/tray/click', qs };
+    }
     case 'mouse_move': return { path: '/mouse/move', qs: ['x=' + a.x, 'y=' + a.y] };
     case 'mouse_click': {
       let qs = [];

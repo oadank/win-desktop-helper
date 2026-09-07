@@ -865,15 +865,83 @@ partial class ShotService
         catch { return ""; }
     }
 
+    // 从元素向上找到真实 Win32 窗口, 拿屏幕坐标 rect (元素 rect 可能是窗口相对坐标, 如冻结态 ZCode/Electron)
+    static bool WinRectOf(System.Windows.Automation.AutomationElement e, out int wx, out int wy, out int ww, out int wh)
+    {
+        wx = wy = ww = wh = 0;
+        try
+        {
+            var cur = e;
+            for (int i = 0; i < 30 && cur != null; i++)
+            {
+                int h = 0;
+                try { h = (int)cur.Current.NativeWindowHandle; } catch { }
+                if (h != 0)
+                {
+                    RECT r;
+                    if (GetWindowRect((IntPtr)h, out r) && r.Right > r.Left && r.Bottom > r.Top)
+                    { wx = r.Left; wy = r.Top; ww = r.Right - r.Left; wh = r.Bottom - r.Top; return true; }
+                }
+                var par = System.Windows.Automation.TreeWalker.ControlViewWalker.GetParent(cur);
+                if (par == System.Windows.Automation.AutomationElement.RootElement || par == null) break;
+                cur = par;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // 整窗像素指纹: 对比区域是元素所在整窗中间 80%, 而不是按钮自身 — 按钮自身外观不变时(如切页签)区域对比会误报"没反应"
+    static string WindowHashOf(System.Windows.Automation.AutomationElement e)
+    {
+        int wx, wy, ww, wh;
+        if (!WinRectOf(e, out wx, out wy, out ww, out wh)) return RegionHashOf(e);
+        int mx = wx + ww / 10, my = wy + wh / 10, mw = ww * 8 / 10, mh = wh * 8 / 10;
+        if (mw <= 0 || mh <= 0) return RegionHashOf(e);
+        try
+        {
+            using (var bmp = new Bitmap(mw, mh, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(mx, my, 0, 0, new Size(mw, mh));
+                using (var ms = new System.IO.MemoryStream())
+                {
+                    bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                    var md5 = System.Security.Cryptography.MD5.Create();
+                    return BitConverter.ToString(md5.ComputeHash(ms.ToArray())).Replace("-", "");
+                }
+            }
+        }
+        catch { return ""; }
+    }
+
     // verify=1 时的附加返回: changed=点击前后界面是否真的变了
     static string VerifyExtra(System.Windows.Automation.AutomationElement e, string before)
     {
         if (before == "") return "";
-        Thread.Sleep(400);
-        string after = RegionHashOf(e);
+        Thread.Sleep(500);
+        string after = WindowHashOf(e);
         bool changed = after != "" && after != before;
         return ",\"verify\":{\"changed\":" + (changed ? "true" : "false") + ",\"before\":\"" + before + "\",\"after\":\"" + after + "\"}"
              + (changed ? "" : ",\"warn\":\"点了但界面像素没变(可能被遮挡/应用不响应 UIA/窗口没真激活/元素位置已漂移) — 改 mode=coord 真实鼠标点, 或先 win_manage activate 真正激活窗口, 再重采样确认元素还在原位\"");
+    }
+
+    // 元素中心若不在所属窗口 rect 内 = UIA 返回了窗口相对坐标(冻结态 Electron 等), 按窗口偏移平移到屏幕坐标
+    static int AdjustToWindow(System.Windows.Automation.AutomationElement e, int cx, int cy, System.Windows.Rect elRect, out int outY)
+    {
+        outY = cy;
+        int wx, wy, ww, wh;
+        if (!WinRectOf(e, out wx, out wy, out ww, out wh) || ww < 10) return cx;
+        if (cx >= wx - 2 && cx <= wx + ww + 2 && cy >= wy - 2 && cy <= wy + wh + 2) return cx; // 已在窗口内
+        int nx = wx + (int)elRect.X + (int)elRect.Width / 2;
+        int ny = wy + (int)elRect.Y + (int)elRect.Height / 2;
+        if (nx >= wx - 2 && nx <= wx + ww + 2 && ny >= wy - 2 && ny <= wy + wh + 2)
+        {
+            Log("ui click coord adjusted: " + cx + "," + cy + " -> " + nx + "," + ny + " (窗口相对坐标)");
+            outY = ny;
+            return nx;
+        }
+        return cx; // 平移后也不在窗口内, 交给 HitGuard 拦
     }
 
     static string UiClick(Dictionary<string, string> q)
@@ -891,12 +959,13 @@ partial class ShotService
             if (reqName != "" && name.IndexOf(reqName, StringComparison.OrdinalIgnoreCase) < 0)
                 return "{\"ok\":false,\"error\":\"定位校验失败: 要点的 name='" + JsonEscape(reqName) + "', 实际点中的是 '" + JsonEscape(name) + "' (i 跨调用会漂移, 请改用 name= 定位)\"}";
             bool doVerify = q.ContainsKey("verify") && q["verify"] == "1";
-            string hashBefore = doVerify ? RegionHashOf(e) : "";
+            string hashBefore = doVerify ? WindowHashOf(e) : "";
             bool forceCoord = q.ContainsKey("mode") && q["mode"] == "coord";
             if (forceCoord)
             {
                 System.Windows.Rect rf = e.Current.BoundingRectangle;
                 int fx = (int)(rf.X + rf.Width / 2), fy = (int)(rf.Y + rf.Height / 2);
+                fx = AdjustToWindow(e, fx, fy, rf, out fy);
                 string guard = HitGuard(fx, fy, e, q);
                 if (guard != "") return guard;
                 SetCursorPos(fx, fy);
@@ -923,6 +992,7 @@ partial class ShotService
             // 退坐标点击中心
             System.Windows.Rect r2 = e.Current.BoundingRectangle;
             int cx = (int)(r2.X + r2.Width / 2), cy = (int)(r2.Y + r2.Height / 2);
+            cx = AdjustToWindow(e, cx, cy, r2, out cy);
             string guard2 = HitGuard(cx, cy, e, q);
             if (guard2 != "") return guard2;
             SetCursorPos(cx, cy);
