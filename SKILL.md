@@ -26,7 +26,7 @@
 3. **每次操作后必须验证**，没变就重新采样，不许连点同一个位置
 4. **中文一律剪贴板粘贴**：`clipboard_set(text)` → 点输入框聚焦 → `keyboard_press(keys="ctrl+v")`。组合键参数名是 `keys`（不是 key/modifiers）
 5. **工具不报假成功**：`ui_click` 的 via=invoke 只代表调到了不代表生效 → 配 `verify=1`；`ui_set` 写入后自动读回校验，不一致直接报错并指路剪贴板方案；坐标点击前自动做落点归属校验，位置命中的不是目标进程会拦下并报错。**看到报错就按报错里的提示改，别重试同一个动作**
-6. **"看得见但点不动"= Electron 假激活/冻结**：`win_manage activate` 会自动清穿透样式并恢复（返回 `fixes`），若仍点不动 → `win_manage(action=close)` 关窗（进程退托盘不死）→ `tray_click(name=应用名, double=1)` 双击重开。实测这是唯一可靠恢复路径
+6. **"看得见但点不动" / "压根没窗口" → 直接 `app_restore(process=应用名, snap=right)`**：一条命令自动 close 关窗 → 托盘双击重开 → 等窗口稳定 → 贴回指定位置（返回 `stable` / `steps`）。**`win_manage activate` 唤回的窗口经常是冻结的，别拿它当恢复手段**；失败看返回里的 steps（托盘名不对用 `tray_list`，应用真退了用 `app_run`）
 7. **敏感操作先问**（删除/发送消息/改系统设置），付款不做
 
 ## 常用工具速查
@@ -37,6 +37,7 @@
 | 窗口信息/管理 | `window_info`(支持 process 精确匹配) `active_window` `list_apps` `win_manage` `monitors` |
 | 半屏布局 | `win_manage(action=snap, hwnd=, pos=left\|right\|top\|bottom\|topleft...\|max\|min\|restore, monitor=2\|next\|prev)` |
 | 找失踪窗口 | `win_manage(action=listall, pid=)` 含隐藏/最小化/托盘化的窗口 |
+| **深度恢复(冻结/没窗口)** | `app_restore(process=, snap=left\|right\|max, wait=8000)` 一条命令：关窗→托盘双击重开→等稳定→贴回，首选它 |
 | 托盘唤回 | `tray_click(name=, double=1)`（单击=toggle 最小化，双击=恢复/打开） |
 | 鼠标/键盘 | `mouse_click` `mouse_move` `mouse_drag` `keyboard_type` `keyboard_press` |
 | 看 | `screen_capture` `ocr_image` |
@@ -51,6 +52,6 @@
 | `ui_click` 返回 ok 但界面没变 | 加 `verify=1`；invoke 不生效的应用用 `mode=coord` 或 `mouse_click` |
 | `window_info` 查到不相干的窗口 | title 模糊匹配会误伤浏览器标签页，传 `process` 按进程过滤 |
 | 粘贴没生效 | 参数名是 `keys`：`keyboard_press(keys="ctrl+v")` |
-| 窗口能看见但点不动 | Electron 冻结，走上面的第 6 条（close → tray 双击） |
+| 窗口能看见但点不动 / 完全没有窗口 | `app_restore(process=应用名)` 一条命令恢复，别用 activate |
 | `app_run` 返回的 hwnd 找不到窗口 | 多进程应用会换窗，用 `list_apps` 按 process 重新取 |
 | 布局想贴半屏 | 别用 move 手算坐标，用 snap；返回 target≠rect 说明应用有最小尺寸约束，按 rect 补差 |

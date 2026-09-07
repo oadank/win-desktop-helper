@@ -343,6 +343,21 @@ const TOOLS = [
     }
   },
   {
+    name: 'app_restore',
+    description: '深度恢复应用窗口(一条命令搞定): 关窗 -> 托盘双击重开 -> 等窗口稳定 -> 贴回原位置。专治两类顽疾: ①窗口看得见但点不动(Electron 假激活/冻结, win_manage activate 唤回的窗口经常是冻的) ②应用完全没有窗口(缩在托盘或任务栏隐藏区, list_apps 看不到)。返回 hwnd/rect/stable/steps',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        process: { type: 'string', description: '进程名, 如 ZCode (推荐, 比标题可靠)' },
+        title: { type: 'string', description: '窗口标题, 进程名找不到时用' },
+        hwnd: { type: 'number', description: '已知句柄' },
+        snap: { type: 'string', description: '恢复后贴靠位置: left|right|top|bottom|topleft|topright|bottomleft|bottomright|max' },
+        wait: { type: 'number', description: '等窗口稳定毫秒数, 默认 8000' }
+      },
+      required: []
+    }
+  },
+  {
     name: 'app_runas',
     description: '以管理员权限运行程序（触发 UAC 提权，用户需确认）',
     inputSchema: {
@@ -592,6 +607,15 @@ function buildUrl(name, a) {
       if (a.wait !== undefined) qs.push('wait=' + a.wait);
       if (a.process) qs.push('process=' + enc(a.process));
       return { path: '/app/run', qs };
+    }
+    case 'app_restore': {
+      const qs = [];
+      if (a.process) qs.push('process=' + enc(a.process));
+      if (a.title) qs.push('title=' + enc(a.title));
+      if (a.hwnd) qs.push('hwnd=' + a.hwnd);
+      if (a.snap) qs.push('snap=' + enc(a.snap));
+      if (a.wait) qs.push('wait=' + a.wait);
+      return { path: '/app/restore', qs };
     }
     case 'app_runas': {
       let qs = ['path=' + enc(a.path)];

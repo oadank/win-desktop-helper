@@ -667,6 +667,121 @@ public partial class ShotService
         return "{\"ok\":true,\"pid\":" + runPid + ",\"name\":\"" + runName + "\",\"session\":" + Process.GetCurrentProcess().SessionId + ",\"window\":" + winJson + (waitMs > 0 ? ",\"stable\":" + (stable ? "true" : "false") + ",\"waitedMs\":" + waitedMs : "") + "}";
     }
 
+    // 按进程名找可见主窗(顶层 + 有标题)
+    static IntPtr FindMainWinByProc(string proc)
+    {
+        if (string.IsNullOrEmpty(proc)) return IntPtr.Zero;
+        IntPtr found = IntPtr.Zero;
+        EnumWindows(delegate (IntPtr h, IntPtr lp)
+        {
+            if (!IsWindow(h) || !IsWindowVisible(h)) return true;
+            StringBuilder sb = new StringBuilder(256); GetWindowTextW(h, sb, 256);
+            if (sb.Length == 0) return true;
+            uint pid = 0; GetWindowThreadProcessId(h, out pid);
+            string pn = "";
+            try { pn = Process.GetProcessById((int)pid).ProcessName; } catch { }
+            if (string.Equals(pn, proc, StringComparison.OrdinalIgnoreCase)) { found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    static string JsonArr(System.Collections.Generic.List<string> l)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < l.Count; i++)
+        {
+            if (i > 0) sb.Append(",");
+            sb.Append("\"" + JsonEscape(l[i]) + "\"");
+        }
+        return sb.ToString();
+    }
+
+    static long HwndFromWindowJson(string js)
+    {
+        int k = js.IndexOf("\"hwnd\":");
+        if (k < 0) return 0;
+        string num = js.Substring(k + 7);
+        int comma = num.IndexOfAny(new char[] { ',', '}' });
+        if (comma > 0) num = num.Substring(0, comma);
+        long v = 0; long.TryParse(num, out v);
+        return v;
+    }
+
+    // 深度恢复: 关窗 -> 托盘双击重开 -> 等窗口稳定 -> 贴回原位置(可选)
+    // 解决两类顽疾: ①Electron 假激活/冻结(看得见但点不动) ②应用没窗口(缩托盘/任务栏隐藏区)
+    // 一条命令做完, AI 不需要知道内部步骤
+    static string AppRestore(string process, string title, long hwndIn, string snapPos, int waitMs)
+    {
+        var steps = new System.Collections.Generic.List<string>();
+        if (waitMs <= 0) waitMs = 8000;
+
+        IntPtr h = IntPtr.Zero;
+        if (hwndIn > 0) { IntPtr t = new IntPtr(hwndIn); if (IsWindow(t)) h = t; }
+        if (h == IntPtr.Zero) h = FindMainWinByProc(process);
+        if (h == IntPtr.Zero && !string.IsNullOrEmpty(title))
+        {
+            long v = HwndFromWindowJson(WindowJsonByTitle(title, process));
+            if (v > 0) h = new IntPtr(v);
+        }
+
+        int ox = 0, oy = 0, ow = 0, oh = 0; bool had = false;
+        if (h != IntPtr.Zero)
+        {
+            RECT r0; GetWindowRect(h, out r0);
+            ox = r0.Left; oy = r0.Top; ow = r0.Right - r0.Left; oh = r0.Bottom - r0.Top;
+            if (ow > 0 && oh > 0) had = true;
+            steps.Add("found hwnd=" + h.ToInt64() + " rect=" + ox + "," + oy + "," + ow + "," + oh);
+            steps.Add("close -> " + WinClose(h));
+            Thread.Sleep(900);
+        }
+        else steps.Add("no visible window (缩托盘/隐藏区)");
+
+        string trayName = !string.IsNullOrEmpty(process) ? process : title;
+        if (string.IsNullOrEmpty(trayName))
+            return "{\"ok\":false,\"error\":\"need process= or title= or hwnd=\",\"steps\":[" + JsonArr(steps) + "]}";
+        steps.Add("tray_click '" + trayName + "' double=1 -> " + TrayClick(trayName, "left", true));
+
+        int deadline = Environment.TickCount + waitMs;
+        IntPtr nh = IntPtr.Zero; bool stable = false;
+        int sameCount = 0, ll = 0, lt = 0, lw = 0, lh2 = 0;
+        while (Environment.TickCount < deadline)
+        {
+            Thread.Sleep(250);
+            IntPtr c = FindMainWinByProc(process);
+            if (c == IntPtr.Zero && !string.IsNullOrEmpty(title))
+            {
+                long v = HwndFromWindowJson(WindowJsonByTitle(title, process));
+                if (v > 0) c = new IntPtr(v);
+            }
+            if (c != IntPtr.Zero)
+            {
+                nh = c;
+                RECT rr; GetWindowRect(nh, out rr);
+                int cl = rr.Left, ct = rr.Top, cw = rr.Right - rr.Left, chh = rr.Bottom - rr.Top;
+                if (cl == ll && ct == lt && cw == lw && chh == lh2) sameCount++; else sameCount = 0;
+                ll = cl; lt = ct; lw = cw; lh2 = chh;
+                if (sameCount >= 2 && cw > 50 && chh > 50) { stable = true; break; }
+            }
+            else sameCount = 0;
+        }
+        int waitedMs = waitMs - Math.Max(0, deadline - Environment.TickCount);
+
+        if (nh == IntPtr.Zero)
+            return "{\"ok\":false,\"error\":\"关窗后没等到窗口重新出现 — 托盘名可能不对(用 tray_list 看真实名字), 或应用已真退出(用 app_run 带 wait+process 重启)\",\"trayName\":\"" + JsonEscape(trayName) + "\",\"waitedMs\":" + waitedMs + ",\"steps\":[" + JsonArr(steps) + "]}";
+
+        if (!string.IsNullOrEmpty(snapPos)) steps.Add("snap " + snapPos + " -> " + WinSnap(nh, snapPos, ""));
+        else if (had) steps.Add("move back -> " + WinMove(nh, ox, oy, ow, oh));
+        try { WinActivate(nh); steps.Add("activate"); } catch (Exception ex) { steps.Add("activate err: " + ex.Message); }
+
+        RECT fr; GetWindowRect(nh, out fr);
+        return "{\"ok\":true,\"hwnd\":" + nh.ToInt64() + ",\"stable\":" + (stable ? "true" : "false")
+            + ",\"waitedMs\":" + waitedMs + ",\"restored\":" + (had ? "true" : "false")
+            + ",\"rect\":{\"x\":" + fr.Left + ",\"y\":" + fr.Top + ",\"w\":" + (fr.Right - fr.Left) + ",\"h\":" + (fr.Bottom - fr.Top) + "}"
+            + ",\"hint\":\"已走 close->托盘双击重开(唯一可靠恢复路径)。窗口应为可点击状态; 若 ui_click 仍 verify.changed=false, 把原始返回贴出来别瞎试\""
+            + ",\"steps\":[" + JsonArr(steps) + "]}";
+    }
+
     // 当前前台窗口简报 (type/press 响应附带, 让调用方自查打到了哪个窗口 — 盲打事故防线)
     static string FrontBriefJson()
     {
@@ -1628,6 +1743,18 @@ public partial class ShotService
                         catch (Exception ex) { code = 500; body = "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
                     }
                 }
+                else if (path == "/app/restore")
+                {
+                    long rh = 0; int rw = 0;
+                    if (q.ContainsKey("hwnd")) long.TryParse(q["hwnd"], out rh);
+                    if (q.ContainsKey("wait")) int.TryParse(q["wait"], out rw);
+                    try
+                    {
+                        body = AppRestore(q.ContainsKey("process") ? q["process"] : "", q.ContainsKey("title") ? q["title"] : "", rh, q.ContainsKey("snap") ? q["snap"] : "", rw);
+                        Log("[app_restore] " + body);
+                    }
+                    catch (Exception ex) { code = 500; body = "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
+                }
                 // ---- T2 自动化扩展: 窗口管理 / 鼠标扩展 / 键按住 / 剪贴板 / UIA (实现在 shot-automation.cs) ----
                 else if (path.StartsWith("/win/"))
                 {
@@ -2408,6 +2535,13 @@ public partial class ShotService
                 {
                     int waitMs = 0; int.TryParse(McpParam(a, "wait"), out waitMs);
                     return McpText(AppRun(McpParam(a, "path"), McpParam(a, "args"), waitMs, McpParam(a, "process")), false);
+                }
+                case "app_restore":
+                {
+                    long rh2 = 0; int rw2 = 0;
+                    long.TryParse(McpParam(a, "hwnd"), out rh2);
+                    int.TryParse(McpParam(a, "wait"), out rw2);
+                    return McpText(AppRestore(McpParam(a, "process"), McpParam(a, "title"), rh2, McpParam(a, "snap"), rw2), false);
                 }
                 case "taskbar_volume":
                 {
