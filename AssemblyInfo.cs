@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 
 // ⚠️ 发版时与 shot-service.cs 的 APP_VERSION 同步修改 (两处: 运行时逻辑用 APP_VERSION, 文件属性用这里)
 [assembly: AssemblyTitle("Win Desktop Helper")]
@@ -6,5 +6,5 @@ using System.Reflection;
 [assembly: AssemblyProduct("Win Desktop Helper")]
 [assembly: AssemblyCompany("oadank")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.0.18.1")]
-[assembly: AssemblyFileVersion("0.0.18.1")]
+[assembly: AssemblyVersion("0.0.19")]
+[assembly: AssemblyFileVersion("0.0.19")]
