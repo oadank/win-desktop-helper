@@ -224,7 +224,7 @@ partial class ShotService
     //        max 最大化 / min 最小化 / restore 还原
     //   monitor: 1..n 指定第几块屏 / next 下一块 / prev 上一块 (不给 = 窗口当前所在屏)
     // 半屏用 MoveWindow 直接算, 比模拟按键稳: 不受前台焦点限制, 多屏可精确指定, 且返回实际 rect 可验证
-    static string WinSnap(IntPtr h, string pos, string mon)
+    static string WinSnap(IntPtr h, string pos, string mon, int cols, int col, int cspan, int rows, int row, int rspan)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
         if (!IsWindow(h)) return "{\"ok\":false,\"error\":\"invalid handle: 窗口已关闭, 重新 list_apps 采样\"}";
@@ -247,6 +247,45 @@ partial class ShotService
         var wa = sc.WorkingArea;
         int x = wa.X, y = wa.Y, w = wa.Width, hh = wa.Height;
         int halfW = wa.Width / 2, restW = wa.Width - halfW, halfH = wa.Height / 2, restH = wa.Height - halfH;
+
+        // 网格模式: cols/col/colspan + rows/row/rowspan —— 一套参数覆盖 Win11 Snap Layouts 全部布局 + 任意比例
+        //   横三等分: cols=3 col=1|2|3      竖屏上中下: rows=3 row=1|2|3
+        //   2/3 左:   cols=3 col=1 colspan=2        四等分: cols=2 rows=2 col/row 组合
+        //   左半+右上: cols=2 col=1 / cols=4 col=3 rows=2 row=1
+        bool gridMode = cols > 0 || col > 0 || cspan > 0 || rows > 0 || row > 0 || rspan > 0;
+        if (gridMode)
+        {
+            if (cols < 1) cols = 1;
+            if (rows < 1) rows = 1;
+            if (col < 1) col = 1;
+            if (row < 1) row = 1;
+            if (cspan < 1) cspan = 1;
+            if (rspan < 1) rspan = 1;
+            if (cols > 12 || rows > 12) return "{\"ok\":false,\"error\":\"cols/rows 最大 12\"}";
+            if (col > cols) return "{\"ok\":false,\"error\":\"col 必须 <= cols (你填了 col=" + col + " cols=" + cols + ")\"}";
+            if (row > rows) return "{\"ok\":false,\"error\":\"row 必须 <= rows (你填了 row=" + row + " rows=" + rows + ")\"}";
+            if (col + cspan - 1 > cols) return "{\"ok\":false,\"error\":\"col+colspan-1 不能超过 cols\"}";
+            if (row + rspan - 1 > rows) return "{\"ok\":false,\"error\":\"row+rowspan-1 不能超过 rows\"}";
+            int cw = wa.Width / cols, ch = wa.Height / rows;
+            int gx = wa.X + (col - 1) * cw;
+            int gw = (col + cspan - 1 == cols) ? (wa.Width - (col - 1) * cw) : cspan * cw;
+            int gy = wa.Y + (row - 1) * ch;
+            int gh = (row + rspan - 1 == rows) ? (wa.Height - (row - 1) * ch) : rspan * ch;
+            bool gi = false, gz = false;
+            try { gi = IsIconic(h); } catch { }
+            try { gz = IsZoomed(h); } catch { }
+            if (gi || gz) { ShowWindow(h, SW_RESTORE); Thread.Sleep(150); }
+            MoveWindow(h, gx, gy, gw, gh, true);
+            Thread.Sleep(180);
+            RECT grc; GetWindowRect(h, out grc);
+            Log("win snap grid: " + h + " " + cols + "x" + rows + " cell " + col + "," + row + " span " + cspan + "x" + rspan);
+            return "{\"ok\":true,\"pos\":\"grid\",\"mode\":\"move\",\"monitor\":" + (Array.IndexOf(screens, System.Windows.Forms.Screen.FromHandle(h)) + 1) +
+                   ",\"monitors\":" + screens.Length +
+                   ",\"grid\":{\"cols\":" + cols + ",\"col\":" + col + ",\"colspan\":" + cspan + ",\"rows\":" + rows + ",\"row\":" + row + ",\"rowspan\":" + rspan + "}" +
+                   ",\"target\":{\"x\":" + gx + ",\"y\":" + gy + ",\"w\":" + gw + ",\"h\":" + gh + "}" +
+                   ",\"rect\":{\"x\":" + grc.Left + ",\"y\":" + grc.Top + ",\"w\":" + (grc.Right - grc.Left) + ",\"h\":" + (grc.Bottom - grc.Top) + "}}";
+        }
+
         string mode = "move";
         switch (pos)
         {

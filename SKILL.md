@@ -36,7 +36,7 @@
 | 语义定位/点击/读写 | `ui_tree` `ui_find` `ui_click(ref\|name, expect=, verify=1)` `ui_read` `ui_set` `ui_select` |
 | 证明"点对了" | `ui_click(..., expect="预期出现的文字")` → 返回 `expect.found` |
 | 窗口信息/管理 | `window_info`(支持 process 精确匹配) `active_window` `list_apps` `win_manage` `monitors` |
-| 半屏布局 | `win_manage(action=snap, hwnd=, pos=left\|right\|top\|bottom\|topleft...\|max\|min\|restore, monitor=2\|next\|prev)` |
+| 半屏/四分之一布局 | `win_manage(action=snap, hwnd=, pos=left\|right\|top\|bottom\|topleft\|topright\|bottomleft\|bottomright\|max\|min\|restore, monitor=2\|next\|prev)` |
 | 找失踪窗口 | `win_manage(action=listall, pid=)` 含隐藏/最小化/托盘化的窗口 |
 | **深度恢复(冻结/没窗口)** | `app_restore(process=, snap=left\|right\|max, wait=8000)` 一条命令：关窗→托盘双击重开→等稳定→贴回，首选它 |
 | 托盘唤回 | `tray_click(name=, double=1)`（单击=toggle 最小化，双击=恢复/打开） |
@@ -58,3 +58,4 @@
 | 窗口能看见但点不动 / 完全没有窗口 | `app_restore(process=应用名)` 一条命令恢复，别用 activate |
 | `app_run` 返回的 hwnd 找不到窗口 | 多进程应用会换窗，用 `list_apps` 按 process 重新取 |
 | 布局想贴半屏 | 别用 move 手算坐标，用 snap；返回 target≠rect 说明应用有最小尺寸约束，按 rect 补差 |
+| 要三等分/任意比例(系统 Snap Layouts 全支持) | snap 不带 pos，改带网格参数：`cols` 切几列 + `col` 第几列 + `colspan` 跨几列；`rows/row/rowspan` 同理管纵向。横三等分中间 `cols=3 col=2`；竖屏上中下 `rows=3 row=1`；2/3 左 `cols=3 col=1 colspan=2`；四等分左上 `cols=2 col=1 rows=2 row=1`；50/25/25 的右上 `cols=4 col=3 rows=2 row=1`。参数非法会直接报错并说清原因 |

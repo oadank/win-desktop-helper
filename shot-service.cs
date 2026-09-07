@@ -779,7 +779,7 @@ public partial class ShotService
         if (nh == IntPtr.Zero)
             return "{\"ok\":false,\"error\":\"关窗后没等到窗口重新出现 — 托盘名可能不对(用 tray_list 看真实名字), 或应用已真退出(用 app_run 带 wait+process 重启)\",\"trayName\":\"" + JsonEscape(trayName) + "\",\"waitedMs\":" + waitedMs + ",\"steps\":[" + JsonArr(steps) + "]}";
 
-        if (!string.IsNullOrEmpty(snapPos)) steps.Add("snap " + snapPos + " -> " + WinSnap(nh, snapPos, ""));
+        if (!string.IsNullOrEmpty(snapPos)) steps.Add("snap " + snapPos + " -> " + WinSnap(nh, snapPos, "", 0, 0, 0, 0, 0, 0));
         else if (had) steps.Add("move back -> " + WinMove(nh, ox, oy, ow, oh));
         try { WinActivate(nh); steps.Add("activate"); } catch (Exception ex) { steps.Add("activate err: " + ex.Message); }
 
@@ -1796,7 +1796,13 @@ public partial class ShotService
                         else if (verb == "max") body = WinShow(wh, SW_MAXIMIZE, "maximized");
                         else if (verb == "min") body = WinShow(wh, SW_MINIMIZE, "minimized");
                         else if (verb == "restore") body = WinShow(wh, SW_RESTORE, "restored");
-                        else if (verb == "snap") body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "");
+                        else if (verb == "snap")
+                        {
+                            int sc = 0, sl = 0, ss = 0, sr = 0, srw = 0, srs = 0;
+                            TryInt(q, "cols", out sc); TryInt(q, "col", out sl); TryInt(q, "colspan", out ss);
+                            TryInt(q, "rows", out sr); TryInt(q, "row", out srw); TryInt(q, "rowspan", out srs);
+                            body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "", sc, sl, ss, sr, srw, srs);
+                        }
                         else if (verb == "close") body = WinClose(wh);
                         else if (verb == "move")
                         {
@@ -2625,7 +2631,9 @@ public partial class ShotService
                     if (verb == "min") return McpText(WinShow(wh, SW_MINIMIZE, "minimized"), false);
                     if (verb == "restore") return McpText(WinShow(wh, SW_RESTORE, "restored"), false);
                     if (verb == "close") return McpText(WinClose(wh), false);
-                    if (verb == "snap") return McpText(WinSnap(wh, McpParam(a, "pos"), McpParam(a, "monitor")), false);
+                    if (verb == "snap") return McpText(WinSnap(wh, McpParam(a, "pos"), McpParam(a, "monitor"),
+                        McpParamInt(a, "cols"), McpParamInt(a, "col"), McpParamInt(a, "colspan"),
+                        McpParamInt(a, "rows"), McpParamInt(a, "row"), McpParamInt(a, "rowspan")), false);
                     if (verb == "move") return McpText(WinMove(wh, McpParamInt(a, "x"), McpParamInt(a, "y"), McpParamInt(a, "w"), McpParamInt(a, "h")), false);
                     return McpText("unknown verb (activate/max/min/restore/close/move/wait/list)", true);
                 }

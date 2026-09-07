@@ -58,7 +58,7 @@ const TOOLS = [
   // ---- 窗口管理 ----
   {
     name: 'win_manage',
-    description: '窗口管理: action=activate(置前)/snap(半屏分屏贴靠, 配 pos+monitor)/maximize/minimize/restore/close/move(需x,y,w,h)/wait(等窗口出现,timeout毫秒)/list(列窗口)/listall(含隐藏窗口)。★布局窗口一律用 snap: pos=left|right|top|bottom|topleft|topright|bottomleft|bottomright|max|min|restore, monitor=1..n|next|prev(不给=当前屏)。这是 Win+方向键那套分屏能力的工具版, 且能指定第几块屏',
+    description: '窗口管理: action=activate(置前)/snap(半屏分屏贴靠, 配 pos+monitor)/maximize/minimize/restore/close/move(需x,y,w,h)/wait(等窗口出现,timeout毫秒)/list(列窗口)/listall(含隐藏窗口)。★布局窗口一律用 snap: pos=left|right|top|bottom|topleft|topright|bottomleft|bottomright|max|min|restore, monitor=1..n|next|prev(不给=当前屏)。这是 Win+方向键那套分屏能力的工具版, 且能指定第几块屏。★任意比例用网格参数(不给 pos): cols 横向切几列 + col 第几列 + colspan 跨几列 / rows 纵向切几行 + row 第几行 + rowspan 跨几行。例: 横三等分中间 cols=3 col=2; 竖屏上中下 rows=3 row=1; 2/3 左 cols=3 col=1 colspan=2; 四等分左上 cols=2 col=1 rows=2 row=1',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -71,6 +71,12 @@ const TOOLS = [
         h: { type: 'number', description: 'move 时的高度(服务端必填)' },
         pos: { type: 'string', description: 'action=snap 时必填: left 左半屏 / right 右半屏 / top 上半 / bottom 下半 / topleft|topright|bottomleft|bottomright 四分之一屏 / max 最大化 / min 最小化 / restore 还原' },
         monitor: { type: 'string', description: 'action=snap 时可选: 第几块屏(1..n) 或 next 移到下一屏 / prev 上一屏; 不给 = 窗口当前所在屏。多屏布局用这个' },
+        cols: { type: 'number', description: 'action=snap 网格布局: 横向切几列(1-12)。横三等分 cols=3; 竖屏三等分用 rows' },
+        col: { type: 'number', description: 'action=snap 网格布局: 占第几列(1-based, 必须 <= cols)' },
+        colspan: { type: 'number', description: 'action=snap 网格布局: 横向跨几列(默认1)。2/3 左 = cols=3 col=1 colspan=2' },
+        rows: { type: 'number', description: 'action=snap 网格布局: 纵向切几行(1-12)。竖屏上中下三等分 rows=3' },
+        row: { type: 'number', description: 'action=snap 网格布局: 占第几行(1-based, 必须 <= rows)' },
+        rowspan: { type: 'number', description: 'action=snap 网格布局: 纵向跨几行(默认1)' },
         timeout: { type: 'number', description: 'wait 的超时毫秒(默认10000)' },
         pid: { type: 'number', description: 'list 时按进程过滤' }
       },
@@ -476,6 +482,10 @@ function buildUrl(name, a) {
       if (a.pid !== undefined) qs.push('pid=' + a.pid);
       if (a.pos) qs.push('pos=' + enc(a.pos));
       if (a.monitor) qs.push('monitor=' + enc(a.monitor));
+      // 网格布局参数 (cols/col/colspan + rows/row/rowspan): 覆盖 Win11 Snap Layouts 全部布局 + 任意比例
+      ['cols', 'col', 'colspan', 'rows', 'row', 'rowspan'].forEach((k) => {
+        if (a[k] !== undefined) qs.push(k + '=' + a[k]);
+      });
       return { path: '/win/' + act, qs };
     }
     case 'tray_click': {
