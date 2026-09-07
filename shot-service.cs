@@ -2431,7 +2431,7 @@ public partial class ShotService
 
         if (allowTray)
         {
-            InitTray();
+            try { InitTray(); } catch (Exception ex) { Log("InitTray FAILED (服务继续可用, 只是没托盘): " + ex.Message); }
             Thread upChk = new Thread(new ThreadStart(CheckUpdateSilent));
             upChk.IsBackground = true;
             upChk.Start();
@@ -2957,15 +2957,22 @@ public partial class ShotService
     }
 
     // ---- 托盘（默认显示；右键菜单；隐藏后重启服务恢复） ----
+    // NotifyIcon.Text 有 63 字符硬上限, 超了直接抛异常 -> 整个托盘初始化失败 -> 服务起不来 (2026-09-07 踩过: 加了【管理员】标记就超了)
+    // 所以这里统一截断, 宁可少显示几个字符也绝不让它把服务带崩
+    static string TrayTip()
+    {
+        string s = "Win Desktop Helper v" + APP_VERSION + (IsElevated() ? "【管理员】" : "【普通权限】") + "\nbuild " + BuildStamp() + " | :18800";
+        return s.Length > 62 ? s.Substring(0, 62) : s;
+    }
     static void InitTray()
     {
         TrayIcon = new NotifyIcon();
         TrayIcon.Icon = BuildIcon();
-        TrayIcon.Text = "Win Desktop Helper v" + APP_VERSION + "\nbuild " + BuildStamp() + " | :18800";
+        TrayIcon.Text = TrayTip(); // NotifyIcon.Text 超 63 字符会抛异常崩掉托盘初始化, 统一走 TrayTip() 截断
         TrayIcon.Visible = true;
         ContextMenuStrip menu = new ContextMenuStrip();
         // 版本行带构建指纹: 打开菜单一眼确认跑的是不是刚编的 exe (部署自验证)
-        menu.Items.Add("v" + APP_VERSION + "  build " + BuildStampShort(), null, null).Enabled = false; // 只读版本显示 (短: 菜单不拉宽; 完整信息悬停图标看 tooltip)
+        menu.Items.Add("v" + APP_VERSION + "  " + (IsElevated() ? "管理员" : "普通权限(受限)") + "  build " + BuildStampShort(), null, null).Enabled = false; // 只读版本+权限显示 (短: 菜单不拉宽; 完整信息悬停图标看 tooltip)
 
         // 截图 二级菜单 (M1: 区域截图为核心能力, 折叠但置顶)
         ToolStripMenuItem mShot = new ToolStripMenuItem("截图");
@@ -2978,6 +2985,11 @@ public partial class ShotService
         });
         mShot.DropDownItems.Add("打开截图目录", null, delegate { try { if (Directory.Exists(ShotDir)) Process.Start("explorer.exe", "\"" + ShotDir + "\""); } catch { } });
         menu.Items.Add(mShot);
+        // 剪贴板历史入口: 只有热键太隐蔽(用户找不到/忘了键位), 菜单里给个显眼入口, 并显示当前实际生效的热键
+        menu.Items.Add("剪贴板历史 (" + (clipHotkeyName == "" ? "Ctrl+Alt+V" : clipHotkeyName) + ")", null, delegate
+        {
+            try { ShowClipHistory(); } catch (Exception ex) { Log("clip history menu err: " + ex.Message); }
+        });
 
         // 工具 二级菜单 (MCP/更新/日志等低频项折叠)
         ToolStripMenuItem mTools = new ToolStripMenuItem("工具");
@@ -3060,7 +3072,7 @@ public partial class ShotService
             catch (Exception ex) { Log("tray dblclick err: " + ex.Message); }
         };
         // 启动气泡报构建指纹: 用户每次启动肉眼确认"跑的是不是刚编的" (部署自验证)
-        TrayNotify("已启动 v" + APP_VERSION, "build " + BuildStamp() + " — 与编译时间一致即新代码生效");
+        TrayNotify("已启动 v" + APP_VERSION + (IsElevated() ? "（管理员）" : "（普通权限，受限）"), "build " + BuildStamp() + " — 与编译时间一致即新代码生效");
         Log("tray icon ready, build=" + BuildStamp());
     }
 
