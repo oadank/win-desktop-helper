@@ -56,6 +56,7 @@ partial class ShotService
             tk.Interval = PICK_TICK;
             tk.Tick += delegate { PickTick(); };
             tk.Start();
+            pickTimer = tk;
             Log("pick: STA picker thread ready (划词悬浮球已就绪)");
             Application.Run();
         }
@@ -144,6 +145,8 @@ partial class ShotService
     static Form pickBarWin;
     static volatile bool pickCardBusy;
     const int PICK_TICK = 200;
+    const int PICK_TICK_DRAG = 15;       // 拖动期间心跳加密到 15ms, 不然"一步一卡"不跟手
+    static System.Windows.Forms.Timer pickTimer;
     static string pickBarActs = "";
     static int[] pickBarBtnXs;
 
@@ -368,7 +371,9 @@ partial class ShotService
         catch (Exception ex) { Log("pick dot err: " + ex.Message); }
     }
 
-    // 200ms 心跳: hover 计时/拖动跟随/自动收起全在这里判(免激活窗收不到鼠标事件)
+    // 心跳: hover 计时/拖动跟随/自动收起全在这里判(免激活窗收不到鼠标事件)
+    // 拖动期间: 钩子 MOVE 在本机基本收不到(探针实锤 moves=0), pickCurX/Y 是陈旧值 ——
+    // 必须直接 GetCursorPos 实时取, 且心跳加密到 15ms, 否则卡片"一步一卡"不跟手。
     static void PickTick()
     {
         try
@@ -380,7 +385,12 @@ partial class ShotService
                 pickOverDot = PickHit(PickDotRect, cur.x, cur.y);
                 pickOverBar = PickHit(PickBarRect, cur.x, cur.y);
                 pickOverCard = PickHit(PickCardRect, cur.x, cur.y);
-                if (pickDragging) PickCardDragMove(pickCurX, pickCurY);   // 用钩子 MOVE 的坐标, 不用 GetCursorPos
+                if (pickDragging) PickCardDragMove(cur.x, cur.y);   // 实时光标坐标, 不依赖钩子
+                if (pickTimer != null)
+                {
+                    int want = pickDragging ? PICK_TICK_DRAG : PICK_TICK;
+                    if (pickTimer.Interval != want) pickTimer.Interval = want;
+                }
             }
             Form d = pickDot;
             if (d != null && !d.IsDisposed)
@@ -412,11 +422,13 @@ partial class ShotService
         if (c.HitButton(x - r[0], y - r[1]) != PickCardForm.HIT_NONE) return;   // 按在按钮上: 不拖
         if (!c.HitDraggable(x - r[0], y - r[1])) return;   // 正文区不拖(留给选字/滚动)
         pickDragging = true;
+        try { if (pickTimer != null) pickTimer.Interval = PICK_TICK_DRAG; } catch { }   // 起拖立刻加密心跳, 不等下一轮 200ms
         pickDragX = x - r[0]; pickDragY = y - r[1];
         Log("pick card drag start @grab " + (x - r[0]) + "," + (y - r[1]));
     }
 
     // 把卡片左上角落到 (光标-抓取偏移), 并限制在工作区内
+    // 拖动路径每帧都会进这里: 用一次 SetWindowPos 同时完成移动+置顶(比 Location+单独置顶少一半窗口操作)
     static void PickCardMoveTo(int cx, int cy)
     {
         Form c = pickCard as Form;
@@ -427,9 +439,12 @@ partial class ShotService
         if (ny < wa.Top) ny = wa.Top;
         if (nx + PickCardForm.CARD_W > wa.Right) nx = wa.Right - PickCardForm.CARD_W;
         if (ny + PickCardForm.CARD_H > wa.Bottom) ny = wa.Bottom - PickCardForm.CARD_H;
-        c.Location = new Point(nx, ny);
+        if (c.Left != nx || c.Top != ny)
+        {
+            try { SetWindowPos(c.Handle, HWND_TOPMOST, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE); }
+            catch { try { c.Location = new Point(nx, ny); } catch { } }
+        }
         PickCardRect = new int[] { nx, ny, nx + PickCardForm.CARD_W, ny + PickCardForm.CARD_H };
-        PickTopMost(c);
     }
 
 
