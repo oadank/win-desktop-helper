@@ -1528,6 +1528,7 @@ public partial class ShotService
                 {
                     body = "{\"ok\":true,\"pid\":" + Process.GetCurrentProcess().Id + ",\"session\":" + MySession +
                            ",\"shots\":" + ShotCount + ",\"uptimeSec\":" + (int)(DateTime.Now - StartTime).TotalSeconds +
+                           ",\"elevated\":" + (IsElevated() ? "true" : "false") +
                            ",\"version\":\"" + APP_VERSION + "\",\"build\":\"" + BuildStamp() + "\"}";
                 }
                 else if (path == "/taskbar-volume")
@@ -1705,15 +1706,21 @@ public partial class ShotService
                     bool dbl = q.ContainsKey("double") && q["double"] == "1";
                     bool triple = q.ContainsKey("triple") && q["triple"] == "1";
                     string mods = q.ContainsKey("mods") ? q["mods"].ToLowerInvariant() : "";
-                    if (hasXY) MouseMove(x, y);
-                    byte[] mvks = ModsVks(mods);
-                    foreach (byte vk in mvks) keybd_event(vk, 0, 0, UIntPtr.Zero); // 按住修饰键
-                    MouseClick(button, triple ? 3 : (dbl ? 2 : 1));
-                    for (int i = mvks.Length - 1; i >= 0; i--) keybd_event(mvks[i], 0, 2, UIntPtr.Zero); // KEYEVENTF_KEYUP 逆序松开
-                    body = "{\"ok\":true,\"button\":\"" + button + "\"" + (dbl ? ",\"double\":true" : "") + (triple ? ",\"triple\":true" : "") +
-                           (mods != "" ? ",\"mods\":\"" + JsonEscape(mods) + "\"" : "") +
-                           (hasXY ? ",\"x\":" + x + ",\"y\":" + y : "") + "}";
-                    Log("[ctrl] mouse click " + button + (triple ? " triple" : (dbl ? " dbl" : "")) + (mods != "" ? " mods=" + mods : "") + (hasXY ? " @ " + x + "," + y : ""));
+                    // UIPI 预检: 目标窗口若是管理员权限而自己是普通权限, 点击会被系统静默丢弃 → 直接拦下报错, 不假报 ok
+                    string uipi = UipiCheck(hasXY ? WindowFromPoint(new System.Drawing.Point(x, y)) : GetForegroundWindow());
+                    if (uipi != null) { code = 409; body = uipi; Log("[ctrl] mouse click BLOCKED by uipi"); }
+                    else
+                    {
+                        if (hasXY) MouseMove(x, y);
+                        byte[] mvks = ModsVks(mods);
+                        foreach (byte vk in mvks) keybd_event(vk, 0, 0, UIntPtr.Zero); // 按住修饰键
+                        MouseClick(button, triple ? 3 : (dbl ? 2 : 1));
+                        for (int i = mvks.Length - 1; i >= 0; i--) keybd_event(mvks[i], 0, 2, UIntPtr.Zero); // KEYEVENTF_KEYUP 逆序松开
+                        body = "{\"ok\":true,\"button\":\"" + button + "\"" + (dbl ? ",\"double\":true" : "") + (triple ? ",\"triple\":true" : "") +
+                               (mods != "" ? ",\"mods\":\"" + JsonEscape(mods) + "\"" : "") +
+                               (hasXY ? ",\"x\":" + x + ",\"y\":" + y : "") + "}";
+                        Log("[ctrl] mouse click " + button + (triple ? " triple" : (dbl ? " dbl" : "")) + (mods != "" ? " mods=" + mods : "") + (hasXY ? " @ " + x + "," + y : ""));
+                    }
                 }
                 else if (path == "/mouse/scroll")
                 {
@@ -1735,13 +1742,26 @@ public partial class ShotService
                     {
                         string text = q["text"];
                         if (text.Length > 2000) { code = 400; body = "{\"ok\":false,\"error\":\"text too long (max 2000)\"}"; }
-                        else { int nl = 0; foreach (char cc in text) if (cc == '\n') nl++; TypeText(text, q.ContainsKey("nl") ? q["nl"] : ""); body = "{\"ok\":true,\"chars\":" + text.Length + ",\"newlines\":" + nl + (nl > 0 ? ",\"warn\":\"newlines sent as Shift+Enter (soft newline, no submit). pass nl=enter for real Enter; for exact multi-line paste prefer clipboard_set+ctrl+v\"" : "") + ",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] type " + text.Length + " chars" + (nl > 0 ? " (" + nl + " newlines!)" : "")); }
+                        else
+                        {
+                            string uipi = UipiCheck(GetForegroundWindow());
+                            if (uipi != null) { code = 409; body = uipi; Log("[ctrl] type BLOCKED by uipi"); }
+                            else
+                            {
+                                int nl = 0; foreach (char cc in text) if (cc == '\n') nl++; TypeText(text, q.ContainsKey("nl") ? q["nl"] : ""); body = "{\"ok\":true,\"chars\":" + text.Length + ",\"newlines\":" + nl + (nl > 0 ? ",\"warn\":\"newlines sent as Shift+Enter (soft newline, no submit). pass nl=enter for real Enter; for exact multi-line paste prefer clipboard_set+ctrl+v\"" : "") + ",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] type " + text.Length + " chars" + (nl > 0 ? " (" + nl + " newlines!)" : ""));
+                            }
+                        }
                     }
                 }
                 else if (path == "/keyboard/press")
                 {
                     if (!q.ContainsKey("keys")) { code = 400; body = "{\"ok\":false,\"error\":\"need keys\"}"; }
-                    else { PressCombo(q["keys"]); body = "{\"ok\":true,\"keys\":\"" + JsonEscape(q["keys"]) + "\",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] press " + q["keys"]); }
+                    else
+                    {
+                        string uipi = UipiCheck(GetForegroundWindow());
+                        if (uipi != null) { code = 409; body = uipi; Log("[ctrl] press BLOCKED by uipi (" + q["keys"] + ")"); }
+                        else { PressCombo(q["keys"]); body = "{\"ok\":true,\"keys\":\"" + JsonEscape(q["keys"]) + "\",\"front\":" + FrontBriefJson() + "}"; Log("[ctrl] press " + q["keys"]); }
+                    }
                 }
                 else if (path == "/app/run")
                 {
@@ -1982,6 +2002,134 @@ public partial class ShotService
         }
     }
 
+    // ==================== 自动提权 (2026-09-07) ====================
+    // 起因: 目标机上常有管理员权限运行的应用(WorkBuddy/ZCode 等)。UIPI 会**静默丢弃**普通权限进程
+    // 合成的键鼠输入 → 所有 mouse/keyboard 工具返回 ok 却毫无效果(右键菜单不弹/快捷键无反应/点击不换焦点)。
+    // 所以本程序必须默认以管理员运行, 否则对管理员窗口等于残废。
+    // 体验目标: 完全自动化 —— 用户登录后即以管理员常驻, 新客户装机也不需要任何手工操作。
+    //   ① 计划任务已注册 → schtasks /run 静默拉起提权实例, 当前普通实例立即退出 (无 UAC)
+    //   ② 任务不存在(首次运行) → runas 提权重启自己(本机 ConsentPromptBehaviorAdmin=0 静默; 客户机弹一次)
+    //      提权实例负责注册 ONLOGON 最高权限任务 → 之后永久静默
+    //   ③ 任务注册失败 → 退化写注册表 AppCompatFlags\Layers = RUNASADMIN (每次启动请求管理员, 本机仍静默)
+    const string TASK_NAME = "WinDesktopHelper";
+
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetTokenInformation(IntPtr token, int cls, IntPtr info, int len, out int retLen);
+    [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "OpenProcess")] static extern IntPtr OpenProcessLimited(uint access, bool inherit, int pid); // EntryPoint 必须显式指定, 否则找 OpenProcessLimited 这个不存在的导出
+    [DllImport("kernel32.dll", EntryPoint = "CloseHandle")] static extern bool CloseHandleX(IntPtr h);
+
+    static bool TokenElevated(IntPtr hProc)
+    {
+        IntPtr t;
+        if (!OpenProcessToken(hProc, 0x0008, out t)) return false;
+        try
+        {
+            int e = 0, len = 0;
+            IntPtr buf = Marshal.AllocHGlobal(4);
+            bool ok = false;
+            try { ok = GetTokenInformation(t, 20, buf, 4, out len); if (ok) e = Marshal.ReadInt32(buf); }
+            finally { Marshal.FreeHGlobal(buf); }
+            return ok && e != 0;
+        }
+        finally { try { CloseHandleX(t); } catch { } }
+    }
+    static bool IsElevated()
+    {
+        try { return TokenElevated(Process.GetCurrentProcess().Handle); } catch { return false; }
+    }
+    // 判断别的进程是否管理员: 打不开句柄(权限不足/已退出)一律返回 false — 只用来做"已有一个提权实例就别抢"的保守判断
+    static bool IsProcessElevated(int pid)
+    {
+        IntPtr h = IntPtr.Zero;
+        try
+        {
+            h = OpenProcessLimited(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+            if (h == IntPtr.Zero) return false;
+            return TokenElevated(h);
+        }
+        catch { return false; }
+        finally { if (h != IntPtr.Zero) try { CloseHandleX(h); } catch { } }
+    }
+
+    static bool RunSchtasks(string args, out string outText)
+    {
+        outText = "";
+        try
+        {
+            ProcessStartInfo psi = new ProcessStartInfo("schtasks.exe", args);
+            psi.CreateNoWindow = true; psi.UseShellExecute = false;
+            psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+            using (Process p = Process.Start(psi))
+            {
+                outText = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(5000);
+                return p.ExitCode == 0;
+            }
+        }
+        catch (Exception ex) { outText = ex.Message; return false; }
+    }
+    static bool TaskExists() { string o; return RunSchtasks("/query /tn \"" + TASK_NAME + "\"", out o); }
+    static bool TaskCreate(string exe)
+    {
+        string o;
+        bool ok = RunSchtasks("/create /tn \"" + TASK_NAME + "\" /tr \"\\\"" + exe + "\\\"\" /sc ONLOGON /rl HIGHEST /f", out o);
+        Log("schtasks create -> " + ok + (ok ? "" : (" : " + o.Trim().Replace("\r", " ").Replace("\n", " "))));
+        return ok;
+    }
+    // 兜底: 注册表兼容性层 RUNASADMIN (进程每次启动都会请求管理员, 本机策略=0 时静默)
+    static bool MarkRunAsAdmin(string exe)
+    {
+        try
+        {
+            using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"))
+            {
+                if (k == null) return false;
+                k.SetValue(exe, "RUNASADMIN", Microsoft.Win32.RegistryValueKind.String);
+                Log("fallback: AppCompatFlags Layers RUNASADMIN set for " + exe);
+                return true;
+            }
+        }
+        catch (Exception ex) { Log("MarkRunAsAdmin err: " + ex.Message); return false; }
+    }
+    static bool RelaunchAsAdmin(string[] args)
+    {
+        try
+        {
+            string exe = Process.GetCurrentProcess().MainModule.FileName;
+            ProcessStartInfo psi = new ProcessStartInfo(exe);
+            psi.UseShellExecute = true;
+            psi.Verb = "runas";
+            string a = "";
+            if (args != null) foreach (string s in args) if (!string.IsNullOrEmpty(s)) a += (a == "" ? "" : " ") + "\"" + s + "\"";
+            psi.Arguments = a;
+            Process.Start(psi);
+            Log("relaunch as admin requested (verb=runas)");
+            return true;
+        }
+        catch (Exception ex) { Log("relaunch as admin failed: " + ex.Message); return false; }
+    }
+
+    // 输入拦截预检: 目标窗口是管理员权限、而自己是普通权限 → 系统会把合成输入**静默丢掉**,
+    // 不检测的话工具会返回 ok 而实际什么都没发生(2026-09-07 实测: 右键开始菜单/Win+X/Alt+F4 全废却全报 ok)
+    static string UipiCheck(IntPtr targetHwnd)
+    {
+        if (IsElevated()) return null;                 // 自己是管理员, 任何窗口都能操作
+        if (targetHwnd == IntPtr.Zero) return null;
+        int pid = 0;
+        try
+        {
+            GetWindowThreadProcessId(targetHwnd, out pid);
+            if (pid <= 0 || pid == Process.GetCurrentProcess().Id) return null;
+            if (!IsProcessElevated(pid)) return null;
+        }
+        catch { return null; }
+        return "{\"ok\":false,\"error\":\"uipi blocked: 目标窗口(pid=" + pid + ")以管理员权限运行, 而本程序是普通权限 —— 系统会把合成的键鼠输入静默丢弃(工具会假报 ok 但毫无效果)\"" +
+               ",\"fix\":\"以管理员重启 shot-service: 结束进程后从资源管理器运行一次(程序会自动提权), 或命令行 schtasks /run /tn WinDesktopHelper\"" +
+               ",\"hint\":\"本程序默认应自动以管理员常驻; 出现本错误说明提权失败(如 UAC 被拒绝)\"}";
+    }
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out int pid);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(System.Drawing.Point p);
+
     [STAThread]
     public static void Main(string[] args)
     {
@@ -2003,6 +2151,52 @@ public partial class ShotService
             else if (x == "-watch") watchMode = true;
         }
 
+        // ---- 自动提权: 必须以管理员运行, 否则对管理员窗口(WorkBuddy/ZCode 等)的键鼠输入会被 UIPI 静默丢弃 ----
+        bool elevated = IsElevated();
+        string selfExe = "";
+        try { selfExe = Process.GetCurrentProcess().MainModule.FileName; } catch { }
+        if (!elevated)
+        {
+            if (!string.IsNullOrEmpty(selfExe) && TaskExists())
+            {
+                // 计划任务已注册 → 静默拉起提权实例(无 UAC), 当前普通实例退出
+                // 自愈: 若 90s 内已 /run 过却仍是普通权限, 说明任务机制在本机失效(被禁用/组策略限制)
+                //        → 自动退化成注册表 RUNASADMIN 再重启(老大给 WorkBuddy/ZCode 提权用的就是这招)
+                long last = 0;
+                try
+                {
+                    using (Microsoft.Win32.RegistryKey rk = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\WinDesktopHelper"))
+                    { if (rk != null) long.TryParse((rk.GetValue("LastTaskRun") ?? "0").ToString(), out last); }
+                }
+                catch { }
+                long nowTicks = DateTime.Now.Ticks;
+                bool ranRecently = last > 0 && (nowTicks - last) < TimeSpan.TicksPerSecond * 90;
+                if (!ranRecently)
+                {
+                    try
+                    {
+                        using (Microsoft.Win32.RegistryKey rk = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\WinDesktopHelper"))
+                        { if (rk != null) rk.SetValue("LastTaskRun", nowTicks.ToString(), Microsoft.Win32.RegistryValueKind.String); }
+                    }
+                    catch { }
+                    Log("not elevated & task exists -> schtasks /run (silent elevate), 本实例退出");
+                    string so; RunSchtasks("/run /tn \"" + TASK_NAME + "\"", out so);
+                    return;
+                }
+                Log("schtasks /run 已试过但仍未提权 -> 任务机制失效, 退化 RUNASADMIN 并重启");
+                MarkRunAsAdmin(selfExe);
+                if (RelaunchAsAdmin(args)) return;
+            }
+            Log("not elevated & no task -> relaunch as admin (首次一次 UAC; 本机 ConsentPromptBehaviorAdmin=0 静默)");
+            if (RelaunchAsAdmin(args)) return;
+            Log("WARNING: 提权失败, 降级为普通权限运行 —— 对管理员窗口的键鼠操作会被系统静默丢弃");
+        }
+        else if (!string.IsNullOrEmpty(selfExe) && !TaskExists())
+        {
+            // 已提权但任务未注册(首次) → 注册 ONLOGON 最高权限任务, 之后登录即静默管理员常驻; 失败则退化注册表 RUNASADMIN
+            if (!TaskCreate(selfExe)) MarkRunAsAdmin(selfExe);
+        }
+
         // 单实例互斥: 已有实例则自动顶替(结束旧进程后接管) — 堵死"忘了 Stop-Process, 新 exe 静默退出,
         // 用户跑的还是旧代码"这个反复踩坑的部署漏洞 (2026-09-05)
         bool createdNew;
@@ -2011,6 +2205,18 @@ public partial class ShotService
             instanceMutex = new Mutex(true, MUTEX_NAME, out createdNew);
             if (!createdNew)
             {
+                // 已有一个管理员实例在跑、而自己是普通实例 → 别抢(抢了会把提权实例 kill 掉, 反而降级)
+                bool otherElevated = false;
+                try
+                {
+                    foreach (Process p in Process.GetProcessesByName("shot-service"))
+                    {
+                        if (p.Id == Process.GetCurrentProcess().Id) continue;
+                        if (IsProcessElevated(p.Id)) { otherElevated = true; break; }
+                    }
+                }
+                catch { }
+                if (otherElevated && !elevated) { Log("已有一个管理员实例在运行, 本普通实例退出(不接管, 避免把提权实例顶掉)"); return; }
                 Log("another instance running, auto take-over: killing old process (build of old=unknown)");
                 try
                 {

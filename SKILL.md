@@ -27,7 +27,11 @@
 4. **中文一律剪贴板粘贴**：`clipboard_set(text)` → 点输入框聚焦 → `keyboard_press(keys="ctrl+v")`。组合键参数名是 `keys`（不是 key/modifiers）
 5. **工具不报假成功**：`ui_click` 的 via=invoke 只代表调到了不代表生效 → 配 `verify=1`；`ui_set` 写入后自动读回校验，不一致直接报错并指路剪贴板方案；坐标点击前自动做落点归属校验，位置命中的不是目标进程会拦下并报错。**看到报错就按报错里的提示改，别重试同一个动作**
 6. **"看得见但点不动" / "压根没窗口" → 直接 `app_restore(process=应用名, snap=right)`**：一条命令自动 close 关窗 → 托盘双击重开 → 等窗口稳定 → 贴回指定位置（返回 `stable` / `steps`）。**`win_manage activate` 唤回的窗口经常是冻结的，别拿它当恢复手段**；失败看返回里的 steps（托盘名不对用 `tray_list`，应用真退了用 `app_run`）
-7. **敏感操作先问**（删除/发送消息/改系统设置），付款不做
+7. **🔴 工具全报 ok 但屏幕毫无变化 → 先查 UIPI（权限隔离）**：目标应用若以管理员运行（WorkBuddy/ZCode 等常见），而本程序是普通权限，**系统会静默丢弃合成的键鼠输入**（右键菜单不弹、快捷键无反应、点击不换焦点，工具照样返回 ok）。
+   - 本程序**默认自动以管理员常驻**（计划任务 `WinDesktopHelper`，登录即静默提权，无需手工操作），正常不该出现此问题
+   - 真遇到了：工具会直接返回 `uipi blocked` 并给修复指路；此时 `curl http://127.0.0.1:18800/health` 看 `elevated` 字段应为 `true`，是 `false` 说明提权失败 → 结束进程后从资源管理器运行一次（自动重建），或 `schtasks /run /tn WinDesktopHelper`
+   - 副作用提示：普通权限下 **UIA 树也会被截断**（实测某窗口只返回 9 个元素、看不到任何按钮；提权后 43 个），所以"找不到控件"也可能是同一个根因
+8. **敏感操作先问**（删除/发送消息/改系统设置），付款不做
 
 ## 常用工具速查
 
@@ -58,4 +62,7 @@
 | 窗口能看见但点不动 / 完全没有窗口 | `app_restore(process=应用名)` 一条命令恢复，别用 activate |
 | `app_run` 返回的 hwnd 找不到窗口 | 多进程应用会换窗，用 `list_apps` 按 process 重新取 |
 | 布局想贴半屏 | 别用 move 手算坐标，用 snap；返回 target≠rect 说明应用有最小尺寸约束，按 rect 补差 |
+| **全都 ok 但啥也没发生**（菜单不弹/键无反应） | UIPI：目标窗口管理员权限 + 本程序普通权限 → 输入被静默丢弃。`health` 看 `elevated`，false 就重建提权（见铁律 7） |
+| `win_manage close` 报 `post failed` | 同一根因：权限不足导致 PostMessage 被拒。提权后正常返回 `closed:true` |
+| 终端/控制台类窗口读不到文字 | 内容是画布渲染，UIA 树里没有。用 `screen_capture` + `ocr_image` 读 |
 | 要三等分/任意比例(系统 Snap Layouts 全支持) | snap 不带 pos，改带网格参数：`cols` 切几列 + `col` 第几列 + `colspan` 跨几列；`rows/row/rowspan` 同理管纵向。横三等分中间 `cols=3 col=2`；竖屏上中下 `rows=3 row=1`；2/3 左 `cols=3 col=1 colspan=2`；四等分左上 `cols=2 col=1 rows=2 row=1`；50/25/25 的右上 `cols=4 col=3 rows=2 row=1`。参数非法会直接报错并说清原因 |
