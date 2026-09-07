@@ -367,8 +367,14 @@ const TOOLS = [
   // ---- SKILL 手册 (强制闸门的唯一入口, 必须暴露给客户端, 否则死锁) ----
   {
     name: 'get_skill',
-    description: '【必须先调用】获取本服务 SKILL 操作手册（铁律/避坑/黄金路径）。本服务强制闸门: 首次调用任何工具前必须先读本 SKILL, 否则一律报错。踩坑必须用 update_skill 写回共享手册, 不要只写进自己的记忆。',
-    inputSchema: { type: 'object', additionalProperties: false, properties: {} }
+    description: '【必须先调用】获取本服务 SKILL 操作手册（铁律/避坑/黄金路径）。本服务强制闸门: 首次调用任何工具前必须先读本 SKILL, 否则一律报错。默认返回核心版(约 3K 字, 够用); 需要历史考古/完整坑表用 detail=\"full\"; 只想查某个主题用 topic=\"关键词\"(按标题匹配抽段, 例 topic=\"分屏\" / \"冻结\" / \"D6\")。踩坑必须用 update_skill 写回共享手册, 不要只写进自己的记忆。',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        detail: { type: 'string', description: 'full = 返回核心 + 完整历史档案(SKILL-HISTORY.md, 含已修 bug 考古/完整坑表); 不给 = 只返回核心' },
+        topic: { type: 'string', description: '按标题关键字抽取相关段落(如 分屏/冻结/录屏/D6/任务栏), 找不到就回退返回核心版' }
+      }
+    }
   },
   {
     name: 'update_skill',
@@ -607,8 +613,44 @@ async function callTool(name, args) {
   // SKILL 工具：返回 SKILL.md 全文（同目录，缺文件时回退内嵌简版）
   if (name === 'get_skill') {
     guideRead = true;
+    const _fs2 = require('fs'), _path2 = require('path');
+    let _hist = '';
+    try { _hist = _fs2.readFileSync(_path2.join(__dirname, 'SKILL-HISTORY.md'), 'utf8'); } catch (e) { }
+    let core = '';
+    try { core = _fs2.readFileSync(_path2.join(__dirname, 'SKILL.md'), 'utf8'); } catch (e) { }
+    const full = core + '\n\n================ 以下为完整历史档案 ================\n\n' + _hist;
+    // 按主题抽取: 从两个文件里按标题关键字匹配段落
+    if (args && args.topic) {
+      const kw = String(args.topic);
+      const pick = (md) => {
+        const lines = md.split('\n');
+        const out = [];
+        let buf = [], taking = false;
+        for (const ln of lines) {
+          const isHead = /^#{1,6}\s/.test(ln);
+          if (isHead) {
+            if (taking) out.push(buf.join('\n'));
+            taking = ln.indexOf(kw) >= 0;
+            buf = taking ? [ln] : [];
+          } else if (taking) buf.push(ln);
+        }
+        if (taking) out.push(buf.join('\n'));
+        return out;
+      };
+      const hits = pick(core).concat(pick(_hist)).filter(s => s.trim());
+      if (hits.length) guideRead = true;
+      const body = hits.length ? hits.join('\n\n---\n\n') : core;
+      const tip = hits.length
+        ? '(get_skill topic=\"' + kw + '\" 命中 ' + hits.length + ' 段)'
+        : '(topic=\"' + kw + '\" 无匹配, 已返回核心版; 换个关键词或 detail=\"full\" 取全部)';
+      return { content: [{ type: 'text', text: tip + '\n\n' + body }] };
+    }
+    if (args && args.detail === 'full') {
+      guideRead = true;
+      return { content: [{ type: 'text', text: full }] };
+    }
     let text = '';
-    try { text = require('fs').readFileSync(require('path').join(__dirname, 'SKILL.md'), 'utf8'); }
+    try { text = _fs2.readFileSync(_path2.join(__dirname, 'SKILL.md'), 'utf8'); }
     catch (e) {
       text = '【Win Desktop Helper SKILL·简版】\n' +
              '1. 点任何东西前先 window_info/active_window 定位并确认前台；\n' +
