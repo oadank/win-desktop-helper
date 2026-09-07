@@ -66,3 +66,13 @@
 | `win_manage close` 报 `post failed` | 同一根因：权限不足导致 PostMessage 被拒。提权后正常返回 `closed:true` |
 | 终端/控制台类窗口读不到文字 | 内容是画布渲染，UIA 树里没有。用 `screen_capture` + `ocr_image` 读 |
 | 要三等分/任意比例(系统 Snap Layouts 全支持) | snap 不带 pos，改带网格参数：`cols` 切几列 + `col` 第几列 + `colspan` 跨几列；`rows/row/rowspan` 同理管纵向。横三等分中间 `cols=3 col=2`；竖屏上中下 `rows=3 row=1`；2/3 左 `cols=3 col=1 colspan=2`；四等分左上 `cols=2 col=1 rows=2 row=1`；50/25/25 的右上 `cols=4 col=3 rows=2 row=1`。参数非法会直接报错并说清原因 |
+
+## 划词悬浮球五大坑与配置入口
+
+划词悬浮球(shot-pick*.cs)与常驻浮窗调试五大坑 (2026-09-07 全部实测):
+1. WinForms CreateParams 里手加 WS_EX_LAYERED(0x80000) = 整窗隐形(窗口存在/IsWindowVisible=1 但屏幕全空)。圆点/圆角一律用 TransparencyKey 画。
+2. 免激活窗(ShowWithoutActivation+WS_EX_NOACTIVATE|TOOLWINDOW)收不到 MouseEnter/Click —— hover计时/点击/拖动必须由低级鼠标钩子 DOWN/UP + 200ms 心跳 GetCursorPos 轮询驱动。WM_MOUSEMOVE 不进本机低级钩子(探针实锤 moves=0)。
+3. 构造函数 TopMost=true 在免激活窗上会被丢弃 —— Show() 后必须 SetWindowPos(HWND_TOPMOST,...)，心跳每4轮补置顶。
+4. 剪贴板取词法发全局 Ctrl+C 有投错窗口风险(实测把词粘进抖音评论区) —— 安全阀: 前台窗变化或指针离开按下点24px即拒走; 等待循环内前台变化立刻 abort。
+5. 给本服务加 MCP 工具三处都要动: shot-service.cs 的 McpCall switch case + McpToolsJson 条目 + **mcp-bridge.js 注册表数组与 buildUrl 路由**(bridge 有独立白名单, 漏改直接 unknown tool)。
+配置入口: 设置页「划词」节 / HTTP GET /pick-config?enabled=0|1 / MCP pick_config。开关立即生效+持久化到 shot-service.json pick 节。
