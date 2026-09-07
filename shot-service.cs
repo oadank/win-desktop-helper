@@ -1660,6 +1660,7 @@ public partial class ShotService
                         else if (verb == "max") body = WinShow(wh, SW_MAXIMIZE, "maximized");
                         else if (verb == "min") body = WinShow(wh, SW_MINIMIZE, "minimized");
                         else if (verb == "restore") body = WinShow(wh, SW_RESTORE, "restored");
+                        else if (verb == "snap") body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "");
                         else if (verb == "close") body = WinClose(wh);
                         else if (verb == "move")
                         {
@@ -2481,6 +2482,7 @@ public partial class ShotService
                     if (verb == "min") return McpText(WinShow(wh, SW_MINIMIZE, "minimized"), false);
                     if (verb == "restore") return McpText(WinShow(wh, SW_RESTORE, "restored"), false);
                     if (verb == "close") return McpText(WinClose(wh), false);
+                    if (verb == "snap") return McpText(WinSnap(wh, McpParam(a, "pos"), McpParam(a, "monitor")), false);
                     if (verb == "move") return McpText(WinMove(wh, McpParamInt(a, "x"), McpParamInt(a, "y"), McpParamInt(a, "w"), McpParamInt(a, "h")), false);
                     return McpText("unknown verb (activate/max/min/restore/close/move/wait/list)", true);
                 }

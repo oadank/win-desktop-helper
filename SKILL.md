@@ -61,6 +61,30 @@
 7. **"唤回后看得见但点不动"= 假激活**：Electron 类应用（ZCode 实测）被外部硬 `ShowWindow` 显示后，应用内部状态没同步，残留 `WS_EX_TRANSPARENT`（鼠标穿透）。`win_manage activate` 现在会自动清理穿透/拒绝激活样式、补 `WS_VISIBLE`、用 `SetWindowPlacement` 恢复并强制重绘，返回的 `fixes` 数组告诉你动了哪些手脚。若仍点不动：用 `tray_click` 双击托盘图标让应用自己恢复，或关闭重开
 8. **遇到"点不动/找不到"**：重新采样状态 → `ui_tree` 看真实控件树 → 再试；仍失败就汇报，别盲试
 
+## 分屏布局（win_manage action=snap —— Win+方向键的工具版）
+
+布局/平铺窗口**一律用 snap**，不要用 move 手算坐标（move 需要自己算 x/y/w/h，snap 一条命令且返回实际 rect 可验证）：
+
+```
+win_manage(action=snap, hwnd=..., pos=left)        # 左半屏   (Win+←)
+win_manage(action=snap, hwnd=..., pos=right)       # 右半屏   (Win+→)
+win_manage(action=snap, hwnd=..., pos=top)         # 上半屏   (Win+↑ 非最大化时的贴靠)
+win_manage(action=snap, hwnd=..., pos=bottom)      # 下半屏   (Win+↓)
+win_manage(action=snap, hwnd=..., pos=topleft)     # 左上 1/4
+win_manage(action=snap, hwnd=..., pos=topright)    # 右上 1/4
+win_manage(action=snap, hwnd=..., pos=bottomleft)  # 左下 1/4
+win_manage(action=snap, hwnd=..., pos=bottomright) # 右下 1/4
+win_manage(action=snap, hwnd=..., pos=max|min|restore)
+win_manage(action=snap, hwnd=..., pos=right, monitor="2")   # 贴到第 2 块屏的右半
+win_manage(action=snap, hwnd=..., pos=left, monitor="next") # 先移到下一块屏再贴左半 (≈ Win+Shift+→ 再 Win+←)
+```
+
+- 返回 `target`（目标矩形）和 `rect`（实际矩形），两者一致 = 贴靠成功；不一致 = 应用有最小尺寸约束（Electron 常见，实测 WorkBuddy 要 690 给 744），这时用返回的 rect 算剩余空间给下一个窗口
+- 半屏按**显示器工作区**（已排除任务栏）计算，多屏用 `monitor=` 指定，不给 = 窗口当前所在屏
+
+人类快捷键对照（用户手动操作时用，AI 一律走 snap）：
+Win+←/→ 半屏 | Win+↑ 最大化 | Win+↓ 还原→最小化 | Win+Shift+←/→ 跨屏移动 | Win+Z 贴靠布局(Win11) | Win+Home 最小化其他窗口 | Win+D 显示桌面
+
 ## 常见坑速查
 
 | 现象 | 原因 | 解法 |

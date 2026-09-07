@@ -58,7 +58,7 @@ const TOOLS = [
   // ---- 窗口管理 ----
   {
     name: 'win_manage',
-    description: '窗口管理: action=activate(置前)/maximize/minimize/restore/close/move(需x,y)/wait(等窗口出现,timeout毫秒)/list(列窗口: 给title=按标题关键词列全部匹配, 给pid=按进程, 都不给=全部应用列表)',
+    description: '窗口管理: action=activate(置前)/snap(半屏分屏贴靠, 配 pos+monitor)/maximize/minimize/restore/close/move(需x,y,w,h)/wait(等窗口出现,timeout毫秒)/list(列窗口)/listall(含隐藏窗口)。★布局窗口一律用 snap: pos=left|right|top|bottom|topleft|topright|bottomleft|bottomright|max|min|restore, monitor=1..n|next|prev(不给=当前屏)。这是 Win+方向键那套分屏能力的工具版, 且能指定第几块屏',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -69,6 +69,8 @@ const TOOLS = [
         x: { type: 'number' }, y: { type: 'number' },
         w: { type: 'number', description: 'move 时的宽度(服务端必填)' },
         h: { type: 'number', description: 'move 时的高度(服务端必填)' },
+        pos: { type: 'string', description: 'action=snap 时必填: left 左半屏 / right 右半屏 / top 上半 / bottom 下半 / topleft|topright|bottomleft|bottomright 四分之一屏 / max 最大化 / min 最小化 / restore 还原' },
+        monitor: { type: 'string', description: 'action=snap 时可选: 第几块屏(1..n) 或 next 移到下一屏 / prev 上一屏; 不给 = 窗口当前所在屏。多屏布局用这个' },
         timeout: { type: 'number', description: 'wait 的超时毫秒(默认10000)' },
         pid: { type: 'number', description: 'list 时按进程过滤' }
       },
@@ -449,6 +451,8 @@ function buildUrl(name, a) {
       if (a.h !== undefined) qs.push('h=' + a.h);
       if (a.timeout !== undefined) qs.push('timeout=' + a.timeout);
       if (a.pid !== undefined) qs.push('pid=' + a.pid);
+      if (a.pos) qs.push('pos=' + enc(a.pos));
+      if (a.monitor) qs.push('monitor=' + enc(a.monitor));
       return { path: '/win/' + act, qs };
     }
     case 'mouse_move': return { path: '/mouse/move', qs: ['x=' + a.x, 'y=' + a.y] };

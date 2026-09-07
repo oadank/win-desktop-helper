@@ -216,6 +216,72 @@ partial class ShotService
                ",\"rect\":{\"x\":" + rc.Left + ",\"y\":" + rc.Top + ",\"w\":" + (rc.Right - rc.Left) + ",\"h\":" + (rc.Bottom - rc.Top) + "}}";
     }
 
+    [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
+
+    // 窗口贴靠(分屏) —— 把 Win+方向键那套变成工具默认能力
+    //   pos: left 左半屏 / right 右半屏 / top 上半 / bottom 下半
+    //        topleft 左上 / topright 右上 / bottomleft 左下 / bottomright 右下 (四分之一屏)
+    //        max 最大化 / min 最小化 / restore 还原
+    //   monitor: 1..n 指定第几块屏 / next 下一块 / prev 上一块 (不给 = 窗口当前所在屏)
+    // 半屏用 MoveWindow 直接算, 比模拟按键稳: 不受前台焦点限制, 多屏可精确指定, 且返回实际 rect 可验证
+    static string WinSnap(IntPtr h, string pos, string mon)
+    {
+        if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
+        if (!IsWindow(h)) return "{\"ok\":false,\"error\":\"invalid handle: 窗口已关闭, 重新 list_apps 采样\"}";
+        pos = (pos == "" ? "max" : pos).ToLowerInvariant();
+        var screens = System.Windows.Forms.Screen.AllScreens;
+        int monIdx = -1;
+        if (mon != "")
+        {
+            int mi;
+            if (int.TryParse(mon, out mi) && mi >= 1 && mi <= screens.Length) monIdx = mi - 1;
+            else if (mon == "next" || mon == "prev")
+            {
+                int ci = Array.IndexOf(screens, System.Windows.Forms.Screen.FromHandle(h));
+                if (ci < 0) ci = 0;
+                monIdx = mon == "next" ? (ci + 1) % screens.Length : (ci - 1 + screens.Length) % screens.Length;
+            }
+            else return "{\"ok\":false,\"error\":\"monitor 无效: 填 1.." + screens.Length + " 或 next/prev (本机 " + screens.Length + " 块屏)\"}";
+        }
+        var sc = monIdx >= 0 ? screens[monIdx] : System.Windows.Forms.Screen.FromHandle(h);
+        var wa = sc.WorkingArea;
+        int x = wa.X, y = wa.Y, w = wa.Width, hh = wa.Height;
+        int halfW = wa.Width / 2, restW = wa.Width - halfW, halfH = wa.Height / 2, restH = wa.Height - halfH;
+        string mode = "move";
+        switch (pos)
+        {
+            case "left": w = halfW; break;
+            case "right": x = wa.X + halfW; w = restW; break;
+            case "top": hh = halfH; break;
+            case "bottom": y = wa.Y + halfH; hh = restH; break;
+            case "topleft": w = halfW; hh = halfH; break;
+            case "topright": x = wa.X + halfW; w = restW; hh = halfH; break;
+            case "bottomleft": w = halfW; y = wa.Y + halfH; hh = restH; break;
+            case "bottomright": x = wa.X + halfW; w = restW; y = wa.Y + halfH; hh = restH; break;
+            case "max": case "maximize": mode = "max"; break;
+            case "min": case "minimize": mode = "min"; break;
+            case "restore": mode = "restore"; break;
+            default: return "{\"ok\":false,\"error\":\"pos 无效: left/right/top/bottom/topleft/topright/bottomleft/bottomright/max/min/restore\"}";
+        }
+        bool iconic = false, zoomed = false;
+        try { iconic = IsIconic(h); } catch { }
+        try { zoomed = IsZoomed(h); } catch { }
+        if (mode == "min") ShowWindow(h, SW_MINIMIZE);
+        else
+        {
+            if (iconic || zoomed) { ShowWindow(h, SW_RESTORE); Thread.Sleep(150); } // 最小化/最大化状态下 MoveWindow 无效
+            if (mode == "max") ShowWindow(h, SW_MAXIMIZE);
+            else MoveWindow(h, x, y, w, hh, true);
+        }
+        Thread.Sleep(180);
+        RECT rc; GetWindowRect(h, out rc);
+        int nowMon = Array.IndexOf(screens, System.Windows.Forms.Screen.FromHandle(h)) + 1;
+        Log("win snap: " + h + " pos=" + pos + " mon=" + nowMon);
+        return "{\"ok\":true,\"pos\":\"" + pos + "\",\"mode\":\"" + mode + "\",\"monitor\":" + nowMon + ",\"monitors\":" + screens.Length +
+               ",\"target\":{\"x\":" + x + ",\"y\":" + y + ",\"w\":" + w + ",\"h\":" + hh + "}" +
+               ",\"rect\":{\"x\":" + rc.Left + ",\"y\":" + rc.Top + ",\"w\":" + (rc.Right - rc.Left) + ",\"h\":" + (rc.Bottom - rc.Top) + "}}";
+    }
+
     // 等待窗口出现 (轮询 FindWindowByTitle)
     static string WinWait(string title, int timeoutMs)
     {
