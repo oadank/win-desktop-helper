@@ -61,9 +61,13 @@ partial class ShotService
             int head = 0, filled = vert ? H : W;   // 内容区在画布 [head, head+filled)
             Bitmap f0 = SnapScreen(r);
             using (var g0 = Graphics.FromImage(canvas)) g0.DrawImage(f0, 0, 0);
-            byte[] gPrev = Gray(f0); f0.Dispose();
+            byte[] gPrev = Gray(f0);
+            Bitmap f0Keep = f0;                    // 留着: 检出固定边条后重建裁剪基底用
+            // 固定边条 (选区里不随滚动动的状态栏/工具栏等): 检出后有效区 = mRect, 拼接只取滚动区
+            bool mDone = false; int mTop = 0, mBot = 0, mLeft = 0, mRight = 0, W2 = W, H2 = H;
+            Rectangle mRect = Rectangle.Empty;
             screens = 1;
-            st.Update(canvas, head, filled, screens, vert);
+            st.Update(canvas, head, filled, screens, vert, W, H);
 
             int lastO = 0, stall = 0, prevAuto = 0;
             DateTime lastProgress = DateTime.Now;
@@ -90,10 +94,13 @@ partial class ShotService
                             canvas = vert ? NewCanvas(W, H * 4) : NewCanvas(W * 4, H);
                             Bitmap f = SnapScreen(r);
                             using (var g2 = Graphics.FromImage(canvas)) g2.DrawImage(f, 0, 0);
-                            gPrev = Gray(f); f.Dispose();
+                            gPrev = Gray(f);
+                            if (f0Keep != null) f0Keep.Dispose();
+                            f0Keep = f;
+                            mDone = false; mRect = Rectangle.Empty; W2 = W; H2 = H;
                             head = 0; filled = vert ? H : W; lastO = 0; stall = 0;
                             st.ApplyAxis(vert);
-                            st.Update(canvas, head, filled, screens, vert);
+                            st.Update(canvas, head, filled, screens, vert, W, H);
                         }
                         continue;
                     }
@@ -133,9 +140,27 @@ partial class ShotService
                         }
                         stall = 0; lastProgress = DateTime.Now; lastO = o; screens++;
 
-                        canvas = StitchFrame(canvas, cur, vert, fwd, o, ref head, ref filled);
+                        // 首次有效滚动: 检出固定边条, 画布基底换成裁剪过的首帧, 之后只拼滚动区。
+                        // 检测必须在"确有滚动"的帧对上做 (静止两帧所有行都像固定), 所以挂在 o>0 这里。
+                        if (!mDone)
+                        {
+                            DetectFixedMargins(gPrev, gCur, W, H, out mTop, out mBot, out mLeft, out mRight);
+                            W2 = W - mLeft - mRight; H2 = H - mTop - mBot;
+                            mRect = new Rectangle(mLeft, mTop, W2, H2);
+                            var nc = vert ? NewCanvas(W, H * 4) : NewCanvas(W * 4, H);
+                            using (var gb = Graphics.FromImage(nc))
+                                gb.DrawImage(f0Keep, new Rectangle(0, 0, W2, H2), mRect, GraphicsUnit.Pixel);
+                            canvas.Dispose(); canvas = nc;
+                            head = 0; filled = vert ? H2 : W2;
+                            mDone = true;
+                            f0Keep.Dispose(); f0Keep = null;
+                            Log("[ls] fixed margins t=" + mTop + " b=" + mBot + " l=" + mLeft + " r=" + mRight);
+                        }
+                        Bitmap cur2 = mRect.IsEmpty ? cur : cur.Clone(mRect, cur.PixelFormat);
+                        canvas = StitchFrame(canvas, cur2, vert, fwd, o, ref head, ref filled);
+                        cur2.Dispose();
                         gPrev = gCur;
-                        st.Update(canvas, head, filled, screens, vert);
+                        st.Update(canvas, head, filled, screens, vert, W2, H2);
                     }
                 }
                 else
@@ -147,11 +172,12 @@ partial class ShotService
                 }
             }
             try { st.Invoke((MethodInvoker)delegate { st.Close(); }); } catch { try { st.Close(); } catch { } }
+            if (f0Keep != null) f0Keep.Dispose();
             if (!cancelled && (doSave || doCopy))
             {
                 result = vert
-                    ? (Bitmap)canvas.Clone(new Rectangle(0, head, W, Math.Max(1, filled)), canvas.PixelFormat)
-                    : (Bitmap)canvas.Clone(new Rectangle(head, 0, Math.Max(1, filled), H), canvas.PixelFormat);
+                    ? (Bitmap)canvas.Clone(new Rectangle(0, head, W2, Math.Max(1, filled)), canvas.PixelFormat)
+                    : (Bitmap)canvas.Clone(new Rectangle(head, 0, Math.Max(1, filled), H2), canvas.PixelFormat);
             }
             canvas.Dispose();
         }
@@ -261,7 +287,9 @@ partial class ShotService
             int head = 0, filled = vert ? h : w, screens = 1, lastO = 0, stall = 0;
             byte[] gPrev; Bitmap f0 = SnapStable(r, out gPrev);
             using (var g = Graphics.FromImage(canvas)) g.DrawImage(f0, 0, 0);
-            f0.Dispose();
+            Bitmap f0Keep = f0;                    // 留着: 检出固定边条后重建裁剪基底用
+            bool mDone = false; int mTop = 0, mBot = 0, mLeft = 0, mRight = 0, W2 = w, H2 = h;
+            Rectangle mRect = Rectangle.Empty;
             SetCursorPos(x + w / 2, y + h / 2); Thread.Sleep(150);   // 滚轮发给选区下的窗口
 
             while (screens < maxScreens && DateTime.Now < deadline)
@@ -275,17 +303,32 @@ partial class ShotService
                     bool fwd;
                     int o = vert ? MatchMove(gPrev, gCur, w, h, lastO, out fwd)
                                  : MatchMoveH(gPrev, gCur, w, h, lastO, out fwd);
-                    LSPoint cp; GetCursorPos(out cp);
-                    Log("[longshot] it o=" + o + " stall=" + stall + " gdiff=" + GrayAbsDiff(gPrev, gCur) + " cur=" + cp.X + "," + cp.Y);
                     if (o <= 0) { gPrev = gCur; if (++stall >= 6) break; continue; }   // 到头/没反应
                     stall = 0; lastO = o; screens++;
-                    canvas = StitchFrame(canvas, cur, vert, fwd, o, ref head, ref filled);
+                    if (!mDone)
+                    {
+                        DetectFixedMargins(gPrev, gCur, w, h, out mTop, out mBot, out mLeft, out mRight);
+                        W2 = w - mLeft - mRight; H2 = h - mTop - mBot;
+                        mRect = new Rectangle(mLeft, mTop, W2, H2);
+                        var nc = vert ? NewCanvas(w, h * 4) : NewCanvas(w * 4, h);
+                        using (var gb = Graphics.FromImage(nc))
+                            gb.DrawImage(f0Keep, new Rectangle(0, 0, W2, H2), mRect, GraphicsUnit.Pixel);
+                        canvas.Dispose(); canvas = nc;
+                        head = 0; filled = vert ? H2 : W2;
+                        mDone = true;
+                        f0Keep.Dispose(); f0Keep = null;
+                        Log("[ls] auto fixed margins t=" + mTop + " b=" + mBot + " l=" + mLeft + " r=" + mRight);
+                    }
+                    Bitmap cur2 = mRect.IsEmpty ? cur : cur.Clone(mRect, cur.PixelFormat);
+                    canvas = StitchFrame(canvas, cur2, vert, fwd, o, ref head, ref filled);
+                    cur2.Dispose();
                     gPrev = gCur;
                 }
             }
+            if (f0Keep != null) f0Keep.Dispose();
             result = vert
-                ? (Bitmap)canvas.Clone(new Rectangle(0, head, w, Math.Max(1, filled)), canvas.PixelFormat)
-                : (Bitmap)canvas.Clone(new Rectangle(head, 0, Math.Max(1, filled), h), canvas.PixelFormat);
+                ? (Bitmap)canvas.Clone(new Rectangle(0, head, W2, Math.Max(1, filled)), canvas.PixelFormat)
+                : (Bitmap)canvas.Clone(new Rectangle(head, 0, Math.Max(1, filled), H2), canvas.PixelFormat);
             canvas.Dispose();
             string path = SaveToShotDir(result);
             Log("[longshot] auto done: " + result.Width + "x" + result.Height + " " + screens + " screens -> " + path);
@@ -330,6 +373,36 @@ partial class ShotService
         long s = 0;
         for (int i = 0; i < a.Length; i++) s += Math.Abs(a[i] - b[i]);
         return s;
+    }
+
+    // ============ 固定边条检测 (2026-09-08 老大实测: 选区含记事本状态栏时, 每条接缝都烤进一条状态栏) ============
+    // 判据: 滚动中的帧对上, 内容行/列的平均灰度差很大, 固定条(状态栏/工具栏)差恒≈0。
+    // 从四边向内数连续"零差"行/列即固定边条。必须传"确有滚动"的帧对 (静止两帧全出行都像固定)。
+    // 宽容度过检(把内容区相邻空白行也算进固定条)是无害的: 只要后续一致排除, 拼接文档线依然连续无缝。
+    static void DetectFixedMargins(byte[] a, byte[] b, int w, int h, out int top, out int bottom, out int left, out int right)
+    {
+        top = 0; bottom = 0; left = 0; right = 0;
+        const double THR = 2.0;                       // 行/列平均灰度差 < 2 = 固定
+        var rd = new double[h];
+        for (int y = 0; y < h; y++)
+        {
+            long s = 0; int yo = y * w;
+            for (int x = 0; x < w; x += 4) s += Math.Abs(a[yo + x] - b[yo + x]);
+            rd[y] = s / (w / 4.0);
+        }
+        int capV = h / 3;                              // 单边最多认 1/3 高, 防荒谬检出
+        while (top < capV && rd[top] < THR) top++;
+        while (bottom < capV && rd[h - 1 - bottom] < THR) bottom++;
+        var cd = new double[w];
+        for (int x = 0; x < w; x++)
+        {
+            long s = 0;
+            for (int y = 0; y < h; y += 4) s += Math.Abs(a[y * w + x] - b[y * w + x]);
+            cd[x] = s / (h / 4.0);
+        }
+        int capH = w / 3;
+        while (left < capH && cd[left] < THR) left++;
+        while (right < capH && cd[w - 1 - right] < THR) right++;
     }
 
     // 静止门: 连拍两帧几乎一致才返回 (动画中间帧/撕裂帧拼进去=横纹+错位)。
@@ -628,8 +701,8 @@ partial class ShotService
 
         public void AckAxis() { AxisChanged = false; }
 
-        // 拼接画布更新(采集线程调用; 位图归状态窗所有, 换图时释放旧图)
-        public void Update(Bitmap canvas, int head, int filled, int screensN, bool vert)
+        // 拼接画布更新(采集线程调用; 位图归状态窗所有, 换图时释放旧图)。cw/ch = 有效内容宽高(剔除固定边条后)
+        public void Update(Bitmap canvas, int head, int filled, int screensN, bool vert, int cw, int ch)
         {
             if (IsDisposed) return;
             try
@@ -638,8 +711,8 @@ partial class ShotService
                 {
                     if (IsDisposed) return;
                     Rectangle rect = vert
-                        ? new Rectangle(0, head, regRect.Width, Math.Max(1, filled))
-                        : new Rectangle(head, 0, Math.Max(1, filled), regRect.Height);
+                        ? new Rectangle(0, head, cw, Math.Max(1, filled))
+                        : new Rectangle(head, 0, Math.Max(1, filled), ch);
                     var crop = (Bitmap)canvas.Clone(rect, canvas.PixelFormat);
                     var old = lastImg; lastImg = crop;
                     pv.Image = crop;
