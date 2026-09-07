@@ -1018,9 +1018,15 @@ partial class ShotService
             if (e.TryGetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern, out pat))
             {
                 ((System.Windows.Automation.ValuePattern)pat).SetValue(val);
-                return "{\"ok\":true,\"via\":\"value\",\"len\":" + val.Length + "}";
+                // 假成功防线: React 受控组件会吞掉 SetValue(返回 ok 但内容没进), 必须读回验证
+                Thread.Sleep(200);
+                string got = "";
+                try { got = ((System.Windows.Automation.ValuePattern)e.GetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern)).Current.Value ?? ""; } catch { }
+                if (got != val)
+                    return "{\"ok\":false,\"via\":\"value\",\"error\":\"SetValue 返回成功但读回不一致(写入 " + val.Length + " 字, 实际 " + got.Length + " 字) — 目标是受控输入框, 别用 ui_set, 改 clipboard_set + ui_click 聚焦 + keyboard_press ctrl+v + ui_read 验证\"}";
+                return "{\"ok\":true,\"via\":\"value\",\"len\":" + val.Length + ",\"verified\":true}";
             }
-            return "{\"ok\":false,\"error\":\"element has no ValuePattern (不可直写, 用 keyboard/type)\"}";
+            return "{\"ok\":false,\"error\":\"element has no ValuePattern (不可直写, 用 clipboard_set + ctrl+v)\"}";
         }
         catch (Exception ex)
         {
