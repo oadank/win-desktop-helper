@@ -832,15 +832,24 @@ partial class ShotService
                 string ep = Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
                 string key = Cfg("pick.askKey", "sk-200418");
                 string model = Cfg("pick.askModel", "GwV4F");
-                // 附加提示词(设置页「划词」/pick_config askPrompt 可配): 全局固定的风格/角色前缀
+                // 提示词三层累加(2026-09-07 老大定稿): 内置人设(写死) + 用户偏好(设置, 可空) + 本次要求(弹框, 可空)
+                // 冲突仲裁写进人设: 本次要求 > 用户偏好 > 基础规则; 偏好为空/无意义直接忽略 —— 谁乱填都不会把 AI 带偏
                 string extra = (Cfg("pick.askPrompt", "") ?? "").Trim();
-                string ctx = string.IsNullOrWhiteSpace(text) ? "" : "【划选内容】" + text;
-                string prompt;
-                if (question.Length > 0)
-                    prompt = "请回答下面的问题。" + (ctx.Length > 0 ? ctx + "\n" : "") + "【问题】" + question;
-                else
-                    prompt = "简明回答下面内容（中文，不超过 300 字，直接给结论，不要复述问题）：\n\n" + text;
-                if (extra.Length > 0) prompt = extra + "\n\n" + prompt;
+                string persona =
+                    "你是用户的桌面划词助手。用户划选了下面的内容，先判断它是什么类型，再按对应方式回答：\n" +
+                    "- 英文单词/句子 → 给中文翻译；单词再附词性和一个例句\n" +
+                    "- 术语/概念 → 一句话讲清是什么 + 一个例子\n" +
+                    "- 报错/警告信息 → 最可能的原因 + 怎么修\n" +
+                    "- 代码 → 这段代码干什么、有没有坑\n" +
+                    "- 型号/数字 → 它是什么、关键参数\n" +
+                    "- 其他 → 一句话总结要点\n" +
+                    "要求：中文、150 字以内、直接说结论；不要复述原文；不要\"好的\"\"以下是\"这类开场白。\n" +
+                    "优先级规则：【本次要求】>【用户偏好】> 上面的基础规则；若【用户偏好】为空或只是无意义的话，直接忽略它。";
+                string p = persona + "\n\n";
+                if (extra.Length > 0) p += "【用户偏好】" + extra + "\n\n";
+                p += "【本次要求】" + (question.Length > 0 ? question : "按基础规则智能解释下面的内容") + "\n\n";
+                p += "【划选内容】\n" + text;
+                string prompt = p;
                 string json = "{\"model\":" + EscapeJson(model) + ",\"messages\":[{\"role\":\"user\",\"content\":" + EscapeJson(prompt) + "}],\"max_tokens\":800}";
                 using (var wc = new WebClient())
                 {

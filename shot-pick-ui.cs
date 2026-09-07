@@ -368,7 +368,7 @@ sealed class PickAskForm : Form
         Font = PickStyle.F(PickStyle.FS_MID, FontStyle.Regular);
 
         Label hint = new Label();
-        hint.Text = "问 AI：可补充这次要问的话（回车发送 · 留空=按默认 · Esc 取消）";
+        hint.Text = "本次问题（留空=智能解释划选内容 · 回车发送 · Esc 取消）";
         hint.ForeColor = PickStyle.InkMid;
         hint.BackColor = Color.Transparent;
         hint.Font = PickStyle.F(PickStyle.FS_SMALL, FontStyle.Regular);

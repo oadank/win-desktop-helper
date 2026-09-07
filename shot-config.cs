@@ -296,7 +296,7 @@ partial class ShotService
         pkShow.ForeColor = cDim; pkShow.Font = new Font("Microsoft YaHei UI", 9f);
         pkShow.CheckedChanged += (s, e) => { pkKey.PasswordChar = pkShow.Checked ? '\0' : '*'; };
         mkDim(pgPick, "翻译引擎沿用「翻译」页的设置; 问AI 默认走本机 litellm 网关(:4000)", LX, 196);
-        mkL(pgPick, "附加提示词:", LX, 226);
+        mkL(pgPick, "用户偏好(每次问AI都生效的习惯, 如\"全程中文\"\"我是后端用术语\"; 留空=只用内置人设):", LX, 226);
         TextBox pkPrompt = new TextBox();
         pkPrompt.Multiline = true;
         pkPrompt.Left = FX; pkPrompt.Top = 223; pkPrompt.Width = PW - FX - 8; pkPrompt.Height = 88;
