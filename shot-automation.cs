@@ -647,6 +647,7 @@ partial class ShotService
                           ",\"value\":" + (val == null ? "null" : "\"" + JsonEscape(val) + "\"") +
                           ",\"rect\":{\"x\":" + (int)r2.X + ",\"y\":" + (int)r2.Y + ",\"w\":" + (int)r2.Width + ",\"h\":" + (int)r2.Height + "}" +
                           ",\"ref\":\"" + RefOf(e) + "\",\"pid\":" + PidOf(e) +
+                          ",\"offscreen\":" + (UiaOffscreen(e) ? "true" : "false") +
                           ",\"patterns\":\"" + JsonEscape(string.Join(",", pats.ToArray())) + "\"}");
             }
             return "{\"ok\":true,\"hwnd\":" + h.ToInt64() + ",\"count\":" + n + (all.Count > n ? ",\"truncated\":true" : "") +
@@ -789,7 +790,8 @@ partial class ShotService
                 items.Add("{\"i\":" + i + ",\"name\":\"" + JsonEscape(en) + "\",\"type\":\"" + JsonEscape(ct) +
                           "\",\"enabled\":" + (enb ? "true" : "false") +
                           ",\"rect\":{\"x\":" + (int)r2.X + ",\"y\":" + (int)r2.Y + ",\"w\":" + (int)r2.Width + ",\"h\":" + (int)r2.Height + "}" +
-                          ",\"ref\":\"" + RefOf(e) + "\",\"pid\":" + PidOf(e) + "}");
+                          ",\"ref\":\"" + RefOf(e) + "\",\"pid\":" + PidOf(e) +
+                          ",\"offscreen\":" + (UiaOffscreen(e) ? "true" : "false") + "}");
             }
             return "{\"ok\":true,\"name\":\"" + JsonEscape(nm) + "\",\"type\":\"" + JsonEscape(typeFilter) + "\",\"count\":" + items.Count + ",\"elements\":[" + string.Join(",", items.ToArray()) + "]}";
         }
@@ -944,7 +946,73 @@ partial class ShotService
         return cx; // 平移后也不在窗口内, 交给 HitGuard 拦
     }
 
+    static bool UiaOffscreen(System.Windows.Automation.AutomationElement e)
+    {
+        try
+        {
+            object o = e.GetCurrentPropertyValue(System.Windows.Automation.AutomationElement.IsOffscreenProperty);
+            if (o is bool) return (bool)o;
+        }
+        catch { }
+        return false;
+    }
+
+    // 点击后校验"预期内容是否真的出现" —— 防"点了界面也变了, 但变得不对"
+    // 实测事故: AI 点会话列表项报 ok 且 verify.changed=true, 但界面根本没进那个会话
+    static string ExpectCheckJson(string expect, int pid, int waitMs)
+    {
+        if (string.IsNullOrEmpty(expect)) return "";
+        Thread.Sleep(waitMs > 0 ? waitMs : 900);
+        try
+        {
+            var root = System.Windows.Automation.AutomationElement.RootElement;
+            var list = WalkLimited(root, 800);
+            foreach (var e in list)
+            {
+                try
+                {
+                    if (pid > 0 && PidOf(e) != pid) continue;
+                    string n = e.Current.Name ?? "";
+                    if (n.Length == 0) continue;
+                    if (n.IndexOf(expect, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return ",\"expect\":{\"found\":true,\"text\":\"" + JsonEscape(expect) + "\",\"matched\":\"" + JsonEscape(n.Length > 60 ? n.Substring(0, 60) : n) + "\"}";
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return ",\"expect\":{\"found\":false,\"text\":\"" + JsonEscape(expect) + "\",\"hint\":\"点完没找到预期内容 — 大概率没点到或点了没生效。重新采样, 别硬往下走\"}";
+    }
+
+    // ui_click 包装: 点完按 expect= 校验预期内容是否出现, 结果并进返回 JSON
     static string UiClick(Dictionary<string, string> q)
+    {
+        string r = UiClickInner(q);
+        string exp = q.ContainsKey("expect") ? q["expect"] : "";
+        if (exp == "" || r.IndexOf("\"ok\":true") < 0) return r;
+        int pid = 0;
+        int k = r.IndexOf("\"pid\":");
+        if (k >= 0)
+        {
+            string num = r.Substring(k + 6);
+            int c = num.IndexOfAny(new char[] { ',', '}' });
+            if (c > 0) int.TryParse(num.Substring(0, c), out pid);
+        }
+        if (pid == 0 && q.ContainsKey("hwnd"))
+        {
+            long hv = 0; long.TryParse(q["hwnd"], out hv);
+            if (hv > 0)
+            {
+                IntPtr wh = new IntPtr(hv);
+                if (IsWindow(wh)) { uint tp = 0; GetWindowThreadProcessId(wh, out tp); pid = (int)tp; }
+            }
+        }
+        int k2 = r.LastIndexOf('}');
+        if (k2 < 0) return r;
+        return r.Substring(0, k2) + ExpectCheckJson(exp, pid, 900) + "}";
+    }
+
+    static string UiClickInner(Dictionary<string, string> q)
     {
         try
         {
@@ -954,6 +1022,29 @@ partial class ShotService
             try { name = e.Current.Name ?? ""; } catch { }
             string elRef = RefOf(e);
             int elPid = PidOf(e);
+            // 可见性校验: 视口外的元素点了不生效(实测 AI 点会话列表里滚出视口的项, 返回 ok 但界面没进那个会话)
+            bool force = q.ContainsKey("force") && (q["force"] == "1" || q["force"].ToLowerInvariant() == "true");
+            if (!force)
+            {
+                bool off = UiaOffscreen(e);
+                string geoWhy = "";
+                try
+                {
+                    IntPtr wh = IntPtr.Zero;
+                    if (q.ContainsKey("hwnd")) { long hv = 0; long.TryParse(q["hwnd"], out hv); if (hv > 0) wh = new IntPtr(hv); }
+                    var rr = e.Current.BoundingRectangle;
+                    if (wh != IntPtr.Zero && IsWindow(wh))
+                    {
+                        RECT wr; GetWindowRect(wh, out wr);
+                        double ecx = rr.X + rr.Width / 2.0, ecy = rr.Y + rr.Height / 2.0;
+                        if (ecx < wr.Left || ecx > wr.Right || ecy < wr.Top || ecy > wr.Bottom)
+                            geoWhy = "元素中心(" + (int)ecx + "," + (int)ecy + ") 落在窗口矩形(" + wr.Left + "," + wr.Top + " -> " + wr.Right + "," + wr.Bottom + ") 之外";
+                    }
+                }
+                catch { }
+                if (off || geoWhy != "")
+                    return "{\"ok\":false,\"error\":\"元素当前不在可视区, 点了不会生效 — " + JsonEscape(geoWhy != "" ? geoWhy : "UIA 报告 offscreen(可能滚出视口/被折叠)") + "。先滚动或展开让它可见再点; 确认是误判就传 force=1\",\"name\":\"" + JsonEscape(name) + "\",\"ref\":\"" + elRef + "\",\"offscreen\":true}";
+            }
             // 名字校验: 请求 name 与点中的元素名对不上 = 点偏了(实测 i 漂移后点中别的控件还返回 ok)
             string reqName = q.ContainsKey("name") ? q["name"] : "";
             if (reqName != "" && name.IndexOf(reqName, StringComparison.OrdinalIgnoreCase) < 0)

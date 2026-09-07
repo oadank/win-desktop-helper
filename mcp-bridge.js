@@ -244,7 +244,9 @@ const TOOLS = [
         nohit: { type: 'string', description: '填 1 = 跳过落点归属校验 (仅当确定目标就在最顶层时用)' },
         type: { type: 'string', description: '配合 name 过滤类型, 如 Button/MenuItem' },
         mode: { type: 'string', description: 'coord=跳过 UIA Invoke, 直接真实鼠标点控件中心(应用不响应 Invoke 时用)' },
-        verify: { type: 'string', description: '填 1 = 点击前后自动截取控件区域像素做对比, 返回 verify.changed 告诉你界面到底变没变。UIA Invoke 常假成功(返回 ok 但界面毫无变化), 强烈建议每次点击都带 verify=1' }
+        verify: { type: 'string', description: '填 1 = 点击前后自动截取控件区域像素做对比, 返回 verify.changed 告诉你界面到底变没变。UIA Invoke 常假成功(返回 ok 但界面毫无变化), 强烈建议每次点击都带 verify=1' },
+        expect: { type: 'string', description: '点击后要校验的预期内容: 填一段点完应该出现的文字(如目标会话标题/页面标题), 工具会重新扫一遍元素树并返回 expect.found。verify 只能说"界面变了", expect 才能证明"变成了对的那个" —— 切页/切会话/进列表项这类操作必填' },
+        force: { type: 'string', description: '填 1 = 跳过可见性校验强行点击(仅当确定元素可见而工具误判时用)' }
       }
     }
   },
@@ -548,6 +550,8 @@ function buildUrl(name, a) {
       if (a.mode) qs.push('mode=' + enc(a.mode));
       if (a.nohit !== undefined) qs.push('nohit=' + enc(a.nohit));
       if (a.verify !== undefined) qs.push('verify=' + enc(a.verify));
+      if (a.expect) qs.push('expect=' + enc(a.expect));
+      if (a.force !== undefined) qs.push('force=' + enc(a.force));
       return { path: '/ui/click', qs };
     }
     case 'ui_find': {

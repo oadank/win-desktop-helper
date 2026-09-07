@@ -23,7 +23,7 @@
    - `i` 是树下标，**跨调用必漂移**（实测同一输入框 637→644→659→664，点偏了还返回 ok）。非用不可时必须同时传 `name` 校验
    - 截图估坐标实测偏 150px、视觉小模型估偏 96px，**两者都点不中。别让模型做算术**
 2. **状态每次重新采样**：句柄会变（微信实测 920778→1968942）、下标会漂、窗口会被盖住关闭。禁止复用上一步结果
-3. **每次操作后必须验证**，没变就重新采样，不许连点同一个位置
+3. **每次操作后必须验证**。**切页/切会话/进列表项这类操作必须带 `expect="点完应该出现的文字"`** —— `verify` 只回答"界面变了"，`expect` 才证明"变成了对的那个"（实测：点会话项报 ok 且 changed=true，界面根本没进那个会话）。元素 `offscreen:true` 表示它滚出视口/被折叠，**点了不会生效**，先滚动或展开让它可见
 4. **中文一律剪贴板粘贴**：`clipboard_set(text)` → 点输入框聚焦 → `keyboard_press(keys="ctrl+v")`。组合键参数名是 `keys`（不是 key/modifiers）
 5. **工具不报假成功**：`ui_click` 的 via=invoke 只代表调到了不代表生效 → 配 `verify=1`；`ui_set` 写入后自动读回校验，不一致直接报错并指路剪贴板方案；坐标点击前自动做落点归属校验，位置命中的不是目标进程会拦下并报错。**看到报错就按报错里的提示改，别重试同一个动作**
 6. **"看得见但点不动" / "压根没窗口" → 直接 `app_restore(process=应用名, snap=right)`**：一条命令自动 close 关窗 → 托盘双击重开 → 等窗口稳定 → 贴回指定位置（返回 `stable` / `steps`）。**`win_manage activate` 唤回的窗口经常是冻结的，别拿它当恢复手段**；失败看返回里的 steps（托盘名不对用 `tray_list`，应用真退了用 `app_run`）
@@ -33,7 +33,8 @@
 
 | 用途 | 工具 |
 |---|---|
-| 语义定位/点击/读写 | `ui_tree` `ui_find` `ui_click` `ui_read` `ui_set` `ui_select` |
+| 语义定位/点击/读写 | `ui_tree` `ui_find` `ui_click(ref\|name, expect=, verify=1)` `ui_read` `ui_set` `ui_select` |
+| 证明"点对了" | `ui_click(..., expect="预期出现的文字")` → 返回 `expect.found` |
 | 窗口信息/管理 | `window_info`(支持 process 精确匹配) `active_window` `list_apps` `win_manage` `monitors` |
 | 半屏布局 | `win_manage(action=snap, hwnd=, pos=left\|right\|top\|bottom\|topleft...\|max\|min\|restore, monitor=2\|next\|prev)` |
 | 找失踪窗口 | `win_manage(action=listall, pid=)` 含隐藏/最小化/托盘化的窗口 |
@@ -50,6 +51,8 @@
 |---|---|
 | 按截图/视觉模型给的坐标点击全落空 | 改用 `ui_find` 拿 ref，工具算落点 |
 | `ui_click` 返回 ok 但界面没变 | 加 `verify=1`；invoke 不生效的应用用 `mode=coord` 或 `mouse_click` |
+| 点了报成功但进的不是目标页/会话 | `verify` 只看"变没变"，必须再加 `expect="目标标题"` 证明"变成了对的" |
+| 元素在列表里但点了没反应 | 看返回/树里的 `offscreen`：为 true = 滚出视口，先滚动展开再点 |
 | `window_info` 查到不相干的窗口 | title 模糊匹配会误伤浏览器标签页，传 `process` 按进程过滤 |
 | 粘贴没生效 | 参数名是 `keys`：`keyboard_press(keys="ctrl+v")` |
 | 窗口能看见但点不动 / 完全没有窗口 | `app_restore(process=应用名)` 一条命令恢复，别用 activate |

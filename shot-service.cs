@@ -2644,7 +2644,7 @@ public partial class ShotService
                 case "ui_click":
                 {
                     Dictionary<string, string> q2 = new Dictionary<string, string>();
-                    foreach (var kv in new[] { "title", "hwnd", "i", "name", "type" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
+                    foreach (var kv in new[] { "title", "hwnd", "i", "name", "type", "ref", "mode", "verify", "nohit", "expect", "force" }) { string v = McpParam(a, kv); if (v != "") q2[kv] = v; }
                     return McpText(UiCall("click", delegate { return UiClick(q2); }, 8000), false);
                 }
                 case "ui_find":
