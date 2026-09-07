@@ -59,6 +59,7 @@ public partial class ShotService
     // ---- Win32 ----
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll", SetLastError = true)]
     static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
     [DllImport("user32.dll", SetLastError = true)] static extern bool UnhookWindowsHookEx(IntPtr hhk);
@@ -454,6 +455,78 @@ public partial class ShotService
         }
         sb.Append("]}");
         return sb.ToString();
+    }
+
+    // ---- 托盘图标点击 (Electron 托盘应用窗口失踪时的主恢复手段) ----
+    static string TrayClick(string name, string button, bool dbl)
+    {
+        try
+        {
+            var root = System.Windows.Automation.AutomationElement.RootElement;
+            var tray = root.FindFirst(System.Windows.Automation.TreeScope.Children,
+                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ClassNameProperty, "Shell_TrayWnd"));
+            var hit = FindTrayButton(tray, name);
+            string via = "taskbar";
+            if (hit == null)
+            {
+                var chev = FindTrayButton(tray, "隐藏的图标");
+                if (chev == null) return "{\"ok\":false,\"error\":\"tray icon not found in taskbar, overflow chevron not found either\"}";
+                var r0 = chev.Current.BoundingRectangle;
+                MouseMove((int)(r0.X + r0.Width / 2), (int)(r0.Y + r0.Height / 2));
+                System.Threading.Thread.Sleep(150); MouseClick("left", 1);
+                System.Threading.Thread.Sleep(500);
+                var of = root.FindFirst(System.Windows.Automation.TreeScope.Children,
+                    new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ClassNameProperty, "NotifyIconOverflowWindow"));
+                hit = FindTrayButton(of, name);
+                via = "overflow";
+            }
+            if (hit == null) return "{\"ok\":false,\"error\":\"tray icon not found: 主区和溢出区都找过\"}";
+            var rc = hit.Current.BoundingRectangle;
+            int cx = (int)(rc.X + rc.Width / 2), cy = (int)(rc.Y + rc.Height / 2);
+            MouseMove(cx, cy); System.Threading.Thread.Sleep(120);
+            MouseClick(button == "" ? "left" : button, dbl ? 2 : 1);
+            return "{\"ok\":true,\"found\":true,\"via\":\"" + via + "\",\"rect\":{\"x\":" + (int)rc.X + ",\"y\":" + (int)rc.Y + ",\"w\":" + (int)rc.Width + ",\"h\":" + (int)rc.Height + "},\"clicked\":\"" + (dbl ? "double" : button) + "\"}";
+        }
+        catch (Exception e) { return "{\"ok\":false,\"error\":\"" + JsonEscape(e.Message) + "\"}"; }
+    }
+
+    static System.Windows.Automation.AutomationElement FindTrayButton(System.Windows.Automation.AutomationElement scope, string name)
+    {
+        if (scope == null || name == null || name == "") return null;
+        foreach (var el in WalkLimited(scope, 500))
+        {
+            try
+            {
+                string n = el.Current.Name;
+                if (!string.IsNullOrEmpty(n) && n.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0) return el;
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    // ---- 全量窗口枚举 (含隐藏/最小化/托盘化窗口; list_apps 只列可见窗口, 找不到窗口时用这个) ----
+    static string WinListAll(uint pidFilter)
+    {
+        var rows = new List<string>();
+        EnumWindows(delegate(IntPtr h, IntPtr lp)
+        {
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            if (pidFilter > 0 && pid != pidFilter) return true;
+            if (GetAncestor(h, 2) != h) return true;
+            var sbT = new StringBuilder(256);
+            string title = GetWindowTextW(h, sbT, 256) > 0 ? sbT.ToString() : "";
+            var sbC = new StringBuilder(128);
+            string cls = GetClassNameW(h, sbC, 128) > 0 ? sbC.ToString() : "";
+            bool vis = IsWindowVisible(h);
+            bool iconic = IsIconic(h);
+            RECT r; if (!GetWindowRect(h, out r)) { r = new RECT(); }
+            string pname = "";
+            try { var p = System.Diagnostics.Process.GetProcessById((int)pid); pname = p.ProcessName; } catch { }
+            rows.Add("{\"hwnd\":" + h.ToInt64() + ",\"pid\":" + pid + ",\"process\":\"" + JsonEscape(pname) + "\",\"title\":\"" + JsonEscape(title) + "\",\"class\":\"" + JsonEscape(cls) + "\",\"visible\":" + (vis ? "true" : "false") + ",\"minimized\":" + (iconic ? "true" : "false") + ",\"rect\":{\"x\":" + r.Left + ",\"y\":" + r.Top + ",\"w\":" + (r.Right - r.Left) + ",\"h\":" + (r.Bottom - r.Top) + "}}");
+            return true;
+        }, IntPtr.Zero);
+        return "{\"ok\":true,\"count\":" + rows.Count + ",\"windows\":[" + string.Join(",", rows) + "]}";
     }
 
     // ---- 动: 鼠标 ----
@@ -1565,6 +1638,11 @@ public partial class ShotService
                         if (q.ContainsKey("timeout")) { int v; if (int.TryParse(q["timeout"], out v) && v > 0) tmo = v; }
                         body = WinWait(q.ContainsKey("title") ? q["title"] : "", tmo);
                     }
+                    else if (verb == "listall")
+                    {
+                        int lp = 0; TryInt(q, "pid", out lp);
+                        body = WinListAll((uint)Math.Max(0, lp));
+                    }
                     else if (verb == "list")
                     {
                         int lp = 0; TryInt(q, "pid", out lp);
@@ -1593,6 +1671,17 @@ public partial class ShotService
                         else { code = 404; body = "{\"ok\":false,\"error\":\"unknown verb\"}"; }
                     }
                     Log("[win] " + target);
+                }
+                else if (path == "/tray/click")
+                {
+                    if (!q.ContainsKey("name") || q["name"] == "") { code = 400; body = "{\"ok\":false,\"error\":\"need name\"}"; }
+                    else
+                    {
+                        string btn = q.ContainsKey("button") ? q["button"] : "left";
+                        int dv = 0; TryInt(q, "double", out dv);
+                        body = TrayClick(q["name"], btn, dv == 1);
+                    }
+                    Log("[tray] " + target);
                 }
                 else if (path == "/mouse/down" || path == "/mouse/up")
                 {
@@ -2360,6 +2449,11 @@ public partial class ShotService
                         int tmo = McpParamInt(a, "timeout"); if (tmo <= 0) tmo = 10000;
                         return McpText(WinWait(McpParam(a, "title"), tmo), false);
                     }
+                    if (verb == "listall")
+                    {
+                        int lpid = McpParamInt(a, "pid");
+                        return McpText(WinListAll((uint)Math.Max(0, lpid)), false);
+                    }
                     if (verb == "list")
                     {
                         int lp = McpParamInt(a, "pid");
@@ -2369,9 +2463,19 @@ public partial class ShotService
                         return McpText(AppList(), false);
                     }
                     IntPtr wh = IntPtr.Zero;
-                    string ttl = McpParam(a, "title");
-                    if (ttl != "") wh = FindWindowByTitle(ttl);
-                    if (wh == IntPtr.Zero) return McpText("{\"ok\":false,\"error\":\"window not found\"}", true);
+                    long hv = 0; long.TryParse(McpParam(a, "hwnd"), out hv);
+                    if (hv > 0)
+                    {
+                        wh = new IntPtr(hv);
+                        if (!IsWindow(wh)) return McpText("{\"ok\":false,\"error\":\"hwnd invalid: 窗口已关闭或句柄已失效, 请重新 list_apps 采样\"}", true);
+                    }
+                    else
+                    {
+                        string ttl2 = McpParam(a, "title");
+                        if (ttl2 == "") return McpText("{\"ok\":false,\"error\":\"need hwnd or title: 推荐 hwnd(list_apps 采样), title 会变且可能误匹配\"}", true);
+                        wh = FindWindowByTitle(ttl2);
+                    }
+                    if (wh == IntPtr.Zero) return McpText("{\"ok\":false,\"error\":\"window not found: 标题没匹配到, 建议改用 hwnd(list_apps 采样)\"}", true);
                     if (verb == "activate") return McpText(WinActivate(wh), false);
                     if (verb == "max") return McpText(WinShow(wh, SW_MAXIMIZE, "maximized"), false);
                     if (verb == "min") return McpText(WinShow(wh, SW_MINIMIZE, "minimized"), false);
@@ -2380,6 +2484,9 @@ public partial class ShotService
                     if (verb == "move") return McpText(WinMove(wh, McpParamInt(a, "x"), McpParamInt(a, "y"), McpParamInt(a, "w"), McpParamInt(a, "h")), false);
                     return McpText("unknown verb (activate/max/min/restore/close/move/wait/list)", true);
                 }
+                case "tray_click":
+                    return McpText(TrayClick(McpParam(a, "name"), McpParam(a, "button") == "" ? "left" : McpParam(a, "button"),
+                        McpParam(a, "double") == "1" || McpParam(a, "double") == "true"), false);
                 case "mouse_down": return McpText(MouseDownUp(McpParam(a, "button") == "" ? "left" : McpParam(a, "button"), true), false);
                 case "mouse_up": return McpText(MouseDownUp(McpParam(a, "button") == "" ? "left" : McpParam(a, "button"), false), false);
                 case "mouse_drag":
@@ -2466,7 +2573,7 @@ public partial class ShotService
             "{\"name\":\"app_run\",\"description\":\"运行程序/打开（exe/快捷方式/URL）。GUI 会在用户桌面可见。多进程应用(微信/Electron)启动后会换进程换窗, 返回的 hwnd 可能是过渡态: 建议 wait=3000 + process=进程名, 服务端会等窗口 rect 稳定后再返回并带 stable 标记\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"},\"wait\":{\"type\":\"number\",\"description\":\"找到窗口后额外等待稳定的毫秒数(建议 3000), 0=不等待(旧行为)\"},\"process\":{\"type\":\"string\",\"description\":\"只认该进程名的窗口, 如 Weixin\"}},\"required\":[\"path\"]}}," +
             "{\"name\":\"taskbar_volume\",\"description\":\"任务栏滚轮调音量（常驻功能）。enabled=0/1 开关，step=每次滚轮音量变化百分比(1-20,默认2)，reverse=1 反向(滚轮上=减小)。不带参返回当前状态。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"enabled\":{\"type\":\"number\"},\"step\":{\"type\":\"number\"},\"reverse\":{\"type\":\"number\"}}}}," +
             "{\"name\":\"clipboard_history\",\"description\":\"读取剪贴板历史（常驻监听，最多50条，最新在前）。limit=返回条数(可选)。给AI复用刚复制的内容。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"limit\":{\"type\":\"number\"}}}}," +
-            "{\"name\":\"win_manage\",\"description\":\"窗口管理。verb=activate|max|min|restore|close|move|wait|list。activate置前台(先解除最小化)；move需x,y,w,h；wait轮询等title窗口出现(timeout毫秒,上限60s)；list按pid列窗口\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"verb\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"pid\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"timeout\":{\"type\":\"number\"}},\"required\":[\"verb\"]}," +
+            "{\"name\":\"win_manage\",\"description\":\"窗口管理。verb=activate|max|min|restore|close|move|wait|list。activate置前台(先解除最小化)；move需x,y,w,h；wait轮询等title窗口出现(timeout毫秒,上限60s)；list按pid列窗口\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"verb\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\",\"description\":\"窗口句柄, 优先于 title (list_apps 采样, 最可靠)\"},\"title\":{\"type\":\"string\"},\"pid\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"timeout\":{\"type\":\"number\"}},\"required\":[\"verb\"]}," +
             "{\"name\":\"mouse_down\",\"description\":\"按住鼠标键不松。button=left(默认)/right/middle。与mouse_up配对可自定义拖拽\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"button\":{\"type\":\"string\"}}}," +
             "{\"name\":\"mouse_up\",\"description\":\"松开鼠标键。button=left(默认)/right/middle\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"button\":{\"type\":\"string\"}}}," +
             "{\"name\":\"mouse_drag\",\"description\":\"左键拖拽一条龙: 从x1,y1按住平滑拖到x2,y2再松开。ms=总时长毫秒(默认300)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x1\":{\"type\":\"number\"},\"y1\":{\"type\":\"number\"},\"x2\":{\"type\":\"number\"},\"y2\":{\"type\":\"number\"},\"ms\":{\"type\":\"number\"}},\"required\":[\"x1\",\"y1\",\"x2\",\"y2\"]}," +
@@ -2485,7 +2592,8 @@ public partial class ShotService
             "{\"name\":\"ui_set\",\"description\":\"按索引直接写输入框值(ValuePattern,不走键盘输入法)。title=窗口标题,i=索引,value=文本\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"},\"value\":{\"type\":\"string\"}},\"required\":[\"i\",\"value\"]}," +
             "{\"name\":\"ui_read\",\"description\":\"按索引读元素Name/Value/类名/类型(比OCR准)。title=窗口标题,i=索引\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"}},\"required\":[\"i\"]}," +
             "{\"name\":\"get_skill\",\"description\":\"【必须先调用】获取本服务 SKILL 操作手册（铁律/避坑/流程）。所有工具首次调用前强制先读本 SKILL，否则报错。踩坑必须 update_skill 写回，禁止只写记忆。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
-            "{\"name\":\"update_skill\",\"description\":\"【踩坑必写】把新踩坑经验写回共享 SKILL.md（全体 agent 共享，立即生效）。title=小节标题，entry=markdown 正文\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"entry\":{\"type\":\"string\"}},\"required\":[\"title\",\"entry\"]}}" +
+            "{\"name\":\"update_skill\",\"description\":\"【踩坑必写】把新踩坑经验写回共享 SKILL.md（全体 agent 共享，立即生效）。title=小节标题，entry=markdown 正文\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"entry\":{\"type\":\"string\"}},\"required\":[\"title\",\"entry\"]}}," +
+            "{\"name\":\"tray_click\",\"description\":\"点击系统托盘/任务栏图标(托盘应用窗口失踪时用它唤回主窗)。name=图标名含糊匹配, button=left/right, double=1 双击(多数托盘应用双击开主窗)。点击后重新 window_info(process=...) 或 win_manage listall 验证窗口是否出现\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"name\":{\"type\":\"string\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"}},\"required\":[\"name\"]}}" +
             "]";
     }
 

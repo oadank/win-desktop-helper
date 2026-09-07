@@ -62,8 +62,10 @@ const TOOLS = [
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
-        action: { type: 'string', description: 'activate|maximize|minimize|restore|close|move|wait|list (maximize/minimize 会自动映射为服务端的 max/min)' },
-        title: { type: 'string', description: '窗口标题关键词' },
+        action: { type: 'string', description: 'activate|maximize|minimize|restore|close|move|wait|list|listall (listall=枚举全部顶层窗口含隐藏/最小化/托盘化的, 找失踪窗口用; maximize/minimize 会自动映射为服务端的 max/min)' },
+        verb: { type: 'string', description: '同 action 的别名, 两种写法都支持' },
+        hwnd: { type: 'number', description: '窗口句柄(推荐! 比 title 可靠: 标题会变/会误匹配)。list_apps 采样得到, 优先于 title' },
+        title: { type: 'string', description: '窗口标题关键词(没给 hwnd 时才用, 模糊匹配可能误伤)' },
         x: { type: 'number' }, y: { type: 'number' },
         w: { type: 'number', description: 'move 时的宽度(服务端必填)' },
         h: { type: 'number', description: 'move 时的高度(服务端必填)' },
@@ -229,21 +231,24 @@ const TOOLS = [
   },
   {
     name: 'ui_click',
-    description: '【点击首选】语义点击控件。定位二选一: i=ui_tree 下标, 或 name=控件名(如 "保存"/"确定", 一条命令直达, 精确优先模糊兜底, 可加 type=Button 过滤)。invoke/toggle/expand/select 模式优先, 失败回退坐标点击。⚠ 部分应用(微信等)不响应 UIA Invoke: 返回 via=invoke 但界面无变化 —— 改用 ui_find 拿 rect 后 mouse_click 中心, 或本工具传 mode=coord',
+    description: '【点击首选】语义点击控件。定位优先级: ref > name > i。ref=ui_find/ui_tree 返回的元素稳定引用(最稳, 不漂移, 也不需要 hwnd); name=控件名(一条命令直达, 服务端内部定位+校验); i=ui_tree 下标是下策: 索引跨调用必漂移(实测点偏到别的控件还返回 ok), 必须用 i 时请同时传 name 做校验。坐标点击会自动做落点归属校验: 若该坐标实际命中的元素属于别的进程(目标被别的窗口盖住), 直接报错拦下不点。(如 "保存"/"确定", 一条命令直达, 精确优先模糊兜底, 可加 type=Button 过滤)。invoke/toggle/expand/select 模式优先, 失败回退坐标点击。⚠ 部分应用(微信等)不响应 UIA Invoke: 返回 via=invoke 但界面无变化 —— 改用 ui_find 拿 rect 后 mouse_click 中心, 或本工具传 mode=coord',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         title: { type: 'string' }, hwnd: { type: 'number' },
+        ref: { type: 'string', description: '元素稳定引用 (ui_find/ui_tree 返回的 ref 字段, 同 RuntimeId)。最稳: 不随树变化漂移, 不需要 hwnd/title, 元素失效会明确报错要求重新采样。优先用它' },
         i: { type: 'number', description: 'ui_tree 元素下标' },
-        name: { type: 'string', description: '按控件名定位 (推荐)' },
+        name: { type: 'string', description: '按控件名定位' },
+        nohit: { type: 'string', description: '填 1 = 跳过落点归属校验 (仅当确定目标就在最顶层时用)' },
         type: { type: 'string', description: '配合 name 过滤类型, 如 Button/MenuItem' },
-        mode: { type: 'string', description: 'coord=跳过 UIA Invoke, 直接真实鼠标点控件中心(应用不响应 Invoke 时用)' }
+        mode: { type: 'string', description: 'coord=跳过 UIA Invoke, 直接真实鼠标点控件中心(应用不响应 Invoke 时用)' },
+        verify: { type: 'string', description: '填 1 = 点击前后自动截取控件区域像素做对比, 返回 verify.changed 告诉你界面到底变没变。UIA Invoke 常假成功(返回 ok 但界面毫无变化), 强烈建议每次点击都带 verify=1' }
       }
     }
   },
   {
     name: 'ui_find',
-    description: '按名称/类型查控件(只查不点): 返回全部匹配 {i,name,type,rect,enabled}。name=(模糊) 与 type=(精确类名如 Button/MenuItem) 至少给一个。注意: i 仅本次响应内有效, 跨调用必须重查。先 find 确认再 click/set',
+    description: '按名称/类型查控件(只查不点): 返回全部匹配 {ref,i,name,type,rect,enabled,pid}。name=(模糊) 与 type=(精确类名如 Button/MenuItem) 至少给一个。返回里的 ref 是元素稳定引用, 后面 ui_click/ui_set/ui_read 直接传 ref= 复用, 不会漂移; i 仅本次响应内有效, 跨调用必须重查。先 find 拿 ref 再 click/set',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -267,12 +272,13 @@ const TOOLS = [
   },
   {
     name: 'ui_read',
-    description: '读单个控件详情（名称/值/类型/矩形）。定位: i=ui_tree 下标 或 name=控件名',
+    description: '读单个控件详情（名称/值/类型/矩形）。定位: ref=元素稳定引用(推荐) / i=ui_tree 下标 / name=控件名',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         title: { type: 'string' }, hwnd: { type: 'number' },
-        i: { type: 'number' }, name: { type: 'string' }
+        i: { type: 'number' }, name: { type: 'string' },
+        ref: { type: 'string', description: '元素稳定引用 (ui_find/ui_tree 返回的 ref), 优先于 i/name, 不漂移' }
       }
     }
   },
@@ -286,12 +292,13 @@ const TOOLS = [
   },
   {
     name: 'ui_set',
-    description: '语义写值到输入控件（ValuePattern 直写，不模拟键盘，稳且快）。定位: i=ui_tree 下标 或 name=控件名',
+    description: '语义写值到输入控件（ValuePattern 直写，不模拟键盘，稳且快）。定位: ref=元素稳定引用(推荐) / i=ui_tree 下标 / name=控件名',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         title: { type: 'string' }, hwnd: { type: 'number' },
         i: { type: 'number' }, name: { type: 'string' },
+        ref: { type: 'string', description: '元素稳定引用 (ui_find/ui_tree 返回的 ref), 优先于 i/name, 不漂移' },
         value: { type: 'string' }
       },
       required: ['value']
@@ -354,6 +361,38 @@ const TOOLS = [
         reverse: { type: 'number', description: '0|1 反向' }
       }
     }
+  },
+  // ---- SKILL 手册 (强制闸门的唯一入口, 必须暴露给客户端, 否则死锁) ----
+  {
+    name: 'get_skill',
+    description: '【必须先调用】获取本服务 SKILL 操作手册（铁律/避坑/黄金路径）。本服务强制闸门: 首次调用任何工具前必须先读本 SKILL, 否则一律报错。踩坑必须用 update_skill 写回共享手册, 不要只写进自己的记忆。',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} }
+  },
+  {
+    name: 'update_skill',
+    description: '【踩坑必写】把新踩的坑写回共享 SKILL.md（全体 agent 共享, 下次 get_skill 立即生效）。title=小节标题, entry=markdown 正文',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        title: { type: 'string' },
+        entry: { type: 'string' }
+      },
+      required: ['title', 'entry']
+    }
+  },
+  // ---- 托盘/隐藏窗口 (托盘应用窗口失踪时用) ----
+  {
+    name: 'tray_click',
+    description: '点击系统托盘/任务栏图标。用途: 托盘应用(如 ZCode/微信类 Electron 应用)进程活着但窗口失踪时, 双击托盘图标唤回主窗。name=图标名(含糊匹配, 主区找不到会自动展开溢出区找), button=left(默认)/right, double=1 双击(多数托盘应用双击=打开主窗口, 单击可能只弹预览)。点击后必须重新采样验证: window_info(process=应用进程名) 或 win_manage(action=listall)。',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        name: { type: 'string', description: '图标名, 如 ZCode' },
+        button: { type: 'string', description: 'left(默认)/right' },
+        double: { type: 'number', description: '1=双击(推荐, 打开主窗)' }
+      },
+      required: ['name']
+    }
   }
 ];
 
@@ -400,8 +439,9 @@ function buildUrl(name, a) {
       // 服务端 /win/ 分支只认 max|min (见 shot-service.cs), 这里做同义映射,
       // 让 agent 写 maximize/minimize 也能正常用, 否则会 404 unknown verb
       const VERB = { maximize: 'max', minimize: 'min' };
-      const act = VERB[a.action] || a.action || 'activate';
+      const act = VERB[a.verb || a.action] || a.verb || a.action || 'activate';
       let qs = [];
+      if (a.hwnd !== undefined) qs.push('hwnd=' + enc(a.hwnd));
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.x !== undefined) qs.push('x=' + a.x);
       if (a.y !== undefined) qs.push('y=' + a.y);
@@ -470,10 +510,13 @@ function buildUrl(name, a) {
       let qs = [];
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
+      if (a.ref) qs.push('ref=' + enc(a.ref));
       if (a.i !== undefined) qs.push('i=' + a.i);
       if (a.name) qs.push('name=' + enc(a.name));
       if (a.type) qs.push('type=' + enc(a.type));
       if (a.mode) qs.push('mode=' + enc(a.mode));
+      if (a.nohit !== undefined) qs.push('nohit=' + enc(a.nohit));
+      if (a.verify !== undefined) qs.push('verify=' + enc(a.verify));
       return { path: '/ui/click', qs };
     }
     case 'ui_find': {
@@ -486,6 +529,7 @@ function buildUrl(name, a) {
     }
     case 'ui_select': {
       let qs = [];
+      if (a.ref) qs.push('ref=' + enc(a.ref));
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
       if (a.i !== undefined) qs.push('i=' + a.i);
@@ -495,6 +539,7 @@ function buildUrl(name, a) {
     }
     case 'ui_read': {
       let qs = [];
+      if (a.ref) qs.push('ref=' + enc(a.ref));
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
       if (a.i !== undefined) qs.push('i=' + a.i);
@@ -509,6 +554,7 @@ function buildUrl(name, a) {
     }
     case 'ui_set': {
       let qs = [];
+      if (a.ref) qs.push('ref=' + enc(a.ref));
       if (a.title !== undefined) qs.push('title=' + enc(a.title));
       if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
       if (a.i !== undefined) qs.push('i=' + a.i);
@@ -578,7 +624,7 @@ async function callTool(name, args) {
   }
   // 强制闸门：所有工具（含观察类）首次调用前必须先读 SKILL
   if (!guideRead) {
-    return { isError: true, content: [{ type: 'text', text: '⚠️ 本服务强制要求：首次操作前必须先调用 get_skill 获取 SKILL 操作手册与安全纪律（点前定位 / 语义优先 / 输入前确认前台 / 操作后验证 / 敏感操作确认）。请先调用 get_skill，再重试本工具。踩坑后请用 update_skill 把经验写回共享 SKILL.md。' }] };
+    return { isError: true, content: [{ type: 'text', text: '⚠️ 本服务强制要求：首次操作前必须先调用 get_skill（该工具已在工具清单中, 直接调用即可, 无参数）获取 SKILL 操作手册与安全纪律（点前定位 / 语义优先 / 输入前确认前台 / 操作后验证 / 敏感操作确认）。请先调用 get_skill，再重试本工具。踩坑后请用 update_skill 把经验写回共享 SKILL.md。' }] };
   }
   const u = buildUrl(name, args);
   if (!u) return { isError: true, content: [{ type: 'text', text: 'unknown tool: ' + name }] };

@@ -81,11 +81,62 @@ partial class ShotService
         return cur;
     }
 
+    // 冻结修复用: 窗口放置状态
+    [StructLayout(LayoutKind.Sequential)]
+    struct WpRect { public int left, top, right, bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct WINDOWPLACEMENT
+    {
+        public uint length; public uint flags; public uint showCmd;
+        public System.Drawing.Point ptMinPosition, ptMaxPosition; public WpRect rcNormalPosition;
+    }
+    [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT lpwndpl);
+    [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT lpwndpl);
+    [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr lprc, IntPtr hrgn, uint flags);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")] static extern IntPtr GetWindowLongPtr64(IntPtr h, int nIndex);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")] static extern IntPtr SetWindowLongPtr64(IntPtr h, int nIndex, IntPtr dwNewLong);
+    const int GWL_STYLE = -16;
+    const long WS_VISIBLE = 0x10000000L, WS_EX_TRANSPARENT = 0x20L, WS_EX_NOACTIVATE = 0x08000000L;
+    const uint RDW_INVALIDATE = 0x0001, RDW_UPDATENOW = 0x0100, RDW_ALLCHILDREN = 0x0080, RDW_FRAME = 0x0400;
+
+    // 唤回窗口并真正解冻。外部硬 ShowWindow 显示 Electron 隐藏窗, 应用内部状态常常没同步:
+    // 残留 WS_EX_TRANSPARENT(鼠标穿透, 看得见点不动) / WS_EX_NOACTIVATE / 缺 WS_VISIBLE / 放置状态还是隐藏。
     static string WinActivate(IntPtr h)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
-        if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
-        ShowWindow(h, SW_SHOW);
+        bool wasHidden = !IsWindowVisible(h);
+        bool wasIconic = IsIconic(h);
+        var fixes = new List<string>();
+
+        // 1) 清掉"看得见点不动"的样式残留
+        try
+        {
+            long exv = GetWindowLongPtr64(h, GWL_EXSTYLE).ToInt64();
+            long remove = 0;
+            if ((exv & WS_EX_TRANSPARENT) != 0) { remove |= WS_EX_TRANSPARENT; fixes.Add("cleared_WS_EX_TRANSPARENT(鼠标穿透,点不动的主因)"); }
+            if ((exv & WS_EX_NOACTIVATE) != 0) { remove |= WS_EX_NOACTIVATE; fixes.Add("cleared_WS_EX_NOACTIVATE(拒绝激活)"); }
+            if (remove != 0) SetWindowLongPtr64(h, GWL_EXSTYLE, new IntPtr(exv & ~remove));
+            long st = GetWindowLongPtr64(h, GWL_STYLE).ToInt64();
+            if ((st & WS_VISIBLE) == 0) { SetWindowLongPtr64(h, GWL_STYLE, new IntPtr(st | WS_VISIBLE)); fixes.Add("added_WS_VISIBLE"); }
+        }
+        catch { }
+
+        // 2) 用 SetWindowPlacement 恢复: 走应用自己的窗口过程, 比裸 ShowWindow 更容易让内部状态跟上
+        if (wasHidden || wasIconic)
+        {
+            try
+            {
+                WINDOWPLACEMENT wp = new WINDOWPLACEMENT();
+                wp.length = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+                if (GetWindowPlacement(h, ref wp)) { wp.showCmd = 1; wp.flags = 0; SetWindowPlacement(h, ref wp); fixes.Add("SetWindowPlacement(SW_SHOWNORMAL)"); }
+            }
+            catch { }
+            ShowWindow(h, SW_RESTORE);
+            ShowWindow(h, SW_SHOW);
+        }
+        // 3) 强制重绘解冻 (不重绘的话画面可能是旧帧, 像冻住)
+        try { RedrawWindow(h, IntPtr.Zero, IntPtr.Zero, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_FRAME); } catch { }
+
         bool ok = SetForegroundWindow(h);
         string via = "direct";
         if (!ok)
@@ -108,8 +159,17 @@ partial class ShotService
             keybd_event(0x12, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
             via = "alt";
         }
-        Log("win activate: " + h + " ok=" + ok + " via=" + via);
-        return "{\"ok\":true,\"activated\":" + (ok ? "true" : "false") + ",\"via\":\"" + via + "\"}";
+        Log("win activate: " + h + " ok=" + ok + " via=" + via + " fixes=" + string.Join("|", fixes.ToArray()));
+        Thread.Sleep(250);
+        IntPtr nowFg = GetForegroundWindow();
+        bool front = nowFg == h;
+        string fixStr = fixes.Count > 0 ? ",\"fixes\":[\"" + string.Join("\",\"", fixes.ToArray()) + "\"]" : "";
+        string warn = "";
+        if (!front)
+            warn = ",\"warn\":\"激活后前台窗口不是它(当前前台 hwnd=" + nowFg.ToInt64() + ") — 这次唤回是假的, 点它会没反应。换 tray_click 走应用自身恢复, 或关掉重开\"";
+        else if (wasHidden)
+            warn = ",\"warn\":\"这个窗口激活前是隐藏态。已清穿透样式+强制重绘, 若仍点不动: 用 tray_click 双击托盘图标让应用自己恢复, 或关闭重开(隐藏态唤回的应用内部状态可能没跟上)\"";
+        return "{\"ok\":true,\"activated\":" + (ok ? "true" : "false") + ",\"via\":\"" + via + "\",\"foreground\":" + (front ? "true" : "false") + ",\"wasHidden\":" + (wasHidden ? "true" : "false") + fixStr + warn + "}";
     }
 
     static string WinShow(IntPtr h, int cmd, string name)
@@ -520,6 +580,7 @@ partial class ShotService
                           "\",\"enabled\":" + (en ? "true" : "false") + ",\"focused\":" + (focused ? "true" : "false") +
                           ",\"value\":" + (val == null ? "null" : "\"" + JsonEscape(val) + "\"") +
                           ",\"rect\":{\"x\":" + (int)r2.X + ",\"y\":" + (int)r2.Y + ",\"w\":" + (int)r2.Width + ",\"h\":" + (int)r2.Height + "}" +
+                          ",\"ref\":\"" + RefOf(e) + "\",\"pid\":" + PidOf(e) +
                           ",\"patterns\":\"" + JsonEscape(string.Join(",", pats.ToArray())) + "\"}");
             }
             return "{\"ok\":true,\"hwnd\":" + h.ToInt64() + ",\"count\":" + n + (all.Count > n ? ",\"truncated\":true" : "") +
@@ -531,8 +592,71 @@ partial class ShotService
         }
     }
 
+    // ===== 元素稳定引用 ref (对标 ZCode CUA 的 el.ref) =====
+    // 索引 i 跨调用必漂移, 坐标靠模型目视必偏; ref 取 UIA RuntimeId —— 同一元素在窗口生命周期内不变。
+    // 命中 ref 缓存直接复用元素对象, 不再重新遍历, 也就没有"点到隔壁"的可能。
+    static Dictionary<string, System.Windows.Automation.AutomationElement> UiRefCache =
+        new Dictionary<string, System.Windows.Automation.AutomationElement>();
+    static object UiRefLock = new object();
+
+    static string RefOf(System.Windows.Automation.AutomationElement e)
+    {
+        try
+        {
+            int[] rid = e.GetRuntimeId();
+            if (rid != null && rid.Length > 0)
+            {
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < rid.Length; i++) { if (i > 0) sb.Append('.'); sb.Append(rid[i]); }
+                string r = sb.ToString();
+                lock (UiRefLock) { UiRefCache[r] = e; }
+                return r;
+            }
+        }
+        catch { }
+        return "";
+    }
+
+    static int PidOf(System.Windows.Automation.AutomationElement e)
+    {
+        try { return e.Current.ProcessId; } catch { return 0; }
+    }
+
+    // 落点归属校验 (对标 ZCode CUA 的 assertClickElementOwnerPid): 坐标点击前先用 hit-test 看这个位置
+    // 真正命中谁。命中元素不属于目标进程 = 目标被别的窗口盖住, 点了会落到别人身上 —— 直接拒绝, 不静默乱点。
+    static string HitGuard(int x, int y, System.Windows.Automation.AutomationElement target, Dictionary<string, string> q)
+    {
+        if (q.ContainsKey("nohit") && q["nohit"] == "1") return "";
+        int want = PidOf(target);
+        System.Windows.Automation.AutomationElement hit = null;
+        try { hit = System.Windows.Automation.AutomationElement.FromPoint(new System.Windows.Point(x, y)); } catch { }
+        if (hit == null) return "";
+        int hp = PidOf(hit);
+        string hn = "";
+        try { hn = hit.Current.Name ?? ""; } catch { }
+        if (want <= 0 || hp <= 0 || hp == want) return "";
+        return "{\"ok\":false,\"blocked\":true,\"error\":\"落点归属校验失败: 坐标 " + x + "," + y +
+               " 实际命中 pid=" + hp + " 的元素 '" + JsonEscape(hn) + "', 目标元素属于 pid=" + want +
+               " —— 目标被别的窗口盖住了, 这一下会点到别人身上(已拦下没点)。先 win_manage activate 把目标窗口置前, 再 ui_find 重新采样 ref\"}";
+    }
+
     static System.Windows.Automation.AutomationElement UiElement(Dictionary<string, string> q)
     {
+        // ref 优先: ui_find/ui_tree 返回的 ref 直达元素, 不需要 hwnd 也不需要重新遍历
+        string refId = q.ContainsKey("ref") ? q["ref"] : "";
+        if (refId != "")
+        {
+            lock (UiRefLock)
+            {
+                System.Windows.Automation.AutomationElement cached;
+                if (UiRefCache.TryGetValue(refId, out cached) && cached != null)
+                {
+                    try { string _t = cached.Current.Name; return cached; }
+                    catch { UiRefCache.Remove(refId); }
+                }
+            }
+            return null; // ref 失效(元素被销毁/窗口重建) — 调用方要重新 ui_find
+        }
         string hwndStr = UiResolveHwnd(q);
         if (hwndStr == null) return null;
         IntPtr h = new IntPtr(long.Parse(hwndStr));
@@ -598,7 +722,8 @@ partial class ShotService
                 if (r2.X < -30000 || r2.Width < 0) r2 = new System.Windows.Rect(0, 0, 0, 0);
                 items.Add("{\"i\":" + i + ",\"name\":\"" + JsonEscape(en) + "\",\"type\":\"" + JsonEscape(ct) +
                           "\",\"enabled\":" + (enb ? "true" : "false") +
-                          ",\"rect\":{\"x\":" + (int)r2.X + ",\"y\":" + (int)r2.Y + ",\"w\":" + (int)r2.Width + ",\"h\":" + (int)r2.Height + "}}");
+                          ",\"rect\":{\"x\":" + (int)r2.X + ",\"y\":" + (int)r2.Y + ",\"w\":" + (int)r2.Width + ",\"h\":" + (int)r2.Height + "}" +
+                          ",\"ref\":\"" + RefOf(e) + "\",\"pid\":" + PidOf(e) + "}");
             }
             return "{\"ok\":true,\"name\":\"" + JsonEscape(nm) + "\",\"type\":\"" + JsonEscape(typeFilter) + "\",\"count\":" + items.Count + ",\"elements\":[" + string.Join(",", items.ToArray()) + "]}";
         }
@@ -651,6 +776,40 @@ partial class ShotService
         catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; }
     }
 
+    // 元素区域像素指纹(MD5): 点击前后对比, 解决 "点了但界面没变化" 的静默失败
+    static string RegionHashOf(System.Windows.Automation.AutomationElement e)
+    {
+        try
+        {
+            var r = e.Current.BoundingRectangle;
+            int x = (int)r.X, y = (int)r.Y, w = (int)r.Width, h = (int)r.Height;
+            if (w <= 0 || h <= 0) return "";
+            using (var bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(x, y, 0, 0, new Size(w, h));
+                using (var ms = new System.IO.MemoryStream())
+                {
+                    bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                    var md5 = System.Security.Cryptography.MD5.Create();
+                    return BitConverter.ToString(md5.ComputeHash(ms.ToArray())).Replace("-", "");
+                }
+            }
+        }
+        catch { return ""; }
+    }
+
+    // verify=1 时的附加返回: changed=点击前后界面是否真的变了
+    static string VerifyExtra(System.Windows.Automation.AutomationElement e, string before)
+    {
+        if (before == "") return "";
+        Thread.Sleep(400);
+        string after = RegionHashOf(e);
+        bool changed = after != "" && after != before;
+        return ",\"verify\":{\"changed\":" + (changed ? "true" : "false") + ",\"before\":\"" + before + "\",\"after\":\"" + after + "\"}"
+             + (changed ? "" : ",\"warn\":\"点了但界面像素没变(可能被遮挡/应用不响应 UIA/窗口没真激活/元素位置已漂移) — 改 mode=coord 真实鼠标点, 或先 win_manage activate 真正激活窗口, 再重采样确认元素还在原位\"");
+    }
+
     static string UiClick(Dictionary<string, string> q)
     {
         try
@@ -659,16 +818,26 @@ partial class ShotService
             if (e == null) return "{\"ok\":false,\"error\":\"element not found (bad index or window)\"}";
             string name = "";
             try { name = e.Current.Name ?? ""; } catch { }
+            string elRef = RefOf(e);
+            int elPid = PidOf(e);
+            // 名字校验: 请求 name 与点中的元素名对不上 = 点偏了(实测 i 漂移后点中别的控件还返回 ok)
+            string reqName = q.ContainsKey("name") ? q["name"] : "";
+            if (reqName != "" && name.IndexOf(reqName, StringComparison.OrdinalIgnoreCase) < 0)
+                return "{\"ok\":false,\"error\":\"定位校验失败: 要点的 name='" + JsonEscape(reqName) + "', 实际点中的是 '" + JsonEscape(name) + "' (i 跨调用会漂移, 请改用 name= 定位)\"}";
+            bool doVerify = q.ContainsKey("verify") && q["verify"] == "1";
+            string hashBefore = doVerify ? RegionHashOf(e) : "";
             bool forceCoord = q.ContainsKey("mode") && q["mode"] == "coord";
             if (forceCoord)
             {
                 System.Windows.Rect rf = e.Current.BoundingRectangle;
                 int fx = (int)(rf.X + rf.Width / 2), fy = (int)(rf.Y + rf.Height / 2);
+                string guard = HitGuard(fx, fy, e, q);
+                if (guard != "") return guard;
                 SetCursorPos(fx, fy);
                 Thread.Sleep(60);
                 MouseClick("left", 1);
                 Log("ui click coord(forced): " + name + " @ " + fx + "," + fy);
-                return "{\"ok\":true,\"via\":\"coord\",\"forced\":true,\"x\":" + fx + ",\"y\":" + fy + ",\"name\":\"" + JsonEscape(name) + "\"}";
+                return "{\"ok\":true,\"via\":\"coord\",\"forced\":true,\"x\":" + fx + ",\"y\":" + fy + ",\"name\":\"" + JsonEscape(name) + "\",\"ref\":\"" + elRef + "\",\"pid\":" + elPid + VerifyExtra(e, hashBefore) + "}";
             }
             // 优先语义模式
             object pat;
@@ -677,7 +846,7 @@ partial class ShotService
                 ((System.Windows.Automation.InvokePattern)pat).Invoke();
                 Log("ui click invoke: " + name);
                 // 2026-09-07: 微信「进入微信」按钮 invoke 返回成功但界面毫无变化 — invoke 成功 ≠ 真的点了
-                return "{\"ok\":true,\"via\":\"invoke\",\"name\":\"" + JsonEscape(name) + "\",\"warn\":\"invoke 成功不代表界面已变化(部分应用如微信不响应 UIA Invoke)。若界面无变化, 用 ui_find 拿 rect 后 mouse_click 中心, 或 ui_click 传 mode=coord\"}";
+                return "{\"ok\":true,\"via\":\"invoke\",\"name\":\"" + JsonEscape(name) + "\",\"ref\":\"" + elRef + "\",\"pid\":" + elPid + ",\"warn\":\"invoke 成功不代表界面已变化(部分应用如微信不响应 UIA Invoke)。若界面无变化, 用 ui_find 拿 rect 后 mouse_click 中心, 或 ui_click 传 mode=coord\"" + VerifyExtra(e, hashBefore) + "}";
             }
             if (e.TryGetCurrentPattern(System.Windows.Automation.TogglePattern.Pattern, out pat))
             { ((System.Windows.Automation.TogglePattern)pat).Toggle(); Log("ui click toggle: " + name); return "{\"ok\":true,\"via\":\"toggle\",\"name\":\"" + JsonEscape(name) + "\"}"; }
@@ -688,11 +857,13 @@ partial class ShotService
             // 退坐标点击中心
             System.Windows.Rect r2 = e.Current.BoundingRectangle;
             int cx = (int)(r2.X + r2.Width / 2), cy = (int)(r2.Y + r2.Height / 2);
+            string guard2 = HitGuard(cx, cy, e, q);
+            if (guard2 != "") return guard2;
             SetCursorPos(cx, cy);
             Thread.Sleep(60);
             MouseClick("left", 1);
             Log("ui click coord: " + name + " @ " + cx + "," + cy);
-            return "{\"ok\":true,\"via\":\"coord\",\"x\":" + cx + ",\"y\":" + cy + ",\"name\":\"" + JsonEscape(name) + "\"}";
+            return "{\"ok\":true,\"via\":\"coord\",\"x\":" + cx + ",\"y\":" + cy + ",\"name\":\"" + JsonEscape(name) + "\",\"ref\":\"" + elRef + "\",\"pid\":" + elPid + VerifyExtra(e, hashBefore) + "}";
         }
         catch (Exception ex)
         {

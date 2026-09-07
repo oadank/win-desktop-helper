@@ -33,11 +33,13 @@
 
 ```
 1. 找窗口  list_apps() 按 process 名拿 hwnd，或 window_info(title=..., process=...)
-2. 置前    win_manage(action=activate, hwnd=...) → active_window 验证前台确实是它
-3. 找控件  ui_find(hwnd=..., name="按钮/列表项的可见文字") → 拿到精确 rect
+2. 置前    win_manage(action=activate, hwnd=...) → 返回 foreground=true 才算真置前
+3. 找控件  ui_find(hwnd=..., name="按钮/列表项的可见文字") → 拿到 ref + rect
            （找不到就 ui_tree(hwnd=...) 全量枚举看它到底叫什么）
-4. 点      ui_click(hwnd=..., i=下标)
-           ⚠ 若返回 via=invoke 但界面没变化 → 改 mouse_click(rect 中心 x,y)
+4. 点      ui_click(ref=上一步的 ref)                    ← 首选，永不漂移
+           次选 ui_click(hwnd=..., name="可见文字")
+           下策 ui_click(hwnd=..., i=下标)（i 跨调用必漂移，必须同时传 name 校验）
+           ⚠ 若返回 via=invoke 但界面没变化 → 加 verify=1 看界面到底变没变
 5. 验证    ui_tree / window_info / screen_capture 确认界面确实变了
            ⚠ 没变就重新采样状态再定位，禁止同一点连点
 ```
@@ -46,12 +48,18 @@
 
 ## 铁律（违反必踩坑）
 
-1. **点击只用语义定位，禁止用截图估算坐标**：`ui_find` 返回的 rect 是控件真实像素位置，零误差。截图估坐标实测偏 150px（页面缩放），视觉小模型（qwen3-vl 4b）估坐标实测偏 96px——两种都点不中。**截图只用来"看长什么样/确认状态"，不用来"算落点"**
+1. **定位优先级 ref > name > i，截图只用来看状态、绝不用来算落点**
+   - `ref`：`ui_find`/`ui_tree` 返回的元素稳定引用（UIA RuntimeId）。同一元素在窗口存活期内不变，**不会漂移**，且不需要 hwnd/title。拿到 ref 后 `ui_click(ref=...)` / `ui_set(ref=...)` / `ui_read(ref=...)` 直达。ref 失效（元素被销毁/窗口重建）会明确报错，不会静默点错。
+   - `name`：控件可见文字，服务端内部定位并做名字校验，点错会直接报错。
+   - `i`：树下标，**跨调用必漂移**（实测同一输入框 637→644→659→664；点偏到"1轮·21步"还返回 ok）。只有前两者都不可用时才用，且必须同时传 `name` 校验。
+   - 为什么不用截图坐标：截图估坐标实测偏 150px（页面缩放），视觉小模型（qwen3-vl 4b）估坐标实测偏 96px，两种都点不中。**定位交给工具，不要让模型做算术**
 2. **状态必须重新采样，禁止拿旧观察当现状**：窗口句柄会因应用内部换进程而变（微信实测 920778→1968942）；`ui_tree` 的下标 `i` 每次响应都可能变（实测同一输入框 637→644→659→664）；窗口会最小化/被遮挡/被用户关掉。**每次决策前重新 `list_apps`/`ui_find`，不要复用上一步的结果**
 3. **每次操作后必须验证**：点了要确认"界面确实变了"，没变就停下来重新采样，不许连点同一个位置（实测连点 35 次一次没中）
 4. **输入中文一律剪贴板粘贴**：`clipboard_set(text)` → 点击输入框聚焦 → `keyboard_press(keys="ctrl+v")`。别用 `keyboard_type` 打中文（输入法不可靠）；组合键参数名是 `keys`（不是 key/modifiers），写法 `keys="ctrl+v"` / `keys="enter"`
 5. **敏感操作先问**：删除文件、发送消息等在对话里向用户确认；付款不做；改系统设置同样先确认
-6. **遇到"点不动/找不到"**：重新采样状态 → `ui_tree` 看真实控件树 → 再试；仍失败就汇报，别盲试
+6. **坐标点击会自动做落点归属校验**：点之前先 hit-test 看这个坐标真正命中谁，命中的元素不属于目标进程（= 目标被别的窗口盖住）会直接 `blocked:true` 报错并且**不会点下去**。实测：目标 pid=28900，坐标实际命中 pid=17432 的资源管理器，被拦下。看到这个报错就先 `win_manage activate` 把目标窗口置前，再 `ui_find` 重新采样 ref
+7. **"唤回后看得见但点不动"= 假激活**：Electron 类应用（ZCode 实测）被外部硬 `ShowWindow` 显示后，应用内部状态没同步，残留 `WS_EX_TRANSPARENT`（鼠标穿透）。`win_manage activate` 现在会自动清理穿透/拒绝激活样式、补 `WS_VISIBLE`、用 `SetWindowPlacement` 恢复并强制重绘，返回的 `fixes` 数组告诉你动了哪些手脚。若仍点不动：用 `tray_click` 双击托盘图标让应用自己恢复，或关闭重开
+8. **遇到"点不动/找不到"**：重新采样状态 → `ui_tree` 看真实控件树 → 再试；仍失败就汇报，别盲试
 
 ## 常见坑速查
 
@@ -287,3 +295,7 @@ int n = Math.Min(all.Count, max);                                       // 之�
 ### 给所有 agent 的一句话
 
 **要点击，先 `ui_find`；每一次操作前，重新采样；每一次操作后，验证变化。**
+
+## bridge 死锁坑: handler 必须配 schema
+
+mcp-bridge.js 加新工具时, 只写 callTool 的 handler 不够, 必须同步在 TOOLS 数组里加定义(schema), 否则客户端 tools/list 看不到它。2026-09-07 实锤: get_skill/update_skill 有 handler+强制闸门, 但 TOOLS 里没暴露, 客户端永远看不到, 闸门逼它先调一个不存在的工具, 整条链死锁。修法: TOOLS 补 schema + tools/list 实测确认(36 个工具含 get_skill)。
