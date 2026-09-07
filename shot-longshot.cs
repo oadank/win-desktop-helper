@@ -124,11 +124,45 @@ partial class ShotService
                     if ((GetAsyncKeyState(0x1B) & 0x8000) != 0) { cancelled = true; break; }
 
                     byte[] gCur;
-                    using (Bitmap cur = SnapStable(r, out gCur))
+                    byte[] gFull;
+                    Bitmap curFull = SnapStable(r, out gFull);
+                    Bitmap cur = null; bool disposeCur = false;   // cur 若在赋值前抛异常, disposeCur 必为 false
+                    try
                     {
+                        if (mDone)
+                        {   // 已检出固定边条: 一切在内容坐标系 (裁剪后) 进行
+                            cur = curFull.Clone(mRect, curFull.PixelFormat);
+                            gCur = Gray(cur);
+                            disposeCur = true;
+                        }
+                        else
+                        {
+                            gCur = gFull; cur = curFull;
+                            // 有内容在滚 (平均每像素差>0.25, 光标闪烁远达不到) → 先检固定边条。
+                            // 检测必须在"确有滚动"的帧对上做 (静止两帧所有行都像固定)。
+                            // 必须在匹配前做: 选区含窗口 chrome 时, 全帧匹配的顶带拿固定工具栏行比文字行, 永远失败。
+                            if (GrayAbsDiff(gPrev, gCur) > gCur.Length / 4)
+                            {
+                                DetectFixedMargins(gPrev, gCur, W, H, out mTop, out mBot, out mLeft, out mRight);
+                                W2 = W - mLeft - mRight; H2 = H - mTop - mBot;
+                                mRect = new Rectangle(mLeft, mTop, W2, H2);
+                                var nc = vert ? NewCanvas(W, H * 4) : NewCanvas(W * 4, H);
+                                using (var gb = Graphics.FromImage(nc))
+                                    gb.DrawImage(f0Keep, new Rectangle(0, 0, W2, H2), mRect, GraphicsUnit.Pixel);
+                                canvas.Dispose(); canvas = nc;
+                                head = 0; filled = vert ? H2 : W2;
+                                gPrev = CropGray(gPrev, W, H, mRect);
+                                gCur = CropGray(gCur, W, H, mRect);
+                                cur = curFull.Clone(mRect, curFull.PixelFormat);
+                                disposeCur = true;
+                                mDone = true;
+                                f0Keep.Dispose(); f0Keep = null;
+                                Log("[ls] fixed margins t=" + mTop + " b=" + mBot + " l=" + mLeft + " r=" + mRight);
+                            }
+                        }
                         int o; bool fwd;   // 纵向: fwd=内容上移(新内容在cur底部) / 横向: fwd=内容左移(新内容在cur右部)
-                        if (vert) o = MatchMove(gPrev, gCur, W, H, lastO, out fwd);
-                        else o = MatchMoveH(gPrev, gCur, W, H, lastO, out fwd);
+                        if (vert) o = MatchMove(gPrev, gCur, W2, H2, lastO, out fwd);
+                        else o = MatchMoveH(gPrev, gCur, W2, H2, lastO, out fwd);
                         if (o <= 0)
                         {
                             stall++;
@@ -140,27 +174,14 @@ partial class ShotService
                         }
                         stall = 0; lastProgress = DateTime.Now; lastO = o; screens++;
 
-                        // 首次有效滚动: 检出固定边条, 画布基底换成裁剪过的首帧, 之后只拼滚动区。
-                        // 检测必须在"确有滚动"的帧对上做 (静止两帧所有行都像固定), 所以挂在 o>0 这里。
-                        if (!mDone)
-                        {
-                            DetectFixedMargins(gPrev, gCur, W, H, out mTop, out mBot, out mLeft, out mRight);
-                            W2 = W - mLeft - mRight; H2 = H - mTop - mBot;
-                            mRect = new Rectangle(mLeft, mTop, W2, H2);
-                            var nc = vert ? NewCanvas(W, H * 4) : NewCanvas(W * 4, H);
-                            using (var gb = Graphics.FromImage(nc))
-                                gb.DrawImage(f0Keep, new Rectangle(0, 0, W2, H2), mRect, GraphicsUnit.Pixel);
-                            canvas.Dispose(); canvas = nc;
-                            head = 0; filled = vert ? H2 : W2;
-                            mDone = true;
-                            f0Keep.Dispose(); f0Keep = null;
-                            Log("[ls] fixed margins t=" + mTop + " b=" + mBot + " l=" + mLeft + " r=" + mRight);
-                        }
-                        Bitmap cur2 = mRect.IsEmpty ? cur : cur.Clone(mRect, cur.PixelFormat);
-                        canvas = StitchFrame(canvas, cur2, vert, fwd, o, ref head, ref filled);
-                        cur2.Dispose();
+                        canvas = StitchFrame(canvas, cur, vert, fwd, o, ref head, ref filled);
                         gPrev = gCur;
                         st.Update(canvas, head, filled, screens, vert, W2, H2);
+                    }
+                    finally
+                    {
+                        curFull.Dispose();
+                        if (disposeCur) cur.Dispose();
                     }
                 }
                 else
@@ -297,32 +318,51 @@ partial class ShotService
                 if (vert) MouseScroll(dirSign > 0 ? -240 : 240);
                 else MouseHScroll(dirSign > 0 ? 240 : -240);
                 Thread.Sleep(300);
-                byte[] gCur;
-                using (Bitmap cur = SnapStable(r, out gCur))
+                byte[] gFull;
+                Bitmap curFull = SnapStable(r, out gFull);
+                Bitmap cur = null; byte[] gCur; bool disposeCur = false;   // cur 若在赋值前抛异常, disposeCur 必为 false
+                try
                 {
+                    if (mDone)
+                    {
+                        cur = curFull.Clone(mRect, curFull.PixelFormat);
+                        gCur = Gray(cur);
+                        disposeCur = true;
+                    }
+                    else
+                    {
+                        gCur = gFull; cur = curFull;
+                        if (GrayAbsDiff(gPrev, gCur) > gCur.Length / 4)
+                        {
+                            DetectFixedMargins(gPrev, gCur, w, h, out mTop, out mBot, out mLeft, out mRight);
+                            W2 = w - mLeft - mRight; H2 = h - mTop - mBot;
+                            mRect = new Rectangle(mLeft, mTop, W2, H2);
+                            var nc = vert ? NewCanvas(w, h * 4) : NewCanvas(w * 4, h);
+                            using (var gb = Graphics.FromImage(nc))
+                                gb.DrawImage(f0Keep, new Rectangle(0, 0, W2, H2), mRect, GraphicsUnit.Pixel);
+                            canvas.Dispose(); canvas = nc;
+                            head = 0; filled = vert ? H2 : W2;
+                            gPrev = CropGray(gPrev, w, h, mRect);
+                            gCur = CropGray(gCur, w, h, mRect);
+                            cur = curFull.Clone(mRect, curFull.PixelFormat);
+                            disposeCur = true;
+                            mDone = true;
+                            f0Keep.Dispose(); f0Keep = null;
+                            Log("[ls] auto fixed margins t=" + mTop + " b=" + mBot + " l=" + mLeft + " r=" + mRight);
+                        }
+                    }
                     bool fwd;
-                    int o = vert ? MatchMove(gPrev, gCur, w, h, lastO, out fwd)
-                                 : MatchMoveH(gPrev, gCur, w, h, lastO, out fwd);
+                    int o = vert ? MatchMove(gPrev, gCur, W2, H2, lastO, out fwd)
+                                 : MatchMoveH(gPrev, gCur, W2, H2, lastO, out fwd);
                     if (o <= 0) { gPrev = gCur; if (++stall >= 6) break; continue; }   // 到头/没反应
                     stall = 0; lastO = o; screens++;
-                    if (!mDone)
-                    {
-                        DetectFixedMargins(gPrev, gCur, w, h, out mTop, out mBot, out mLeft, out mRight);
-                        W2 = w - mLeft - mRight; H2 = h - mTop - mBot;
-                        mRect = new Rectangle(mLeft, mTop, W2, H2);
-                        var nc = vert ? NewCanvas(w, h * 4) : NewCanvas(w * 4, h);
-                        using (var gb = Graphics.FromImage(nc))
-                            gb.DrawImage(f0Keep, new Rectangle(0, 0, W2, H2), mRect, GraphicsUnit.Pixel);
-                        canvas.Dispose(); canvas = nc;
-                        head = 0; filled = vert ? H2 : W2;
-                        mDone = true;
-                        f0Keep.Dispose(); f0Keep = null;
-                        Log("[ls] auto fixed margins t=" + mTop + " b=" + mBot + " l=" + mLeft + " r=" + mRight);
-                    }
-                    Bitmap cur2 = mRect.IsEmpty ? cur : cur.Clone(mRect, cur.PixelFormat);
-                    canvas = StitchFrame(canvas, cur2, vert, fwd, o, ref head, ref filled);
-                    cur2.Dispose();
+                    canvas = StitchFrame(canvas, cur, vert, fwd, o, ref head, ref filled);
                     gPrev = gCur;
+                }
+                finally
+                {
+                    curFull.Dispose();
+                    if (disposeCur) cur.Dispose();
                 }
             }
             if (f0Keep != null) f0Keep.Dispose();
@@ -373,6 +413,15 @@ partial class ShotService
         long s = 0;
         for (int i = 0; i < a.Length; i++) s += Math.Abs(a[i] - b[i]);
         return s;
+    }
+
+    // 裁剪灰度帧 (固定边条检出后, 一切匹配在内容坐标系进行)
+    static byte[] CropGray(byte[] g, int w, int h, Rectangle r)
+    {
+        var outp = new byte[r.Width * r.Height];
+        for (int y = 0; y < r.Height; y++)
+            Buffer.BlockCopy(g, (r.Y + y) * w + r.X, outp, y * r.Width, r.Width);
+        return outp;
     }
 
     // ============ 固定边条检测 (2026-09-08 老大实测: 选区含记事本状态栏时, 每条接缝都烤进一条状态栏) ============
