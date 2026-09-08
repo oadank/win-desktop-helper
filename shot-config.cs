@@ -289,7 +289,7 @@ partial class ShotService
         CheckBox pickEn = mkC(pgPick); pickEn.Text = "启用划词悬浮球 (选中文字后光标旁出现小点)"; pickEn.Left = LX; pickEn.Top = 14; pickEn.AutoSize = true;
         pickEn.Checked = d["pick.enabled"] == "1";
         mkDim(pgPick, "小点: 划过停留 300ms 展开工具条 (翻译 / 问AI / 复制); 直接点 = 立即翻译。全程不抢焦点", LX, 44);
-        mkDim(pgPick, "取词两级: UIA 选区(无副作用) → 剪贴板兜底(发一次全局 Ctrl+C, 有安全阀防投错窗口)", LX, 64);
+        mkDim(pgPick, "取词: UIA 选区(无副作用) → 选区截图 OCR(全局生效: 浏览器/终端/图片, 零按键零剪贴板)", LX, 64);
         mkL(pgPick, "问AI 地址:", LX, 100);
         TextBox pkEp = mkT(pgPick); pkEp.Left = FX; pkEp.Top = 97; pkEp.Width = FW; pkEp.Text = d["pick.askEndpoint"];
         mkL(pgPick, "模型名:", LX, 132);
@@ -300,10 +300,10 @@ partial class ShotService
         pkShow.ForeColor = cDim; pkShow.Font = new Font("Microsoft YaHei UI", 9f);
         pkShow.CheckedChanged += (s, e) => { pkKey.PasswordChar = pkShow.Checked ? '\0' : '*'; };
         mkDim(pgPick, "翻译引擎沿用「翻译」页的设置; 问AI 默认走本机 litellm 网关(:4000)", LX, 196);
-        mkL(pgPick, "用户偏好(每次问AI都生效的习惯, 如\"全程中文\"\"我是后端用术语\"; 留空=只用内置人设):", LX, 226);
+        mkL(pgPick, "用户偏好(每次问AI都生效的习惯; 留空=只用内置人设):", LX, 226);
         TextBox pkPrompt = new TextBox();
         pkPrompt.Multiline = true;
-        pkPrompt.Left = FX; pkPrompt.Top = 223; pkPrompt.Width = PW - FX - 8; pkPrompt.Height = 88;
+        pkPrompt.Left = FX; pkPrompt.Top = 248; pkPrompt.Width = PW - FX - 8; pkPrompt.Height = 66;
         pkPrompt.BackColor = cField; pkPrompt.ForeColor = cText; pkPrompt.BorderStyle = BorderStyle.FixedSingle;
         pkPrompt.Font = new Font("Microsoft YaHei UI", 9f);
         pkPrompt.Text = d["pick.askPrompt"];

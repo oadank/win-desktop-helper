@@ -32,6 +32,8 @@ partial class ShotService
     static int pickBusy = 0;
     static int pickLastX, pickLastY;
     static Form pickDot, pickCard;
+    static int pickSlowUntil = -10000;   // UIA 慢目标退避deadline(TickCount): 窗口内不发单击取词
+    static int pickRClickUntil = -10000; // 右键让路窗口: 右键按下后短暂暂停单击取词(不和右键菜单抢目标UI线程)
 
     // ---- 生命周期: 专属 STA 线程(剪贴板要求) ----
     static void PickInit()
@@ -74,6 +76,8 @@ partial class ShotService
             if (msg == PICK_DOWN || msg == PICK_UP || msg == PICK_RBUTTONDOWN ||
                 msg == PICK_RBUTTONUP || msg == PICK_WHEEL || msg == PICK_MOVE)
                 pickUserAct = Environment.TickCount;
+            if (msg == PICK_RBUTTONDOWN)
+            { pickRClickUntil = Environment.TickCount + 1500; return; }   // 右键让路: 1.5s 内不发起单击取词
             if (msg == PICK_WHEEL)
             {
                 // 悬浮窗永远免激活没焦点, 子控件收不到 WM_MOUSEWHEEL —— 滚轮由钩子喂给卡片正文
@@ -143,17 +147,21 @@ partial class ShotService
                 if (pickDownOnCard) { int px0 = pickX0, py0 = pickY0; s.BeginInvoke(new MethodInvoker(delegate { PickCardUp(px0, py0, ux, uy); })); return; }
                 // 差一点没点到小点/工具条(26px 的目标手抖就 miss, 老逻辑一 miss 就整组消失 =
                 // 老大说的"鼠标点击的时候它消失"): 容差内当作点中小点 -> 展开工具条。
-                if (PickNear(PickDotRect, ux, uy, PICK_TOL) && !pickExpanded)
+                if (PickNear(PickDotRect, ux, uy, PICK_TOL_MISS) && !pickExpanded)
                 {
                     s.BeginInvoke(new MethodInvoker(delegate { PickDotActivated(); }));
                     return;
                 }
+                // 已经有选词元素在屏上(点/工具条/卡片): 点空白 = 纯取消, 绝不再发起单击取词
+                // (单击取词对底层窗口发 UIA, 慢目标挂 700ms+ —— 老大实测"点空白取消反而卡")
+                if (PickDotRect != null || pickBarWin != null || pickCard != null)
+                { s.BeginInvoke(new MethodInvoker(delegate { PickDismiss(); })); return; }
                 if (PickNear(PickBarRect, ux, uy, PICK_TOL) || PickNear(PickCardRect, ux, uy, PICK_TOL) ||
                     PickNear(PickAskRect, ux, uy, PICK_TOL)) return;   // 贴着元素: 不动它
                 // 这一下是"顺手关掉提问框"(DOWN 时它还开着): 不再二次触发取词
                 if (askJustClosed) return;
                 // 单击别处: 也弹悬浮球(见 PickHandleAsync click 模式 —— 只读 UIA 现有选区, 绝不发 Ctrl+C)
-                s.BeginInvoke(new MethodInvoker(delegate { PickHandleAsync(ux, uy, true); }));
+                s.BeginInvoke(new MethodInvoker(delegate { PickHandleAsync(ux, uy, true, 0, 0); }));
                 return;
             }
             if (pickDownOnCard)
@@ -165,7 +173,12 @@ partial class ShotService
             if (pickDownOnAsk) { pickDownOnAsk = false; return; }               // 提问框里拖选文字: 正常编辑, 不触发取词
             if (askJustClosed) return;                                          // 提问框刚被这一下关掉: 本轮手势不取词
             if (cardWasTouched) return;                                         // 刚在卡片上按住过: 不重复取词
-            s.BeginInvoke(new MethodInvoker(delegate { PickHandle(ux, uy); }));
+            // 松手瞬间出点(2026-09-08 老大: 小点是纯 UI 反馈, 不许等 OCR 推理完才出)。
+            // 但只限真划选: 原地点击(位移<8px)不预出点 —— 否则"没划词也老出点"(老大实测反馈)
+            int mvX = ux - pickX0, mvY = uy - pickY0;
+            if (mvX * mvX + mvY * mvY > 8 * 8)
+                s.BeginInvoke(new MethodInvoker(delegate { ShowPickDot(ux, uy); }));
+            s.BeginInvoke(new MethodInvoker(delegate { PickHandle(ux, uy, pickX0, pickY0); }));
         }
         catch { }
     }
@@ -226,7 +239,8 @@ partial class ShotService
         return x >= r[0] && x < r[2] && y >= r[1] && y < r[3];
     }
 
-    const int PICK_TOL = 8;   // 悬浮球只有 26px, 手抖一点就 miss —— 容差内当作点中
+    const int PICK_TOL = 16;  // 悬浮球只有 26px, 手抖一点就 miss —— 容差内当作点中
+    const int PICK_TOL_MISS = 40; // 偏到 40px 内仍算"想点小点" -> 直接展开菜单, 绝不掉进取词路径(UIA 对慢目标能挂 700ms+ = 点快了的"卡")
 
     // 点是否落在矩形内或紧贴其四周(外扩 tol)
     static bool PickNear(int[] r, int x, int y, int tol)
@@ -259,7 +273,7 @@ partial class ShotService
         catch { return ""; }
     }
 
-    static void PickHandle(int x, int y) { PickHandleAsync(x, y, false); }
+    static void PickHandle(int x, int y, int x0, int y0) { PickHandleAsync(x, y, false, x0, y0); }
 
     // ★ 取词绝不能在 UI 线程跑 (2026-09-07 老大: "刚开始跟手, 然后延迟很大, 最后消失了像崩溃")
     //   UIA FromPoint/GetSelection 是跨进程 COM 调用, 目标程序(Chromium/记事本)正忙时会挂几秒到几十秒;
@@ -267,7 +281,7 @@ partial class ShotService
     //   驱动拖动的 Timer 就无法触发 → 拖动滞后、心跳积压、末尾一次性收起 = 看着像卡死。
     //   日志实锤: 19:56:20 点「问AI」, 19:56:49 才出卡片 —— UI 线程被取词占了 29 秒。
     // 这里在 UI 线程只做"取快照 + 丢后台", 取词全在 ThreadPool, 拿到词再 BeginInvoke 回来画小点。
-    static void PickHandleAsync(int x, int y, bool click)
+    static void PickHandleAsync(int x, int y, bool click, int x0, int y0)
     {
         if (Interlocked.Exchange(ref pickBusy, 1) == 1) return;
         try
@@ -276,28 +290,93 @@ partial class ShotService
             IntPtr fgAt = GetForegroundWindow();
             if (click)
             {
-                // 限流: 单击取词是跨进程 UIA COM, 高频点击(连点/双击)会连环发起, 拖慢全系统
+                // 限流: 单击取词是跨进程 UIA COM, 乱点会连环发起拖慢全系统。
+                // 但**双击选词**必须放行: 双击间隔 <300ms 且同位置 —— 吞掉它 = "双击没点"(老大实测),
+                // 之后点别处才把旧选区读出来, 点乱冒。只有"不同位置的快速连点"才节流。
                 int now = Environment.TickCount;
-                if (now - pickLastClickCap < 400) { Interlocked.Exchange(ref pickBusy, 0); return; }
-                pickLastClickCap = now;
+                bool dblClick = (now - pickLastClickCap < 450) && Math.Abs(x - pickLastClickX) < 12 && Math.Abs(y - pickLastClickY) < 12;
+                if (!dblClick && now - pickLastClickCap < 400) { Interlocked.Exchange(ref pickBusy, 0); return; }
+                pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y;
+                if (now < pickRClickUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }   // 右键让路窗口内: 不取词
+                if (now < pickSlowUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }     // 慢目标退避窗口内: 不取词
                 // 目标窗口挂死(UI 未响应)时 UIA 调用会阻塞很久 —— 直接跳过
                 if (fgAt != IntPtr.Zero && IsHungAppWindow(fgAt))
                 { Interlocked.Exchange(ref pickBusy, 0); Log("pick(click): target hung, skip"); return; }
             }
             int actBase = pickUserAct;
-            ThreadPool.QueueUserWorkItem(delegate { PickCaptureWork(x, y, click, fgAt, actBase); });
+            if (!click) pickSel = "";   // 新一轮划选: 清上一轮残留, 文字到位前激活小点=未就绪
+            ThreadPool.QueueUserWorkItem(delegate { PickCaptureWork(x, y, click, fgAt, actBase, x0, y0); });
         }
         catch (Exception ex) { Interlocked.Exchange(ref pickBusy, 0); Log("pick dispatch err: " + ex.Message); }
     }
     static int pickLastClickCap = -10000;
+    static int pickLastClickX, pickLastClickY;   // 上次单击取词位置(判双击: 同位连点放行节流)
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     static extern bool IsHungAppWindow(IntPtr hwnd);
 
+    // ---- 2026-09-08 正式修复: 浏览器(Chromium 系)目标识别 ----
+    // 实锤(老大 A/B 实验: 关划词后右键秒开): 跨进程 UIA 调用会同步霸占浏览器 UI 线程,
+    // 单击取词的三连调用(FromPoint+RangeFromPoint+ExpandToEnclosingUnit)是右键卡 7 秒主凶。
+    // 策略(老大拍板): 浏览器**单击取词一律不发**; 划选取词保留但只有一次 UIA 机会
+    // (300ms 预算, 慢就退避 60s), 且浏览器**绝不走剪贴板兜底**(不发全局 Ctrl+C)。
+    static readonly Dictionary<uint, object[]> pickBrowserCache = new Dictionary<uint, object[]>();   // pid -> [isBrowser, tick]
+    static readonly string[] pickBrowserNames = { "msedge", "msedge_beta", "msedge_dev", "msedgewebview2", "chrome", "chrome_sx", "chromium", "firefox", "brave", "opera", "opera_gx", "vivaldi", "qqbrowser", "360se", "360chrome", "maxthon", "sogouexplorer" };
+    // 终端黑名单 (2026-09-08 老大实测: PowerShell 里选中文本被自动取消 + 移动窗口就蹦 ^C):
+    // conhost 的 UIA provider 被外部查询选区(GetSelection)时会走内部复制路径 = 等于替用户按了一次 Ctrl+C
+    // (有选区→复制并清掉选区; 无选区→^C 中断命令)。终端一律不发起 UIA, 终端划词放弃。
+    static readonly string[] pickTerminalNames = { "conhost", "windowsterminal", "openconsole", "powershell", "pwsh", "cmd", "wt", "wezterm", "alacritty", "hyper" };
+    static readonly System.Collections.Hashtable pickTermCache = new System.Collections.Hashtable();
+
+    static bool PickIsTerminal(IntPtr hwnd)
+    {
+        try
+        {
+            if (hwnd == IntPtr.Zero) return false;
+            uint pid; GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0) return false;
+            lock (pickTermCache)
+            {
+                object[] c; int now = Environment.TickCount;
+                if (pickTermCache.ContainsKey(pid))
+                {
+                    c = (object[])pickTermCache[pid];
+                    if (now - (int)c[1] < 300000) return (bool)c[0];
+                }
+                bool isTerm = false;
+                string n = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
+                foreach (string t in pickTerminalNames) if (n == t) { isTerm = true; break; }
+                pickTermCache[pid] = new object[] { isTerm, Environment.TickCount };
+                return isTerm;
+            }
+        }
+        catch { return false; }
+    }
+    static bool PickIsBrowser(IntPtr hwnd)
+    {
+        try
+        {
+            if (hwnd == IntPtr.Zero) return false;
+            uint pid; GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0) return false;
+            lock (pickBrowserCache)
+            {
+                object[] c; int now = Environment.TickCount;
+                if (pickBrowserCache.TryGetValue(pid, out c) && now - (int)c[1] < 300000) return (bool)c[0];
+            }
+            bool isBrowser = false;
+            string n = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
+            foreach (string b in pickBrowserNames) if (n == b) { isBrowser = true; break; }
+            lock (pickBrowserCache) { pickBrowserCache[pid] = new object[] { isBrowser, Environment.TickCount }; }
+            return isBrowser;
+        }
+        catch { return false; }
+    }
+
     // click=true = 用户只是**单击**(没有划选)。2026-09-07 老大要的"点击时也弹出悬浮球"。
     // 只允许无副作用取词: ①UIA 拿光标所在的那个词(Word 单元) ②退一步读现有选区。
     // **绝不发 Ctrl+C**: 单击不产生选区, 这时全局复制 = 把用户刚点中的输入框里的东西/别处内容当"词"抓走。
-    static void PickCaptureWork(int x, int y, bool click, IntPtr fgAt, int actBase)
+    static void PickCaptureWork(int x, int y, bool click, IntPtr fgAt, int actBase, int x0, int y0)
     {
         string text = "", how = "";
         int t0 = Environment.TickCount;
@@ -305,30 +384,46 @@ partial class ShotService
         {
             if (click)
             {
+                // 浏览器: 单击取词一律不发(单击高频, 三连 UIA 调用是右键卡 7 秒主凶) —— 2026-09-08 老大拍板
+                // 终端: 也不发(conhost 的 UIA GetSelection 有内部 Ctrl+C 副作用, 见 pickTerminalNames 注释)
+                if (PickIsBrowser(fgAt)) { Log("pick(click): browser target, skipped"); return; }
+                if (PickIsTerminal(fgAt)) { Log("pick(click): terminal target, skipped"); return; }
                 try { text = PickWordAtPoint(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia词"; } catch { }
                 if (string.IsNullOrWhiteSpace(text))
                 {
                     try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia选区"; } catch { }
                 }
+                // UIA 慢目标退避: 这个窗口的跨进程 UIA 调用超过 700ms = 它的 UI 线程迟钝,
+                // 继续调用会一直霸占对方 UI 线程(实测: 右键菜单延迟 7 秒) → 30 秒内不再对它单击取词
+                int costMs = Environment.TickCount - t0;
+                if (costMs > 700) { pickSlowUntil = Environment.TickCount + 30000; Log("pick(click): slow UIA target " + costMs + "ms, backoff 30s"); }
                 if (string.IsNullOrWhiteSpace(text)) return;   // 单击空白处(桌面/图片): 不打扰
                 if (text.Trim().Length > 200) text = text.Substring(0, 200);
             }
             else
             {
-                try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
+                // 2026-09-08 定稿(老大终审判决: Ctrl+C 抢剪贴板方案整体作废, "能触发就触发, 不触发是能力问题"):
+                // 真本事路线 —— 本地应用 UIA 优先(无副作用); 拿不到 = **截选区矩形 OCR**。
+                // OCR 全局生效: 浏览器(Chromium 不给 UIA 文本)/终端(conhost UIA 有毒)/图片/PDF 全通吃,
+                // 零按键注入、零剪贴板占用、零副作用。选区矩形 = 钩子 DOWN/UP 坐标(x0,y0)-(x,y)。
+                bool browser = PickIsBrowser(fgAt);
+                bool terminal = PickIsTerminal(fgAt);
+                if (!browser && !terminal)
+                {
+                    try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
+                }
                 if (string.IsNullOrWhiteSpace(text))
                 {
-                    // 剪贴板法会发一次全局 Ctrl+C —— 用户一旦移开指针/换窗, 这次复制就落到别处
-                    // (实测: 划完词顺手点到抖音评论区, 字被"粘贴"进输入框)。安全阀不满足就直接不试。
-                    if (!PickClipboardSafe(actBase, fgAt, x, y))
-                        Log("pick: clipboard fallback skipped (user moved on) — 避免把词投进别的应用");
-                    else
-                    {
-                        try { text = PickTextClipboardSta(actBase, fgAt); if (!string.IsNullOrWhiteSpace(text)) how = "clipboard"; } catch { }
-                    }
+                    try { text = PickOcrRect(x0, y0, x, y); if (!string.IsNullOrWhiteSpace(text)) how = (browser ? "ocr(浏览器)" : (terminal ? "ocr(终端)" : "ocr")); } catch { }
                 }
             }
-            if (string.IsNullOrWhiteSpace(text)) { Log("pick: no text captured (" + (Environment.TickCount - t0) + "ms)"); return; }
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                Log("pick: no text captured (" + (Environment.TickCount - t0) + "ms)");
+                // 松手即出的点还挂着(没等到文字): 收掉, 别留一个永远点不出内容的空点
+                if (!click) { Control s0 = pickSync; if (s0 != null && s0.IsHandleCreated) s0.BeginInvoke(new MethodInvoker(delegate { PickDismiss(); })); }
+                return;
+            }
             text = text.Trim();
             if (text.Length > 2000) text = text.Substring(0, 2000);
             pickSel = text;
@@ -337,7 +432,8 @@ partial class ShotService
             Log("pick" + (click ? "(click)" : "") + ": " + text.Length + " chars via " + how +
                 " in " + (Environment.TickCount - t0) + "ms | " + PickOneLine(text));
             Control s = pickSync;
-            if (s != null && s.IsHandleCreated)
+            // 划选: 点已在松手瞬间出过(UP 处), 这里不重建只挂内容; 单击: 维持原逻辑出点
+            if (s != null && s.IsHandleCreated && (!click || PickDotRect == null))
                 s.BeginInvoke(new MethodInvoker(delegate { ShowPickDot(x, y); }));
         }
         catch (Exception ex) { Log("pick capture err: " + ex.Message); }
@@ -443,67 +539,41 @@ partial class ShotService
         return "";
     }
 
-    // 剪贴板法前置检查: 焦点没换 + 指针还在原地(24px 内) + 用户没敲过鼠标
-    static bool PickClipboardSafe(int actBase, IntPtr fgAt, int x, int y)
+    // ---- 取词 3: OCR 选区截图 (2026-09-08 主力, 老大终审: Ctrl+C 抢剪贴板方案作废) ----
+    // 划选矩形直接 GDI 截屏 → 2x 放大 → OCR。零按键注入、零剪贴板占用、零副作用,
+    // 浏览器/终端/图片/PDF 全局生效。baidu 高精度为主(provider 配置复用截图 OCR), Ollama 兜底。
+    static string PickOcrRect(int x0, int y0, int x1, int y1)
     {
         try
         {
-            if (GetForegroundWindow() != fgAt) return false;
-            if (pickUserAct != actBase)
+            int pad = 4;
+            int lx = Math.Min(x0, x1) - pad, ly = Math.Min(y0, y1) - pad;
+            int w = Math.Abs(x1 - x0) + pad * 2, h = Math.Abs(y1 - y0) + pad * 2;
+            Rectangle vs = System.Windows.Forms.SystemInformation.VirtualScreen;
+            if (lx < vs.X) { w -= vs.X - lx; lx = vs.X; }
+            if (ly < vs.Y) { h -= vs.Y - ly; ly = vs.Y; }
+            if (lx + w > vs.X + vs.Width) w = vs.X + vs.Width - lx;
+            if (ly + h > vs.Y + vs.Height) h = vs.Y + vs.Height - ly;
+            if (w < 8 || h < 6) return "";
+            using (Bitmap raw = new Bitmap(w, h))
             {
-                POINT cur;
-                if (!GetCursorPos(out cur)) return false;
-                int dx = cur.x - x, dy = cur.y - y;
-                if (dx * dx + dy * dy > 24 * 24) return false;
-            }
-            return true;
-        }
-        catch { return false; }
-    }
-
-    // ---- 取词 2: 剪贴板法 (通用兜底, 短暂占用剪贴板后还原) ----
-    // 现在从后台线程调用(PickCaptureWork), WinForms Clipboard 要求 STA —— 单开一条 STA 短线程跑,
-    // 绝不能回 UI 线程跑, 那正是"拖动先跟手后延迟最后像崩溃"的元凶。
-    static string PickTextClipboardSta(int actBase, IntPtr fgAt)
-    {
-        string outText = "";
-        Thread st = new Thread(new ThreadStart(delegate
-        {
-            try { outText = PickTextClipboard(actBase, fgAt); } catch (Exception ex) { Log("pick clipboard sta err: " + ex.Message); }
-        }));
-        st.SetApartmentState(ApartmentState.STA);
-        st.IsBackground = true;
-        st.Start();
-        if (!st.Join(1600)) { Log("pick clipboard sta timeout"); return ""; }
-        return outText ?? "";
-    }
-
-    static string PickTextClipboard(int actBase, IntPtr fgAt)
-    {
-        string result = "";
-        IDataObject backup = null;
-        try { backup = Clipboard.GetDataObject(); } catch { }
-        try
-        {
-            Clipboard.Clear();
-            KeyEvent(0x11, 0, 0);                    // Ctrl down
-            KeyEvent(0x43, 0, 0);                    // C
-            KeyEvent(0x43, 0, KEYEVENTF_KEYUP);
-            KeyEvent(0x11, 0, KEYEVENTF_KEYUP);      // Ctrl up
-            for (int i = 0; i < 25; i++)             // 最多等 500ms
-            {
-                Thread.Sleep(20);
-                // 期间用户换窗/挪指针 = 这次 Ctrl+C 可能已经投到他正在用的输入框 -> 立刻收手
-                if (GetForegroundWindow() != fgAt) { Log("pick clipboard aborted: foreground changed"); break; }
-                try { if (Clipboard.ContainsText()) { result = Clipboard.GetText(); break; } } catch { }
+                using (Graphics g = Graphics.FromImage(raw))
+                    g.CopyFromScreen(lx, ly, 0, 0, new Size(w, h));
+                // 2x 放大: 划选的网页/终端小字, 放大后 OCR 精度明显提升
+                using (Bitmap big = new Bitmap(w * 2, h * 2))
+                {
+                    using (Graphics g2 = Graphics.FromImage(big))
+                    {
+                        g2.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g2.DrawImage(raw, 0, 0, w * 2, h * 2);
+                    }
+                    var task = OcrProvider().RecognizeAsync(big);
+                    if (!task.Wait(9000)) { Log("pick ocr: timeout 9s"); return ""; }
+                    return (task.Result ?? "").Trim();
+                }
             }
         }
-        catch (Exception ex) { Log("pick clipboard err: " + ex.Message); }
-        finally
-        {
-            try { if (backup != null) Clipboard.SetDataObject(backup, true); } catch { }
-        }
-        return result ?? "";
+        catch (Exception ex) { Log("pick ocr err: " + ex.Message); return ""; }
     }
 
     // ---- 小点 / 工具条 / 卡片 ----
@@ -552,11 +622,11 @@ partial class ShotService
                 if (pickOverDot)
                 {
                     if (pickHoverSince < 0) pickHoverSince = Environment.TickCount;
-                    if (Environment.TickCount - pickHoverSince >= 300) { PickDotActivated(); return; }
+                    if (Environment.TickCount - pickHoverSince >= 180) { PickDotActivated(); return; }   // 300ms 太钝, 老大反馈"菜单慢慢的"
                 }
                 else pickHoverSince = -1;
-                // 提问框开着(用户正在打字)时不许超时收起整组
-                if (!pickOverDot && pickAskWin == null && Environment.TickCount - pickShownAt > 4000) PickDismiss();
+                // 提问框开着(用户正在打字)时不许超时收起整组; 划选文字未就绪(OCR 推理中)也不收点
+                if (!pickOverDot && pickAskWin == null && pickSel.Length > 0 && Environment.TickCount - pickShownAt > 4000) PickDismiss();
             }
             Form b = pickBarWin;
             if (b != null && !b.IsDisposed && !pickOverBar && !pickDragging && pickAskWin == null && Environment.TickCount - pickShownAt > 4000) PickDismiss();
@@ -654,6 +724,9 @@ partial class ShotService
 
     static void PickBarFire(string act)
     {
+        // 文字还在后台取词(OCR)没回来: 提示稍候, 不做动作不关菜单
+        if (string.IsNullOrEmpty(pickSel))
+        { Log("pick action " + act + ": text not ready yet"); TrayNotify("还在取词", "文字识别中，一两秒后再点"); return; }
         Log("pick action: " + act);
         PickDismiss();
         if (act == "translate") PickDoTranslate();

@@ -2580,6 +2580,8 @@ partial class ShotService
         {
             DoubleBuffered = true;
             BackColor = Color.FromArgb(40, 41, 46); // 与 StylePopup 弹层同色 (原 26,27,31 近黑 → 与弹层深灰叠出"白黑套色"两层色)
+            // tooltip 字号跟控件 Font 走, 不钉死就会继承父窗体的字体 —— 老大实测提示文字变得很大
+            Font = new Font("Microsoft YaHei UI", 9f);
         }
 
         public Btn Add(string icon, string tipText, Action onClick, bool toggle = false, string[] forTools = null)

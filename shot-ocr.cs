@@ -23,8 +23,10 @@ partial class ShotService
         public async Task<string> RecognizeAsync(Bitmap bmp)
         {
             string b64 = BitmapToBase64(bmp);
-            string prompt = "OCR all text in this image. Output ONLY the recognized text, keep original line breaks and layout. If no text is present, output empty.";
-            string json = "{\"model\":\"qwen3-vl:4b-instruct\",\"prompt\":" + EscapeJson(prompt) + ",\"images\":[\"" + b64 + "\"],\"stream\":false}";
+            string prompt = "OCR all text in this image. Output ONLY the recognized text, keep original line breaks and layout. If the text contains Chinese, output Simplified Chinese (简体中文), never Traditional (禁止繁体). If no text is present, output empty.";
+            // keep_alive 60m: Ollama 默认 5 分钟卸载模型, 划词间隔一长就重新加载 4B 模型(核显 5s+), 划词慢的大头;
+            // num_predict 300: 划词是短文本, 防模型幻觉输出长文拖时间
+            string json = "{\"model\":\"qwen3-vl:4b-instruct\",\"prompt\":" + EscapeJson(prompt) + ",\"images\":[\"" + b64 + "\"],\"stream\":false,\"options\":{\"num_predict\":300},\"keep_alive\":\"60m\"}";
             using (var wc = new WebClient())
             {
                 wc.Encoding = Encoding.UTF8; // ⚠️ Ollama 返回的 application/json 不带 charset, WebClient 默认按 Latin-1 解码 → 中文全乱码 (实测踩坑)

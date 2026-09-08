@@ -61,6 +61,7 @@ public partial class ShotService
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);   // Win10 1703+; -4 = PerMonitorV2
     [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int value);               // 2 = per-monitor
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();   // 读序号不开剪贴板, 零竞争
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll", SetLastError = true)]
     static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
@@ -342,10 +343,19 @@ public partial class ShotService
                 string ep = Cfg("ocr.endpoint", "http://127.0.0.1:11434/api/generate");
                 using (var wc = new System.Net.WebClient())
                 {
-                    wc.Encoding = System.Text.Encoding.UTF8;
-                    wc.Headers[System.Net.HttpRequestHeader.ContentType] = "application/json";
-                    string m = ep.Contains("11434") ? "qwen3-vl:4b-instruct" : "";
-                    wc.UploadString(ep, "{\"model\":\"" + m + "\",\"prompt\":\"hi\",\"stream\":false}");
+                wc.Encoding = System.Text.Encoding.UTF8;
+                wc.Headers[System.Net.HttpRequestHeader.ContentType] = "application/json";
+                string m = ep.Contains("11434") ? "qwen3-vl:4b-instruct" : "";
+                // 带图预热: 文本请求只加载文本路径, 视觉路径(images)第一次仍冷启动 —— 划词第一次必慢的根因
+                string b64 = "";
+                using (Bitmap wb = new Bitmap(64, 32))
+                using (Graphics gg = Graphics.FromImage(wb))
+                {
+                    gg.Clear(Color.White);
+                    b64 = BitmapToBase64(wb);
+                }
+                wc.UploadString(ep, "{\"model\":\"" + m + "\",\"prompt\":\"OCR this image. Output only text.\",\"images\":[\"" + b64 + "\"],\"stream\":false,\"options\":{\"num_predict\":16},\"keep_alive\":\"60m\"}");
+                Log("ocr warmup done (带图, 模型常驻 60m)");
                 }
                 Log("ocr warmup done");
             }
@@ -1017,11 +1027,18 @@ public partial class ShotService
 
     static void ClipWatcherLoop()
     {
+        uint lastClipSeq = 0;
         while (true)
         {
             try
             {
-                if (pickBusy == 1) { Thread.Sleep(150); continue; } // 划词取词中: 跳过本轮, 别把 Ctrl+C 的临时内容记进剪贴板历史
+                // 2026-09-08 根治 Ctrl+C 失灵: 以前每 400ms 无条件 ContainsImage/GetImage/GetText 全量读
+                // (有截图时每秒 2.5 次把 DIB 转 Image), 和用户复制写剪贴板打架 = 实锤的抢剪贴板竞争。
+                // 现在先读序号(不开剪贴板, 零开销), 序号没变就完全不碰剪贴板。
+                uint seq = GetClipboardSequenceNumber();
+                if (seq == lastClipSeq) { Thread.Sleep(300); continue; }
+                if (pickBusy == 1) { Thread.Sleep(150); continue; } // 划词取词中: 跳过本轮(不更新序号, 取词完仍会补读), 别把临时内容记进剪贴板历史
+                lastClipSeq = seq;
                 if (clipEnabled == 1 && Clipboard.ContainsImage())
                 {
                     // 图片入历史: MD5 命名入库(同图去重精确到字节, 3采样点漏检已根治), 条目 "[图片] 路径" (AI 可 Read 该图/OCR/传多模态)
