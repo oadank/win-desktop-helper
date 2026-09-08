@@ -173,11 +173,7 @@ partial class ShotService
             if (pickDownOnAsk) { pickDownOnAsk = false; return; }               // 提问框里拖选文字: 正常编辑, 不触发取词
             if (askJustClosed) return;                                          // 提问框刚被这一下关掉: 本轮手势不取词
             if (cardWasTouched) return;                                         // 刚在卡片上按住过: 不重复取词
-            // 松手瞬间出点(2026-09-08 老大: 小点是纯 UI 反馈, 不许等 OCR 推理完才出)。
-            // 但只限真划选: 原地点击(位移<8px)不预出点 —— 否则"没划词也老出点"(老大实测反馈)
-            int mvX = ux - pickX0, mvY = uy - pickY0;
-            if (mvX * mvX + mvY * mvY > 8 * 8)
-                s.BeginInvoke(new MethodInvoker(delegate { ShowPickDot(ux, uy); }));
+            // 出点改为"取词成功才出"(OCR 作废后 UIA 16ms 级, 无需预出; 预出点+完成后重建 = 双跳+空点闪)
             s.BeginInvoke(new MethodInvoker(delegate { PickHandle(ux, uy, pickX0, pickY0); }));
         }
         catch { }
@@ -294,8 +290,9 @@ partial class ShotService
                 // 但**双击选词**必须放行: 双击间隔 <300ms 且同位置 —— 吞掉它 = "双击没点"(老大实测),
                 // 之后点别处才把旧选区读出来, 点乱冒。只有"不同位置的快速连点"才节流。
                 int now = Environment.TickCount;
+                // 1A(老大裁决): 单击选词砍掉 —— 只有"450ms 内同位置(12px)第二击"= 双击选词才取词。
                 bool dblClick = (now - pickLastClickCap < 450) && Math.Abs(x - pickLastClickX) < 12 && Math.Abs(y - pickLastClickY) < 12;
-                if (!dblClick && now - pickLastClickCap < 400) { Interlocked.Exchange(ref pickBusy, 0); return; }
+                if (!dblClick) { pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y; Interlocked.Exchange(ref pickBusy, 0); return; }
                 pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y;
                 if (now < pickRClickUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }   // 右键让路窗口内: 不取词
                 if (now < pickSlowUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }     // 慢目标退避窗口内: 不取词
@@ -406,16 +403,13 @@ partial class ShotService
                 // 真本事路线 —— 本地应用 UIA 优先(无副作用); 拿不到 = **截选区矩形 OCR**。
                 // OCR 全局生效: 浏览器(Chromium 不给 UIA 文本)/终端(conhost UIA 有毒)/图片/PDF 全通吃,
                 // 零按键注入、零剪贴板占用、零副作用。选区矩形 = 钩子 DOWN/UP 坐标(x0,y0)-(x,y)。
-                bool browser = PickIsBrowser(fgAt);
                 bool terminal = PickIsTerminal(fgAt);
-                if (!browser && !terminal)
+                if (!terminal)
                 {
                     try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
                 }
-                if (string.IsNullOrWhiteSpace(text))
-                {
-                    try { text = PickOcrRect(x0, y0, x, y); if (!string.IsNullOrWhiteSpace(text)) how = (browser ? "ocr(浏览器)" : (terminal ? "ocr(终端)" : "ocr")); } catch { }
-                }
+                // OCR 兜底作废(老大实测 6-9s 期间所有点击被 busy 吞 = "卡死"); 浏览器划选 UIA 拿不到 = 不出球。
+                // Edge 扩展(pick-inject 注入)是后续浏览器方案, 本轮不做。
             }
             if (string.IsNullOrWhiteSpace(text))
             {
@@ -432,8 +426,8 @@ partial class ShotService
             Log("pick" + (click ? "(click)" : "") + ": " + text.Length + " chars via " + how +
                 " in " + (Environment.TickCount - t0) + "ms | " + PickOneLine(text));
             Control s = pickSync;
-            // 划选: 点已在松手瞬间出过(UP 处), 这里不重建只挂内容; 单击: 维持原逻辑出点
-            if (s != null && s.IsHandleCreated && (!click || PickDotRect == null))
+            // 取词成功 → 出点(唯一出点路径; 双击=click 分支也算)
+            if (s != null && s.IsHandleCreated)
                 s.BeginInvoke(new MethodInvoker(delegate { ShowPickDot(x, y); }));
         }
         catch (Exception ex) { Log("pick capture err: " + ex.Message); }
@@ -621,8 +615,8 @@ partial class ShotService
             {
                 if (pickOverDot)
                 {
+                    // 2A(老大裁决): hover 不再自动展开, 只响应点击; 记时间仅为诊断
                     if (pickHoverSince < 0) pickHoverSince = Environment.TickCount;
-                    if (Environment.TickCount - pickHoverSince >= 180) { PickDotActivated(); return; }   // 300ms 太钝, 老大反馈"菜单慢慢的"
                 }
                 else pickHoverSince = -1;
                 // 提问框开着(用户正在打字)时不许超时收起整组; 划选文字未就绪(OCR 推理中)也不收点
