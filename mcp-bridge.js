@@ -446,6 +446,7 @@ const TOOLS = [
       type: 'object', additionalProperties: false,
       properties: {
         name: { type: 'string', description: '图标名, 如 ZCode' },
+        relaunch: { type: 'number', description: '1=直接再启动应用 exe(单实例互斥拉前台, 比 tray 双击可靠); 0=托盘双击(默认)' },
         button: { type: 'string', description: 'left(默认)/right' },
         double: { type: 'number', description: '1=双击(推荐, 打开主窗)' }
       },
@@ -517,6 +518,7 @@ function buildUrl(name, a) {
     }
     case 'tray_click': {
       const qs = ['name=' + enc(a.name)];
+      if (a.relaunch) qs.push('relaunch=1');
       if (a.button) qs.push('button=' + a.button);
       if (a.double) qs.push('double=' + a.double);
       return { path: '/tray/click', qs };
