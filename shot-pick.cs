@@ -413,10 +413,8 @@ partial class ShotService
             }
             if (string.IsNullOrWhiteSpace(text))
             {
-                Log("pick: no text captured (" + (Environment.TickCount - t0) + "ms)");
-                // 松手即出的点还挂着(没等到文字): 收掉, 别留一个永远点不出内容的空点
-                if (!click) { Control s0 = pickSync; if (s0 != null && s0.IsHandleCreated) s0.BeginInvoke(new MethodInvoker(delegate { PickDismiss(); })); }
-                return;
+                // UIA 拿不到(Electron 虚拟 DOM 不确定性)也出球 —— 球上工具点击时 lazy 再读选区
+                Log("pick: text empty (" + (Environment.TickCount - t0) + "ms), still showing dot");
             }
             text = text.Trim();
             if (text.Length > 2000) text = text.Substring(0, 2000);
