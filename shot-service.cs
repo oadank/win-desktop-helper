@@ -505,16 +505,31 @@ public partial class ShotService
     static System.Windows.Automation.AutomationElement FindTrayButton(System.Windows.Automation.AutomationElement scope, string name)
     {
         if (scope == null || name == null || name == "") return null;
+        System.Windows.Automation.AutomationElement fallback = null;
         foreach (var el in WalkLimited(scope, 500))
         {
             try
             {
                 string n = el.Current.Name;
-                if (!string.IsNullOrEmpty(n) && n.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0) return el;
+                if (string.IsNullOrEmpty(n) || n.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                // 关键修正(老大实测踩坑): 同名按钮有两个 —— 打开窗口的任务栏按钮(x=630) + 托盘图标(x=2257)。
+                // tray_click 的语义是"唤回缩托盘的应用", 点任务栏按钮=点在冻窗上白点。只认托盘图标(右下角/SystemTray 类)。
+                if (scope != null && scope.Current.ClassName == "Shell_TrayWnd")
+                {
+                    string cls = el.Current.ClassName ?? "";
+                    var r = el.Current.BoundingRectangle;
+                    bool trayZone = cls.StartsWith("SystemTray") || r.X > 1600; // 托盘区在屏右侧(2560 宽的 62% 以右)
+                    if (!trayZone)
+                    {
+                        if (fallback == null) fallback = el; // 用户显式要点任务栏按钮时仍可用
+                        continue;
+                    }
+                }
+                return el;
             }
             catch { }
         }
-        return null;
+        return fallback;
     }
 
     // ---- 全量窗口枚举 (含隐藏/最小化/托盘化窗口; list_apps 只列可见窗口, 找不到窗口时用这个) ----
@@ -1620,8 +1635,19 @@ public partial class ShotService
                 }
                 else if (path == "/diag/threads")
                 {
-                    string[] lt; lock (uiaLeaked) lt = uiaLeaked.ToArray();
-                    body = "{\"ok\":true,\"uiaLeaked\":" + lt.Length + ",\"fused\":" + (lt.Length >= 3 ? "true" : "false") + ",\"entries\":[" + string.Join(",", Array.ConvertAll(lt, x => "\"" + JsonEscape(x) + "\"")) + "],\"hint\":\"泄漏线程来自 UIA 大DOM 超时(无法强杀); fused=true 时所有 /ui/* 将拒绝直到重启\"}";
+                    if (q.ContainsKey("reset"))
+                    {
+                        int n; lock (uiaLeaked) { n = uiaLeaked.Count; uiaLeaked.Clear(); }
+                        Log("uia fuse manual reset, cleared " + n);
+                        body = "{\"ok\":true,\"reset\":true,\"cleared\":" + n + "}";
+                    }
+                    else
+                    {
+                        long[] lt; lock (uiaLeaked) lt = uiaLeaked.ToArray();
+                        int nowTick = Environment.TickCount;
+                        var stale = System.Linq.Enumerable.Count(lt, (long x) => (nowTick - x) > UIA_LEAK_TTL);
+                        body = "{\"ok\":true,\"uiaLeaked\":" + lt.Length + ",\"stale\":" + stale + ",\"fused\":" + (lt.Length - stale >= 3 ? "true" : "false") + ",\"ttlMin\":30,\"entries\":[" + string.Join(",", System.Linq.Enumerable.Select(lt, (long x) => "\"" + (nowTick - x) / 1000 + "s ago\"")) + "],\"hint\":\"泄漏线程 30 分钟自动衰减; 或 ?reset=1 立即清零解除熔断\"}";
+                    }
                 }
                 else if (path.StartsWith("/img/"))
                 {
