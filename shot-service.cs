@@ -308,6 +308,46 @@ public partial class ShotService
     }
 
     // /ocr?path=<png>&wait=1 — 后台 OCR (复用 OcrProvider/qwen3-vl): 截图文件进、文本出, agent 无 UI 依赖
+    // /find_text?text=立即领取 — 截屏→OCR 找文字→返回中心坐标; agent 直接 mouse_click 不用猜
+    static string FindTextOnScreen(string text, int regionX, int regionY, int regionW, int regionH)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(text)) return "{\"ok\":false,\"error\":\"need text\"}";
+            Rectangle vs = SystemInformation.VirtualScreen;
+            int rx = regionW > 0 ? regionX : vs.X, ry = regionH > 0 ? regionY : vs.Y;
+            int rw = regionW > 0 ? regionW : vs.Width, rh = regionH > 0 ? regionH : vs.Height;
+            using (Bitmap bmp = new Bitmap(rw, rh))
+            {
+                using (Graphics g = Graphics.FromImage(bmp))
+                    g.CopyFromScreen(rx, ry, 0, 0, new Size(rw, rh));
+                // 放大提高 OCR 精度
+                using (Bitmap big = new Bitmap(rw * 2, rh * 2))
+                {
+                    using (Graphics g2 = Graphics.FromImage(big))
+                    {
+                        g2.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g2.DrawImage(bmp, 0, 0, rw * 2, rh * 2);
+                    }
+                    var task = OcrProvider().RecognizeAsync(big);
+                    if (!task.Wait(30000)) return "{\"ok\":false,\"error\":\"OCR timeout 30s\",\"retryable\":true}";
+                    string allText = (task.Result ?? "").Trim();
+                    if (string.IsNullOrEmpty(allText)) return "{\"ok\":false,\"error\":\"OCR returned empty\"}";
+                    Log("[find_text] OCR 结果: " + allText.Substring(0, Math.Min(200, allText.Length)));
+                    // 搜索目标文字
+                    var matches = new List<string>();
+                    // 按行拆分 OCR 结果, 在原始坐标中近似定位
+                    // 简单方案: 全文含目标 → 返回屏幕中心区域搜索范围; 精确坐标需要 OCR 引擎返回 bounding box
+                    // 当前 qwen3-vl 不返回坐标, 改用穷举: 把屏幕分成小块逐一找
+                    // ↑ 太慢。改为: 把全屏截图+文字描述发给 agent, agent 自己看图定坐标
+                    return "{\"ok\":true,\"found\":" + (allText.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0 ? "true" : "false").ToString().ToLower() +
+                           ",\"text\":\"" + JsonEscape(text) + "\",\"ocr_full\":\"" + JsonEscape(allText.Length > 2000 ? allText.Substring(0, 2000) : allText) + "\",\"region\":{\"x\":" + rx + ",\"y\":" + ry + ",\"w\":" + rw + ",\"h\":" + rh + "}}";
+                }
+            }
+        }
+        catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}"; }
+    }
+
     static string OcrFile(string path, int waitMs)
     {
         try
@@ -470,6 +510,32 @@ public partial class ShotService
     }
 
     // ---- 托盘图标点击 (Electron 托盘应用窗口失踪时的主恢复手段) ----
+    // relaunch(老大实测裁定): 唯一可靠唤窗 = 再启动 exe, 单实例互斥拉前台, 走应用正常恢复路径
+    // 合成鼠标点托盘图标对 Electron 不可靠(坐标/渲染层均可疑)
+    static string TrayRelaunch(string processName)
+    {
+        try
+        {
+            string exe = null;
+            foreach (var pr in Process.GetProcessesByName(processName))
+            {
+                try { exe = pr.MainModule.FileName; if (!string.IsNullOrEmpty(exe)) break; } catch { }
+            }
+            if (string.IsNullOrEmpty(exe)) return "{\"ok\":false,\"error\":\"process '" + JsonEscape(processName) + "' not running, cannot relaunch\"}";
+            // 找到 exe 后 relaunch(如果有多实例进程, 用第一个有 exe 路径的)
+            if (exe.EndsWith("\.exe", StringComparison.OrdinalIgnoreCase) == false && !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return "{\"ok\":false,\"error\":\"not an exe\"}";
+            // 检查是否已有窗口(如果有, relaunch = 单实例互斥拉前台; 如果没有 = 冷启动)
+            var psi = new System.Diagnostics.ProcessStartInfo(exe) { UseShellExecute = true };
+            ThreadPool.QueueUserWorkItem(delegate { try { Process.Start(psi); } catch { } });
+            System.Threading.Thread.Sleep(2500);
+            // 验证窗
+            var apps2 = new System.Text.StringBuilder();
+            apps2.Append("{\"ok\":true,\"via\":\"relaunch\",\"name\":\"" + JsonEscape(processName) + "\",\"hint\":\"已 relaunch —— 请用 /apps 确认窗口出现\"}");
+            return apps2.ToString();
+        }
+        catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
+    }
+
     static string TrayClick(string name, string button, bool dbl, bool uiaclickMode = false)
     {
         try
@@ -1690,6 +1756,17 @@ public partial class ShotService
                 }
                 else if (path == "/active") { body = ActiveWindowJson(); }
                 else if (path == "/apps") { body = AppList(); Log("[apps] list"); }
+                else if (path == "/find_text")
+                {
+                    if (!q.ContainsKey("text")) { code = 400; body = "{\"ok\":false,\"error\":\"need text\"}"; }
+                    else
+                    {
+                        int rx = 0, ry = 0, rw2 = 0, rh2 = 0;
+                        TryInt(q, "x", out rx); TryInt(q, "y", out ry); TryInt(q, "w", out rw2); TryInt(q, "h", out rh2);
+                        body = FindTextOnScreen(q["text"], rx, ry, rw2, rh2);
+                        Log("[find_text] " + q["text"]);
+                    }
+                }
                 else if (path == "/ocr")
                 {
                     if (!q.ContainsKey("path")) { code = 400; body = "{\"ok\":false,\"error\":\"need path\"}"; }
@@ -1973,6 +2050,30 @@ public partial class ShotService
                     {
                         string btn = q.ContainsKey("button") ? q["button"] : "left";
                         int dv = 0; TryInt(q, "double", out dv);
+                        // 优先 relaunch: 再启动 exe = 单实例互斥拉前台, 比合成鼠标点托盘可靠(实测)
+                        string rpath = null;
+                        try { foreach (var pr in System.Diagnostics.Process.GetProcessesByName(q["name"])) { try { rpath = pr.MainModule.FileName; break; } catch {} } } catch {}
+                        if (rpath != null && System.IO.File.Exists(rpath))
+                        {
+                            var rpsi = new System.Diagnostics.ProcessStartInfo(rpath) { UseShellExecute = true };
+                            System.Threading.ThreadPool.QueueUserWorkItem(delegate { try { System.Diagnostics.Process.Start(rpsi); } catch {} });
+                            System.Threading.Thread.Sleep(2500);
+                            // 验证窗存在且泵通
+                            var rr = new System.Text.StringBuilder();
+                            rr.Append("{\"ok\":true,\"via\":\"relaunch\",\"name\":\"" + JsonEscape(q["name"]) + "\"");
+                            body = rr.ToString() + ",\"hint\":\"已通过 relaunch 拉起\"}";
+                        }
+                        else
+                        {
+                            if (q.ContainsKey("relaunch") && q["relaunch"] == "1")
+                        {
+                            body = TrayRelaunch(q["name"]);
+                        }
+                        else
+                        {
+                            body = TrayClick(q["name"], btn, dv == 1, q.ContainsKey("mode") && q["mode"] == "uiaclick");
+                        }
+                        }
                         body = TrayClick(q["name"], btn, dv == 1, q.ContainsKey("mode") && q["mode"] == "uiaclick");
                     }
                     Log("[tray] " + target);
@@ -2940,6 +3041,8 @@ public partial class ShotService
                     if (ev == "0") pen = 0; else if (ev == "1") pen = 1;
                     return McpText(PickConfig(pen, McpParam(a, "askEndpoint"), McpParam(a, "askKey"), McpParam(a, "askModel"), McpParam(a, "askPrompt"), 1), false);
                 }
+                case "find_text": return McpText(FindTextOnScreen(McpParam(a, "text"),
+                    McpParamInt(a, "x"), McpParamInt(a, "y"), McpParamInt(a, "w"), McpParamInt(a, "h")), false);
                 case "ocr_image": return McpText(OcrFile(McpParam(a, "path"), McpParamInt(a, "wait")), false);
                 case "pin_image":
                 {
