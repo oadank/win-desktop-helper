@@ -4,17 +4,24 @@
 > ② **每次踩坑必须用 `update_skill` 写回本文件**，禁止只记在自己记忆里；
 > ③ 完整历史/已修 bug 考古不在这里，`get_skill(detail="full")` 或 `get_skill(topic="分屏")` 按需取。
 
-## 黄金路径（任何"点击某个东西"的任务，照这个走）
+## 黄金路径（先判断应用类型，再选方案）
 
 ```
 1. 找窗口  list_apps() 按 process 名拿 hwnd
 2. 置前    win_manage(action=activate, hwnd=...)   → foreground=true 才算真置前
-3. 找控件  ui_find(hwnd=..., name="按钮的可见文字") → 拿到 ref
-           （找不到就 ui_tree(hwnd=...) 看它到底叫什么）
-4. 点      ui_click(ref=...)                       ← 首选，永不漂移
-           点完必须 verify=1，changed=false 说明没生效，别连点
-5. 验证    ui_tree / ui_read / window_info 确认界面真变了，没变就重新采样
+3. 判断类型 → 是 Electron/网页壳/聊天类？
+   ├─ 否（Win32 本地应用：记事本/资源管理器/设置等）
+   │   4. 找控件  ui_find(hwnd=..., name="按钮的可见文字") → 拿到 ref
+   │   5. 点      ui_click(ref=...)                        ← 首选，永不漂移
+   │   6. 验证    ui_read / window_info 确认界面真变了
+   └─ 是（Electron/大 DOM：WorkBuddy/VSCode/Chrome 系/聊天软件）
+      4. 禁用 UIA 全树工具！只用 /shot 截图 + 看图 + mouse_click(坐标)
+      5. 找不到按钮 → 用 /ocr?path=截图 识别文字和位置
+      6. 唤窗/恢复 → tray_click(name=, double=1) 或 app_run 再启动
 ```
+
+> **Electron/大 DOM 判别**：进程名含 msedge/chrome/electron/workbuddy/vscode/webview 等，
+> 或应用是聊天类/IDE/网页壳。UIA 树在这些应用上会永久阻塞或返回不完整数据。
 
 ## 铁律（违反必踩坑）
 
