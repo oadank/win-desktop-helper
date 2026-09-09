@@ -487,39 +487,71 @@ public partial class ShotService
                 {
                     // 统一键盘流(老大指路): Win+B 聚焦托盘区后, ←/→ 直接选**所有**图标(主区未隐藏+溢出层), Enter=点击/双击。
                     // 主区没找到也走这条路(不再区分两段), 图标被隐藏时 Enter 展开溢出层后继续扫
-                    keybd_event(0x5B, 0, 0, UIntPtr.Zero); keybd_event(0x42, 0, 0, UIntPtr.Zero); // Win+B
-                    keybd_event(0x5B, 0, 2, UIntPtr.Zero); keybd_event(0x42, 0, 2, UIntPtr.Zero);
-                    System.Threading.Thread.Sleep(600);
-                    string scanDir = "→";
-                    string fFinalName = "";
-                    for (int pass = 0; pass < 2; pass++) // 0=向右扫, 1=向左扫
+                    // 老大实测键盘地图(2026-09-09): Win+B 聚焦托盘区 → Tab 切区段(托盘图标→Win 按钮→任务栏程序图标)
+                    //   → ←/→ 区段内选图标 → Enter 激活。一次覆盖主区+溢出层, 比 UIA/坐标稳
+                    keybd_event((byte)0x5B, 0, 0, UIntPtr.Zero); keybd_event((byte)0x42, 0, 0, UIntPtr.Zero); // Win+B
+                    keybd_event((byte)0x5B, 0, 2, UIntPtr.Zero); keybd_event((byte)0x42, 0, 2, UIntPtr.Zero);
+                    System.Threading.Thread.Sleep(500);
+                    string fFinalName = ""; string scanPath = "";
+                    // 实测地图: Win+B=托盘溢出箭头 → Tab1=常驻系统托盘 → Tab2=开始 → Tab3=任务视图 → Tab4=程序图标区
+                    // 程序窗唤回目标在 Tab4 → 先 Tab×4 直达, 区段内 ← 扫(右端起); 未中再回托盘段(→扫), 藏溢出时 Enter 展开
+                    for (int i = 0; i < 4; i++) { keybd_event((byte)0x09, 0, 0, UIntPtr.Zero); keybd_event((byte)0x09, 0, 2, UIntPtr.Zero); System.Threading.Thread.Sleep(130); }
+                    var focusTrail = new System.Text.StringBuilder();
+                    for (int step = 0; step < 40 && fFinalName == ""; step++)
                     {
-                        int vk = pass == 0 ? 0x27 : 0x25; // → / ←
-                        for (int step = 0; step < 40; step++)
+                        var fe = System.Windows.Automation.AutomationElement.FocusedElement;
+                        string fn2 = ""; try { fn2 = fe.Current.Name ?? ""; } catch { }
+                        if (step < 8) focusTrail.Append(step).Append(":[").Append(fn2.Length > 24 ? fn2.Substring(0, 24) : fn2).Append("] ");
+                        if (fn2.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0) { fFinalName = fn2; break; }
+                        keybd_event((byte)0x25, 0, 0, UIntPtr.Zero); keybd_event((byte)0x25, 0, 2, UIntPtr.Zero); // ←
+                        System.Threading.Thread.Sleep(110);
+                    }
+                    if (fFinalName == "")
+                    {
+                        Log("tray kbd trail: " + focusTrail);
+                        scanPath = "tray";
+                        // Shift+Tab ×5 回托盘段
+                        for (int i = 0; i < 5; i++) { keybd_event((byte)0x10, 0, 0, UIntPtr.Zero); keybd_event((byte)0x09, 0, 0, UIntPtr.Zero); keybd_event((byte)0x09, 0, 2, UIntPtr.Zero); keybd_event((byte)0x10, 0, 2, UIntPtr.Zero); System.Threading.Thread.Sleep(110); }
+                        for (int step = 0; step < 25 && fFinalName == ""; step++)
                         {
                             var fe = System.Windows.Automation.AutomationElement.FocusedElement;
                             string fn2 = ""; try { fn2 = fe.Current.Name ?? ""; } catch { }
-                            if (fn2.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0)
-                            { fFinalName = fn2; break; }
-                            keybd_event((byte)vk, 0, 0, UIntPtr.Zero); keybd_event((byte)vk, 0, 2, UIntPtr.Zero);
+                            if (fn2.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0) { fFinalName = fn2; break; }
+                            keybd_event((byte)0x27, 0, 0, UIntPtr.Zero); keybd_event((byte)0x27, 0, 2, UIntPtr.Zero); // →
                             System.Threading.Thread.Sleep(110);
                         }
-                        if (fFinalName != "") break;
-                        if (pass == 0)
+                        // 托盘段没中且图标可能藏溢出 → Esc 全退 → Win+B 重新进(落在溢出箭头) → Enter 展开溢出层 → 焦点进层内 → 扫
+                        if (fFinalName == "")
                         {
-                            // 右扫没中: 图标可能藏在溢出层 → Enter 展开, Shift+Tab 归位后继续(下一 pass 左扫会进溢出)
-                            keybd_event(0x0D, 0, 0, UIntPtr.Zero); keybd_event(0x0D, 0, 2, UIntPtr.Zero);
-                            System.Threading.Thread.Sleep(800);
-                            scanDir = "→+overflow";
+                            scanPath = "overflow";
+                            keybd_event((byte)0x1B, 0, 0, UIntPtr.Zero); keybd_event((byte)0x1B, 0, 2, UIntPtr.Zero); // Esc 全退
+                            System.Threading.Thread.Sleep(400);
+                            keybd_event((byte)0x5B, 0, 0, UIntPtr.Zero); keybd_event((byte)0x42, 0, 0, UIntPtr.Zero);
+                            keybd_event((byte)0x5B, 0, 2, UIntPtr.Zero); keybd_event((byte)0x42, 0, 2, UIntPtr.Zero); // Win+B → 焦点=溢出箭头
+                            System.Threading.Thread.Sleep(500);
+                            keybd_event((byte)0x0D, 0, 0, UIntPtr.Zero); keybd_event((byte)0x0D, 0, 2, UIntPtr.Zero); // Enter 展开溢出层
+                            System.Threading.Thread.Sleep(900);
+                            // 溢出层展开后焦点落在层内第一个图标; ← 找 WorkBuddy
+                            for (int step = 0; step < 30 && fFinalName == ""; step++)
+                            {
+                                var fe = System.Windows.Automation.AutomationElement.FocusedElement;
+                                string fn2 = ""; try { fn2 = fe.Current.Name ?? ""; } catch { }
+                                if (fn2.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0) { fFinalName = fn2; break; }
+                                keybd_event((byte)0x25, 0, 0, UIntPtr.Zero); keybd_event((byte)0x25, 0, 2, UIntPtr.Zero); // ←
+                                System.Threading.Thread.Sleep(110);
+                            }
                         }
                     }
                     if (fFinalName == "")
-                        return "{\"ok\":false,\"error\":\"Win+B 双向扫描 80 步没找到 '" + JsonEscape(name) + "' 图标 (主区+溢出都扫了); 名字不对用 tray_list 核对\"}";
-                    keybd_event(0x0D, 0, 0, UIntPtr.Zero); keybd_event(0x0D, 0, 2, UIntPtr.Zero); // Enter=单击; 托盘应用双击语义传 double=1 时按两次
-                    if (dbl) { System.Threading.Thread.Sleep(150); keybd_event(0x0D, 0, 0, UIntPtr.Zero); keybd_event(0x0D, 0, 2, UIntPtr.Zero); }
+                    {
+                        keybd_event((byte)0x1B, 0, 0, UIntPtr.Zero); keybd_event((byte)0x1B, 0, 2, UIntPtr.Zero); // Esc 收
+                        return "{\"ok\":false,\"error\":\"Win+B 扫描没找到 '" + JsonEscape(name) + "' 图标; 焦点轨迹: " + focusTrail.ToString() + " ; 名字用 tray_list 核对\"}";
+                    }
+                    keybd_event((byte)0x0D, 0, 0, UIntPtr.Zero); keybd_event((byte)0x0D, 0, 2, UIntPtr.Zero); // Enter 激活
+                    if (dbl) { System.Threading.Thread.Sleep(150); keybd_event((byte)0x0D, 0, 0, UIntPtr.Zero); keybd_event((byte)0x0D, 0, 2, UIntPtr.Zero); }
                     System.Threading.Thread.Sleep(300);
-                    keybd_event(0x1B, 0, 0, UIntPtr.Zero); keybd_event(0x1B, 0, 2, UIntPtr.Zero); // Esc 收 flyout/菜单
-                    return "{\"ok\":true,\"found\":true,\"via\":\"kbd(Win+B " + scanDir + " " + (dbl ? "2xEnter" : "Enter") + ")\",\"name\":\"" + JsonEscape(fFinalName.Length > 40 ? fFinalName.Substring(0, 40) : fFinalName) + "\",\"clicked\":\"" + (dbl ? "double" : button) + "\"}";
+                    keybd_event((byte)0x1B, 0, 0, UIntPtr.Zero); keybd_event((byte)0x1B, 0, 2, UIntPtr.Zero); // Esc 收弹层
+                    return "{\"ok\":true,\"found\":true,\"via\":\"kbd(Win+B " + scanPath + " Enter" + (dbl ? "×2" : "") + ")\",\"name\":\"" + JsonEscape(fFinalName.Length > 40 ? fFinalName.Substring(0, 40) : fFinalName) + "\",\"clicked\":\"" + (dbl ? "double" : button) + "\"}";
                 }
                 // 旧 UIA flyout 路线保留备用 (mode=uiaclick): Win11 溢出弹层多为应用自绘, FromPoint 常落空
                 System.Threading.Thread.Sleep(200);
