@@ -523,7 +523,7 @@ public partial class ShotService
             }
             if (string.IsNullOrEmpty(exe)) return "{\"ok\":false,\"error\":\"process '" + JsonEscape(processName) + "' not running, cannot relaunch\"}";
             // 找到 exe 后 relaunch(如果有多实例进程, 用第一个有 exe 路径的)
-            if (exe.EndsWith("\.exe", StringComparison.OrdinalIgnoreCase) == false && !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return "{\"ok\":false,\"error\":\"not an exe\"}";
+            if (exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) == false && !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return "{\"ok\":false,\"error\":\"not an exe\"}";
             // 检查是否已有窗口(如果有, relaunch = 单实例互斥拉前台; 如果没有 = 冷启动)
             var psi = new System.Diagnostics.ProcessStartInfo(exe) { UseShellExecute = true };
             ThreadPool.QueueUserWorkItem(delegate { try { Process.Start(psi); } catch { } });
