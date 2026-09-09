@@ -448,7 +448,7 @@ const TOOLS = [
         name: { type: 'string', description: '图标名, 如 ZCode' },
         relaunch: { type: 'number', description: '1=直接再启动应用 exe(单实例互斥拉前台, 比 tray 双击可靠); 0=托盘双击(默认)' },
         button: { type: 'string', description: 'left(默认)/right' },
-        double: { type: 'number', description: '1=双击(推荐, 打开主窗)' }
+        double: { type: 'number', description: '0=单击(推荐, 显示窗); 1=双击(会切回隐藏, 别用)' }
       },
       required: ['name']
     }
