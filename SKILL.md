@@ -28,7 +28,7 @@
 3. **每次操作后必须验证**。**切页/切会话/进列表项这类操作必须带 `expect="点完应该出现的文字"`** —— `verify` 只回答"界面变了"，`expect` 才证明"变成了对的那个"（实测：点会话项报 ok 且 changed=true，界面根本没进那个会话）。元素 `offscreen:true` 表示它滚出视口/被折叠，**点了不会生效**，先滚动或展开让它可见
 4. **中文一律剪贴板粘贴**：`clipboard_set(text)` → 点输入框聚焦 → `keyboard_press(keys="ctrl+v")`。组合键参数名是 `keys`（不是 key/modifiers）
 5. **工具不报假成功**：`ui_click` 的 via=invoke 只代表调到了不代表生效 → 配 `verify=1`；`ui_set` 写入后自动读回校验，不一致直接报错并指路剪贴板方案；坐标点击前自动做落点归属校验，位置命中的不是目标进程会拦下并报错。**看到报错就按报错里的提示改，别重试同一个动作**
-6. **"看得见但点不动" / "压根没窗口" → 直接 `app_restore(process=应用名, snap=right)`**：一条命令自动 close 关窗 → 托盘双击重开 → 等窗口稳定 → 贴回指定位置（返回 `stable` / `steps`）。**`win_manage activate` 唤回的窗口经常是冻结的，别拿它当恢复手段**；失败看返回里的 steps（托盘名不对用 `tray_list`，应用真退了用 `app_run`）
+6. **"看得见但点不动" / "压根没窗口" → `tray_click(name=应用名, double=1)`**：实现=**Win+B 键盘流**（Win+B 聚焦托盘 → ←/→ 扫描主区+溢出层全部图标 → Enter 点击；图标被隐藏时自动展开溢出层继续扫，双向 80 步）。**禁用坐标点击路径**（同名两元素陷阱：打开窗口的任务栏按钮 x=630 + 托盘图标 x=2257 并存时随机命中，点任务栏按钮=点在冻窗上白点；分辨率一变坐标全废）。`win_manage activate`（SetForegroundWindow）唤回的 Electron 窗经常冻结，只当置前手段不当恢复手段。键盘流失败报错会带焦点终点，多半是名字不对 → `tray_list` 核对；应用真退了 → `app_run` 再启
 7. **🔴 工具全报 ok 但屏幕毫无变化 → 先查 UIPI（权限隔离）**：目标应用若以管理员运行（WorkBuddy/ZCode 等常见），而本程序是普通权限，**系统会静默丢弃合成的键鼠输入**（右键菜单不弹、快捷键无反应、点击不换焦点，工具照样返回 ok）。
    - 本程序**默认自动以管理员常驻**（计划任务 `WinDesktopHelper`，登录即静默提权，无需手工操作），正常不该出现此问题
    - 真遇到了：工具会直接返回 `uipi blocked` 并给修复指路；此时 `curl http://127.0.0.1:18800/health` 看 `elevated` 字段应为 `true`，是 `false` 说明提权失败 → 结束进程后从资源管理器运行一次（自动重建），或 `schtasks /run /tn WinDesktopHelper`
@@ -44,8 +44,8 @@
 | 窗口信息/管理 | `window_info`(支持 process 精确匹配) `active_window` `list_apps` `win_manage` `monitors` |
 | 半屏/四分之一布局 | `win_manage(action=snap, hwnd=, pos=left\|right\|top\|bottom\|topleft\|topright\|bottomleft\|bottomright\|max\|min\|restore, monitor=2\|next\|prev)` |
 | 找失踪窗口 | `win_manage(action=listall, pid=)` 含隐藏/最小化/托盘化的窗口 |
-| **深度恢复(冻结/没窗口)** | `app_restore(process=, snap=left\|right\|max, wait=8000)` 一条命令：关窗→托盘双击重开→等稳定→贴回，首选它 |
-| 托盘唤回 | `tray_click(name=, double=1)`（单击=toggle 最小化，双击=恢复/打开） |
+| **深度恢复(冻结/没窗口)** | `tray_click(name=, double=1)` 键盘流(Win+B+方向键扫描, 默认) → 窗稳定后 `win_manage(snap=)` 贴位；`app_restore` 为兼容保留但托盘环节同走键盘流 |
+| 托盘唤回 | `tray_click(name=, double=1)` —— Win+B 键盘流扫描主区+溢出层（图标被藏也能点），不再用坐标点托盘 |
 | 鼠标/键盘 | `mouse_click` `mouse_move` `mouse_drag` `keyboard_type` `keyboard_press` |
 | 看 | `screen_capture` `ocr_image` |
 | 启动程序 | `app_run(path=, wait=1, process=)` 返回稳定后的窗口 rect |
@@ -61,7 +61,7 @@
 | 元素在列表里但点了没反应 | 看返回/树里的 `offscreen`：为 true = 滚出视口，先滚动展开再点 |
 | `window_info` 查到不相干的窗口 | title 模糊匹配会误伤浏览器标签页，传 `process` 按进程过滤 |
 | 粘贴没生效 | 参数名是 `keys`：`keyboard_press(keys="ctrl+v")` |
-| 窗口能看见但点不动 / 完全没有窗口 | `app_restore(process=应用名)` 一条命令恢复，别用 activate |
+| 窗口能看见但点不动 / 完全没有窗口 | `tray_click(name=, double=1)` 唤回（键盘流）→ `win_manage activate` 只做置前（它产出的窗常冻） |
 | `app_run` 返回的 hwnd 找不到窗口 | 多进程应用会换窗，用 `list_apps` 按 process 重新取 |
 | 布局想贴半屏 | 别用 move 手算坐标，用 snap；返回 target≠rect 说明应用有最小尺寸约束，按 rect 补差 |
 | **全都 ok 但啥也没发生**（菜单不弹/键无反应） | UIPI：目标窗口管理员权限 + 本程序普通权限 → 输入被静默丢弃。`health` 看 `elevated`，false 就重建提权（见铁律 7） |

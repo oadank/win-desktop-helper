@@ -470,7 +470,7 @@ public partial class ShotService
     }
 
     // ---- 托盘图标点击 (Electron 托盘应用窗口失踪时的主恢复手段) ----
-    static string TrayClick(string name, string button, bool dbl)
+    static string TrayClick(string name, string button, bool dbl, bool uiaclickMode = false)
     {
         try
         {
@@ -481,15 +481,54 @@ public partial class ShotService
             string via = "taskbar";
             if (hit == null)
             {
-                var chev = FindTrayButton(tray, "隐藏的图标");
-                if (chev == null) return "{\"ok\":false,\"error\":\"tray icon not found in taskbar, overflow chevron not found either\"}";
-                var r0 = chev.Current.BoundingRectangle;
-                MouseMove((int)(r0.X + r0.Width / 2), (int)(r0.Y + r0.Height / 2));
-                System.Threading.Thread.Sleep(150); MouseClick("left", 1);
-                System.Threading.Thread.Sleep(500);
-                var of = root.FindFirst(System.Windows.Automation.TreeScope.Children,
-                    new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ClassNameProperty, "NotifyIconOverflowWindow"));
-                hit = FindTrayButton(of, name);
+                // Win11 键盘流(实测全通, 老大指路 Win+B): Win+B 聚焦托盘 → 回车展开溢出 → 目标图标已获焦 → 回车=双击。
+                // 纯键盘零坐标零坐标校验, 比坐标点击(分辨率变化即失效)稳; UIA FromPoint 方案在 Win11 溢出弹层不可行(弹层是应用自绘)
+                if (!uiaclickMode)
+                {
+                    // 统一键盘流(老大指路): Win+B 聚焦托盘区后, ←/→ 直接选**所有**图标(主区未隐藏+溢出层), Enter=点击/双击。
+                    // 主区没找到也走这条路(不再区分两段), 图标被隐藏时 Enter 展开溢出层后继续扫
+                    keybd_event(0x5B, 0, 0, UIntPtr.Zero); keybd_event(0x42, 0, 0, UIntPtr.Zero); // Win+B
+                    keybd_event(0x5B, 0, 2, UIntPtr.Zero); keybd_event(0x42, 0, 2, UIntPtr.Zero);
+                    System.Threading.Thread.Sleep(600);
+                    string scanDir = "→";
+                    string fFinalName = "";
+                    for (int pass = 0; pass < 2; pass++) // 0=向右扫, 1=向左扫
+                    {
+                        int vk = pass == 0 ? 0x27 : 0x25; // → / ←
+                        for (int step = 0; step < 40; step++)
+                        {
+                            var fe = System.Windows.Automation.AutomationElement.FocusedElement;
+                            string fn2 = ""; try { fn2 = fe.Current.Name ?? ""; } catch { }
+                            if (fn2.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0)
+                            { fFinalName = fn2; break; }
+                            keybd_event((byte)vk, 0, 0, UIntPtr.Zero); keybd_event((byte)vk, 0, 2, UIntPtr.Zero);
+                            System.Threading.Thread.Sleep(110);
+                        }
+                        if (fFinalName != "") break;
+                        if (pass == 0)
+                        {
+                            // 右扫没中: 图标可能藏在溢出层 → Enter 展开, Shift+Tab 归位后继续(下一 pass 左扫会进溢出)
+                            keybd_event(0x0D, 0, 0, UIntPtr.Zero); keybd_event(0x0D, 0, 2, UIntPtr.Zero);
+                            System.Threading.Thread.Sleep(800);
+                            scanDir = "→+overflow";
+                        }
+                    }
+                    if (fFinalName == "")
+                        return "{\"ok\":false,\"error\":\"Win+B 双向扫描 80 步没找到 '" + JsonEscape(name) + "' 图标 (主区+溢出都扫了); 名字不对用 tray_list 核对\"}";
+                    keybd_event(0x0D, 0, 0, UIntPtr.Zero); keybd_event(0x0D, 0, 2, UIntPtr.Zero); // Enter=单击; 托盘应用双击语义传 double=1 时按两次
+                    if (dbl) { System.Threading.Thread.Sleep(150); keybd_event(0x0D, 0, 0, UIntPtr.Zero); keybd_event(0x0D, 0, 2, UIntPtr.Zero); }
+                    System.Threading.Thread.Sleep(300);
+                    keybd_event(0x1B, 0, 0, UIntPtr.Zero); keybd_event(0x1B, 0, 2, UIntPtr.Zero); // Esc 收 flyout/菜单
+                    return "{\"ok\":true,\"found\":true,\"via\":\"kbd(Win+B " + scanDir + " " + (dbl ? "2xEnter" : "Enter") + ")\",\"name\":\"" + JsonEscape(fFinalName.Length > 40 ? fFinalName.Substring(0, 40) : fFinalName) + "\",\"clicked\":\"" + (dbl ? "double" : button) + "\"}";
+                }
+                // 旧 UIA flyout 路线保留备用 (mode=uiaclick): Win11 溢出弹层多为应用自绘, FromPoint 常落空
+                System.Threading.Thread.Sleep(200);
+                hit = null;
+                POINT mpO; if (GetCursorPos(out mpO))
+                {
+                    var fly = System.Windows.Automation.AutomationElement.FromPoint(new System.Windows.Point(mpO.x, mpO.y));
+                    if (fly != null) hit = FindTrayButton(fly, name);
+                }
                 via = "overflow";
             }
             if (hit == null) return "{\"ok\":false,\"error\":\"tray icon not found: 主区和溢出区都找过\"}";
@@ -1902,7 +1941,7 @@ public partial class ShotService
                     {
                         string btn = q.ContainsKey("button") ? q["button"] : "left";
                         int dv = 0; TryInt(q, "double", out dv);
-                        body = TrayClick(q["name"], btn, dv == 1);
+                        body = TrayClick(q["name"], btn, dv == 1, q.ContainsKey("mode") && q["mode"] == "uiaclick");
                     }
                     Log("[tray] " + target);
                 }
