@@ -50,7 +50,7 @@
 | 语义定位/点击/读写 | `ui_tree` `ui_find` `ui_click(ref\|name, expect=, verify=1)` `ui_read` `ui_set` `ui_select` |
 | 证明"点对了" | `ui_click(..., expect="预期出现的文字")` → 返回 `expect.found` |
 | 窗口信息/管理 | `window_info`(支持 process 精确匹配) `active_window` `list_apps` `win_manage` `monitors` |
-| 半屏/四分/三均分 | **三均分用 Win+Z**：`pos=zthirdleft\|zthirdmid\|zthirdright`（或 `zkbd`+`layout=`+`zone=`）；半屏/四分可 `sysleft\|sysright\|systopleft\|…`（Win+方向）；无前缀=MoveWindow。系统路径**结束必 Esc** 关 Snap Assist |
+| 半屏/四分/三均分 | **吸附组正道(唯一正确)**：第一窗 `win_manage(snap, pos=zkbd, layout=6, zone=1, fill=ZCode,标题子串)` —— Win+Z 选布局6选区1，**Snap Assist 自动点选** fill 列表填满剩余区 → 三窗成一组拖边联动。**别每窗各发 Win+Z**（三个独立窗，边不联动）。预设 `zthirdleft\|zthirdmid\|zthirdright` = layout 6 zone 1/2/3；无 fill 时选完 zone 自动 Esc 提交 |
 | 找失踪窗口 | `win_manage(action=listall, pid=)` 含隐藏/最小化/托盘化的窗口 |
 | **深度恢复(冻结/没窗口)** | `tray_click(name=, double=0)` 键盘流(Win+B+方向键扫描, 默认) → 窗稳定后 `win_manage(snap=)` 贴位；`app_restore` 为兼容保留但托盘环节同走键盘流 |
 | 托盘唤回 | `tray_click(name=, double=0)` —— Win+B 键盘流扫描主区+溢出层（图标被藏也能点），不再用坐标点托盘 |
@@ -82,7 +82,23 @@
 | 终端/控制台类窗口读不到文字 | 内容是画布渲染，UIA 树里没有。用 `screen_capture` + `ocr_image` 读 |
 | 要三等分/任意比例(系统 Snap Layouts 全支持) | snap 不带 pos，改带网格参数：`cols` 切几列 + `col` 第几列 + `colspan` 跨几列；`rows/row/rowspan` 同理管纵向。横三等分中间 `cols=3 col=2`；竖屏上中下 `rows=3 row=1`；2/3 左 `cols=3 col=1 colspan=2`；四等分左上 `cols=2 col=1 rows=2 row=1`；50/25/25 的右上 `cols=4 col=3 rows=2 row=1`。参数非法会直接报错并说清原因 |
 
-## 划词悬浮球五大坑与配置入口
+## Win+Z 布局表（2560 宽实测，飞出条 1–9 从左到右从上到下）
+
+| # | 布局 | zone 键位（左→右/上→下） |
+|---|---|---|
+| 1 | 左右两半（带当前窗预览态） | 1=左 2=右 |
+| 2 | 左大右窄（左~2/3+右~1/3） | 1=左大 2=右窄 |
+| 3 | 左大 + 右侧上下两格 | 1=左大 2=右上 3=右下 |
+| 4 | 左右两半（与 1 同形） | 1=左 2=右 |
+| 5 | 左大右窄变体（更宽左） | 1=左大 2=右窄 |
+| 6 | **三列均分**（三窗吸附组用它） | 1=左 2=中 3=右 |
+| 7 | 上下两半 | 1=上 2=下 |
+| 8 | 2×2 四格 | 1=左上 2=右上 3=左下 4=右下 |
+| 9 | 三列中间大两边窄 | 1=左窄 2=中大 3=右窄 |
+
+布局列表随窗宽/系统变——fill 失败或 zone 落错格时，先截图飞出条核对再改 layout=/zone=。
+
+
 
 划词悬浮球(shot-pick*.cs)与常驻浮窗调试五大坑 (2026-09-07 全部实测):
 1. WinForms CreateParams 里手加 WS_EX_LAYERED(0x80000) = 整窗隐形(窗口存在/IsWindowVisible=1 但屏幕全空)。圆点/圆角一律用 TransparencyKey 画。

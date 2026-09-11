@@ -2110,12 +2110,19 @@ public partial class ShotService
                         {
                             int sc = 0, sl = 0, ss = 0, sr = 0, srw = 0, srs = 0;
                             int layoutKey = 0, zoneKey = 0;
-                            // 默认 esc=1: 区域选中后 Esc 提交/关 Snap Assist, 否则窗浮在预览态不算贴牢
-                            bool escAfter = !q.ContainsKey("esc") || q["esc"] == "1" || q["esc"] == "true";
+                            bool hasFill = q.ContainsKey("fill") && q["fill"].Trim().Length > 0;
+                            // fill 模式: 第一窗 Win+Z 选区后**不 Esc**(Snap Assist 等着点选填位)
+                            bool escAfter = hasFill ? false : (!q.ContainsKey("esc") || q["esc"] == "1" || q["esc"] == "true");
                             TryInt(q, "cols", out sc); TryInt(q, "col", out sl); TryInt(q, "colspan", out ss);
                             TryInt(q, "rows", out sr); TryInt(q, "row", out srw); TryInt(q, "rowspan", out srs);
                             TryInt(q, "layout", out layoutKey); TryInt(q, "zone", out zoneKey);
                             body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "", sc, sl, ss, sr, srw, srs, layoutKey, zoneKey, escAfter);
+                            if (hasFill && body.Contains("\"ok\":true"))
+                            {
+                                Thread.Sleep(500); // 等 Snap Assist 出现
+                                string fillRes = SnapAssistFill(q["fill"]);
+                                body = body.Substring(0, body.Length - 1) + ",\"fill\":" + fillRes + "}";
+                            }
                         }
                         else if (verb == "close") body = WinClose(wh);
                         else if (verb == "move")
@@ -3240,11 +3247,21 @@ public partial class ShotService
                     if (verb == "min") return McpText(WinShow(wh, SW_MINIMIZE, "minimized"), false);
                     if (verb == "restore") return McpText(WinShow(wh, SW_RESTORE, "restored"), false);
                     if (verb == "close") return McpText(WinClose(wh), false);
-                    if (verb == "snap") return McpText(WinSnap(wh, McpParam(a, "pos"), McpParam(a, "monitor"),
-                        McpParamInt(a, "cols"), McpParamInt(a, "col"), McpParamInt(a, "colspan"),
-                        McpParamInt(a, "rows"), McpParamInt(a, "row"), McpParamInt(a, "rowspan"),
-                        McpParamInt(a, "layout"), McpParamInt(a, "zone"),
-                        McpParam(a, "esc") == "1" || McpParam(a, "esc") == "true"), false);
+                    if (verb == "snap")
+                    {
+                        string fillNames = McpParam(a, "fill");
+                        bool escAfter = fillNames.Length > 0 ? false : (McpParam(a, "esc") == "" || McpParam(a, "esc") == "1" || McpParam(a, "esc") == "true");
+                        string snapBody = WinSnap(wh, McpParam(a, "pos"), McpParam(a, "monitor"),
+                            McpParamInt(a, "cols"), McpParamInt(a, "col"), McpParamInt(a, "colspan"),
+                            McpParamInt(a, "rows"), McpParamInt(a, "row"), McpParamInt(a, "rowspan"),
+                            McpParamInt(a, "layout"), McpParamInt(a, "zone"), escAfter);
+                        if (fillNames.Length > 0 && snapBody.Contains("\"ok\":true"))
+                        {
+                            Thread.Sleep(500);
+                            snapBody = snapBody.Substring(0, snapBody.Length - 1) + ",\"fill\":" + SnapAssistFill(fillNames) + "}";
+                        }
+                        return McpText(snapBody, false);
+                    }
                     if (verb == "move") return McpText(WinMove(wh, McpParamInt(a, "x"), McpParamInt(a, "y"), McpParamInt(a, "w"), McpParamInt(a, "h")), false);
                     return McpText("unknown verb (activate/max/min/restore/close/move/wait/list)", true);
                 }

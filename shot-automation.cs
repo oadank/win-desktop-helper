@@ -252,6 +252,94 @@ partial class ShotService
         return (byte)(0x30 + n); // VK_0..VK_9
     }
 
+    // ==================== Snap Assist 点选填位（系统吸附组的正确姿势） ====================
+    // 老大定论(2026-09-11): 每窗各自 Win+Z = 三个独立窗, 边界不联动; 正确 = 只有第一个窗 Win+Z 选布局,
+    // 之后 Snap Assist 列出其余窗口缩略图, **点选**它们占用预留位 → 三窗成一吸附组, 拖边一起动。
+    // 实现: 第一窗贴完(不 Esc) → 从桌面 UIA 找 Name 含目标标题/进程名的缩略图(排除 app 自身窗口) → 点中心。
+    // 顶层可见窗清单(Snap Assist 点选时用来排除 app 本体: Chrome 子元素 NativeWindowHandle=0, hwnd 过滤拦不住)
+    struct SnapTopWnd { public IntPtr h; public string title; public RECT r; }
+    static List<SnapTopWnd> SnapTopWindows()
+    {
+        var list = new List<SnapTopWnd>();
+        EnumWindows(delegate(IntPtr h, IntPtr lp)
+        {
+            if (GetAncestor(h, 2) != h) return true;
+            if (!IsWindowVisible(h)) return true;
+            var tb = new StringBuilder(256); GetWindowTextW(h, tb, 256);
+            string t = tb.ToString(); if (t.Length == 0) return true;
+            RECT r; GetWindowRect(h, out r);
+            list.Add(new SnapTopWnd { h = h, title = t, r = r });
+            return true;
+        }, IntPtr.Zero);
+        return list;
+    }
+    static bool RectClose(RECT a, RECT b)
+    {
+        return Math.Abs(a.Left - b.Left) < 12 && Math.Abs(a.Top - b.Top) < 12 &&
+               Math.Abs((a.Right - a.Left) - (b.Right - b.Left)) < 12 &&
+               Math.Abs((a.Bottom - a.Top) - (b.Bottom - b.Top)) < 12;
+    }
+
+    static string SnapAssistClickOne(string match, IntPtr excludeHwnd)
+    {
+        try
+        {
+            var tops = SnapTopWindows(); // 一次性采样
+            var root = System.Windows.Automation.AutomationElement.RootElement;
+            foreach (var el in WalkLimited(root, 4000))
+            {
+                string n = null;
+                try { n = el.Current.Name; } catch { }
+                if (string.IsNullOrEmpty(n) || n.IndexOf(match, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                IntPtr elHwnd = IntPtr.Zero;
+                try { elHwnd = new IntPtr(el.Current.NativeWindowHandle); } catch { }
+                if (elHwnd != IntPtr.Zero)
+                {
+                    if (elHwnd == excludeHwnd) continue;
+                    var clsB = new StringBuilder(128);
+                    GetClassNameW(elHwnd, clsB, 128);
+                    string cls = clsB.ToString();
+                    if (cls == "Shell_TrayWnd" || cls == "Progman" || cls == "WorkerW") continue;
+                }
+                var r = el.Current.BoundingRectangle;
+                var elRect = new RECT { Left = (int)r.X, Top = (int)r.Y, Right = (int)(r.X + r.Width), Bottom = (int)(r.Y + r.Height) };
+                // 几何排除: 与"标题含 match 的本体窗"矩形重合 = 就是本体(非 Snap Assist 缩略图)
+                bool isSelf = false;
+                foreach (var w in tops)
+                {
+                    if (w.title.IndexOf(match, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (elHwnd == w.h || RectClose(elRect, w.r)) { isSelf = true; break; }
+                }
+                if (isSelf) continue;
+                if (r.Width < 80 || r.Height < 80) continue;
+                int cx = (int)(r.X + r.Width / 2), cy = (int)(r.Y + r.Height / 2);
+                MouseMove(cx, cy); Thread.Sleep(90);
+                MouseClick("left", 1);
+                Log("snapassist click: match=" + match + " name=[" + (n.Length > 40 ? n.Substring(0, 40) : n) + "] @ " + cx + "," + cy);
+                return "{\"ok\":true,\"matched\":\"" + JsonEscape(n.Length > 60 ? n.Substring(0, 60) : n) + "\",\"at\":{\"x\":" + cx + ",\"y\":" + cy + "}}";
+            }
+            return "{\"ok\":false,\"error\":\"Snap Assist 里没找到含 '" + JsonEscape(match) + "' 的缩略图(Snap Assist 可能已关, 或缩略图名不匹配)\"}";
+        }
+        catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
+    }
+
+    // 依次点选 fill 列表填满剩余区; 返回逐项结果
+    static string SnapAssistFill(string namesRaw)
+    {
+        var results = new List<string>();
+        string[] names = (namesRaw ?? "").Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (string raw in names)
+        {
+            string m = raw.Trim();
+            if (m.Length == 0) continue;
+            string r = SnapAssistClickOne(m, IntPtr.Zero);
+            results.Add(r);
+            Thread.Sleep(650); // 等上一格落位、下一格 Snap Assist 就绪
+            if (r.Contains("\"ok\":false")) break;
+        }
+        return "{\"ok\":true,\"fills\":[" + string.Join(",", results) + "]}";
+    }
+
     // Win+Z 键盘流。layoutKey/zoneKey: 0=按 pos 预设; 1-9=显式数字键。escAfter=1 才在结尾 Esc。
     static string WinSnapZ(IntPtr h, string pos, string mon, int layoutKey, int zoneKey, bool escAfter)
     {
