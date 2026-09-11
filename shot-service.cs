@@ -2110,7 +2110,8 @@ public partial class ShotService
                         {
                             int sc = 0, sl = 0, ss = 0, sr = 0, srw = 0, srs = 0;
                             int layoutKey = 0, zoneKey = 0;
-                            bool escAfter = q.ContainsKey("esc") && (q["esc"] == "1" || q["esc"] == "true");
+                            // 默认 esc=1: 区域选中后 Esc 提交/关 Snap Assist, 否则窗浮在预览态不算贴牢
+                            bool escAfter = !q.ContainsKey("esc") || q["esc"] == "1" || q["esc"] == "true";
                             TryInt(q, "cols", out sc); TryInt(q, "col", out sl); TryInt(q, "colspan", out ss);
                             TryInt(q, "rows", out sr); TryInt(q, "row", out srw); TryInt(q, "rowspan", out srs);
                             TryInt(q, "layout", out layoutKey); TryInt(q, "zone", out zoneKey);

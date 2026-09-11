@@ -72,7 +72,7 @@ const TOOLS = [
         pos: { type: 'string', description: 'action=snap: left|right|top|bottom|topleft|…=MoveWindow 画矩形; sysleft|sysright|…=真系统 Win+方向+Esc; zthirdleft|zthirdmid|zthirdright|zkbd=真系统 Win+Z Snap Layouts+Esc(三均分首选); max|min|restore' },
         layout: { type: 'number', description: 'Win+Z 布局数字键。本机三均分=6; 9=中间大两边小。缺省按 pos' },
         zone: { type: 'number', description: 'Win+Z 区域 1-9(三均分左中右=1/2/3)' },
-        esc: { type: 'number', description: '1=贴完后 Esc(仅取消时用); 默认 0, 连续多窗贴靠不要 Esc' },
+        esc: { type: 'number', description: '1=贴完后 Esc 提交 Snap Assist(默认 1, 否则窗浮着不算贴牢); 0=不 Esc' },
         monitor: { type: 'string', description: 'action=snap 时可选: 第几块屏(1..n) 或 next 移到下一屏 / prev 上一屏; 不给 = 窗口当前所在屏。多屏布局用这个' },
         cols: { type: 'number', description: 'action=snap 网格布局: 横向切几列(1-12)。横三等分 cols=3; 竖屏三等分用 rows' },
         col: { type: 'number', description: 'action=snap 网格布局: 占第几列(1-based, 必须 <= cols)' },

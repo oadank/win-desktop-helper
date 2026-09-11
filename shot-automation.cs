@@ -289,8 +289,12 @@ partial class ShotService
         KbdTap(DigitVk(lay));
         Thread.Sleep(220);
         KbdTap(DigitVk(zone));
-        Thread.Sleep(400);
-        if (escAfter) KbdEsc(); // 仅显式取消时
+        // 区域选中后窗常停在 Snap Assist 悬浮预览 —— 不收口=系统不算贴牢(老大: 浮着, 和邻窗不是吸附组)
+        // escAfter 默认 true: 这里 Esc = **提交并关掉 Snap Assist**, 不是取消本次贴靠
+        // 连续贴多窗时每窗各走完整 Win+Z+Esc, 不要靠 Snap Assist 点选(自动化点不准缩略图)
+        Thread.Sleep(350);
+        if (escAfter) KbdEsc();
+        Thread.Sleep(120);
         RECT rc; GetWindowRect(h, out rc);
         int nowMon = Array.IndexOf(System.Windows.Forms.Screen.AllScreens, System.Windows.Forms.Screen.FromHandle(h)) + 1;
         Log("win snap Win+Z: " + h + " pos=" + pos + " layout=" + lay + " zone=" + zone + " mon=" + nowMon + (escAfter ? " Esc" : " noEsc"));
@@ -311,11 +315,11 @@ partial class ShotService
     // 半屏用 MoveWindow 直接算, 比模拟按键稳: 不受前台焦点限制, 多屏可精确指定, 且返回实际 rect 可验证
     static string WinSnap(IntPtr h, string pos, string mon, int cols, int col, int cspan, int rows, int row, int rspan)
     {
-        return WinSnap(h, pos, mon, cols, col, cspan, rows, row, rspan, 0, 0, false);
+        return WinSnap(h, pos, mon, cols, col, cspan, rows, row, rspan, 0, 0, true);
     }
     static string WinSnap(IntPtr h, string pos, string mon, int cols, int col, int cspan, int rows, int row, int rspan, int layoutKey, int zoneKey)
     {
-        return WinSnap(h, pos, mon, cols, col, cspan, rows, row, rspan, layoutKey, zoneKey, false);
+        return WinSnap(h, pos, mon, cols, col, cspan, rows, row, rspan, layoutKey, zoneKey, true);
     }
     static string WinSnap(IntPtr h, string pos, string mon, int cols, int col, int cspan, int rows, int row, int rspan, int layoutKey, int zoneKey, bool escAfter)
     {
