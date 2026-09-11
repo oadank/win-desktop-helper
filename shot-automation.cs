@@ -346,28 +346,33 @@ partial class ShotService
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
         if (!IsWindow(h)) return "{\"ok\":false,\"error\":\"invalid handle: 窗口已关闭, 重新 list_apps 采样\"}";
         pos = (pos ?? "").ToLowerInvariant();
-        // 预设 → (默认布局号, 默认区域号)。本机三列 layout=9。
+        // 预设 → (默认布局号, 默认区域号)。
+        // 老大实测定论(2026-09-11): Win+Z 飞出条 1-3 = 动态预设组(把当前 app 自动摆位占格, 一次动多个窗, 不可控);
+        // 4-9 = 纯区域分割(不占位)。自动化一律用 4-9!
+        //   4=左右两半  5=左大右窄  6=三列均分  7=上下两半  8=2x2四格  9=三列中间大
         int lay = layoutKey, zone = zoneKey;
         if (lay <= 0 || zone <= 0)
         {
             int dLay = 0, dZone = 0;
             switch (pos)
             {
-                case "zleft": case "sysleft": dLay = 1; dZone = 1; break;
-                case "zright": case "sysright": dLay = 1; dZone = 2; break;
+                case "zleft": case "sysleft": dLay = 4; dZone = 1; break;
+                case "zright": case "sysright": dLay = 4; dZone = 2; break;
                 case "zthirdleft": case "thirdleft": dLay = 6; dZone = 1; break;
                 case "zthirdmid": case "thirdmid": case "thirdmiddle": dLay = 6; dZone = 2; break;
                 case "zthirdright": case "thirdright": dLay = 6; dZone = 3; break;
-                case "ztopleft": case "systopleft": dLay = 4; dZone = 1; break;
-                case "ztopright": case "systopright": dLay = 4; dZone = 2; break;
-                case "zbottomleft": case "sysbottomleft": dLay = 4; dZone = 3; break;
-                case "zbottomright": case "sysbottomright": dLay = 4; dZone = 4; break;
+                case "ztopleft": case "systopleft": dLay = 8; dZone = 1; break;
+                case "ztopright": case "systopright": dLay = 8; dZone = 2; break;
+                case "zbottomleft": case "sysbottomleft": dLay = 8; dZone = 3; break;
+                case "zbottomright": case "sysbottomright": dLay = 8; dZone = 4; break;
+                case "ztop": dLay = 7; dZone = 1; break;
+                case "zbottom": dLay = 7; dZone = 2; break;
                 case "zkbd": default: break;
             }
             if (lay <= 0) lay = dLay;
             if (zone <= 0) zone = dZone;
         }
-        if (lay <= 0) lay = 6; // 缺省三均分(老大实测 layout=6; layout=9 是中间大两边小)
+        if (lay <= 0) lay = 6; // 缺省三列均分(纯分割, 非预设组)
         if (zone <= 0) zone = 1;
 
         try { if (IsIconic(h)) { ShowWindow(h, SW_RESTORE); Thread.Sleep(150); } } catch { }
