@@ -3,7 +3,7 @@
 [Setup]
 AppId={{FE6F68E9-0CEB-450B-B438-49BFDF5FFB15}
 AppName=Win Desktop Helper
-AppVersion=0.0.18
+AppVersion=0.0.19
 AppPublisher=oadank
 AppPublisherURL=https://github.com/oadank/win-desktop-helper
 DefaultDirName={localappdata}\Programs\win-desktop-helper
@@ -12,7 +12,7 @@ UninstallDisplayIcon={app}\icon.ico
 Compression=lzma2
 SolidCompression=yes
 OutputDir=release
-OutputBaseFilename=win-desktop-helper-setup-0.0.18
+OutputBaseFilename=win-desktop-helper-setup-0.0.19
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -42,12 +42,11 @@ Name: "{autoprograms}\Win Desktop Helper"; Filename: "{app}\shot-service.exe"; I
 Name: "{autodesktop}\Win Desktop Helper"; Filename: "{app}\shot-service.exe"; IconFilename: "{app}\icon.ico"; IconIndex: 0; Tasks: desktopicon
 
 [Run]
-Filename: "{cmd}"; Parameters: "/c schtasks /create /tn dsh-shot-helper /tr ""{app}\shot-service.exe"" /sc once /st 00:00 /it /ru {username} /f"; Flags: runhidden; StatusMsg: "创建计划任务(手动拉起入口)..."
+; 计划任务改走 Pascal Exec(Unicode CreateProcess)，不经 cmd —— 中文用户名/路径经 OEM 码页会变乱码
 Filename: "{app}\shot-service.exe"; Description: "立即启动 Win Desktop Helper"; Flags: nowait runhidden
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/c taskkill /IM shot-service.exe /F"; Flags: runhidden; StatusMsg: "停止服务进程..."
-Filename: "{cmd}"; Parameters: "/c schtasks /delete /tn dsh-shot-helper /f"; Flags: runhidden
 
 [Code]
 // 安装前强制结束运行中的进程，避免覆盖 exe 时 DeleteFile code 5 (CloseApplications 对无窗口进程不可靠)
@@ -60,4 +59,26 @@ begin
   Exec('taskkill.exe', '/F /IM shot-service.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill.exe', '/F /IM shot-watcher.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
+end;
+
+// 计划任务: schtasks.exe 直调(Unicode)，路径/用户名用 ExpandConstant 展开。
+// 旧写法 cmd /c schtasks ... /ru {username}：中文账号(如 阿丹)会被 cmd OEM 码页解成乱码。
+function CreateHelperTask(): Boolean;
+var
+  ResultCode: Integer;
+  ExePath: String;
+  User: String;
+begin
+  ExePath := ExpandConstant('{app}') + '\shot-service.exe';
+  User := ExpandConstant('{username}');
+  Result := Exec('schtasks.exe',
+    '/create /tn "dsh-shot-helper" /tr "' + ExePath + '" /sc once /st 00:00 /it /ru "' + User + '" /f',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function CurStepChanged(CurStep: TSetupStep): Boolean;
+begin
+  Result := True;
+  if CurStep = ssPostInstall then
+    CreateHelperTask();
 end;

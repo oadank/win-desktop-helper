@@ -1,4 +1,4 @@
-﻿// shot-service — 自建 Session 1 多模态助手桥 (HTTP, 127.0.0.1:18800)
+// shot-service — 自建 Session 1 多模态助手桥 (HTTP, 127.0.0.1:18800)
 // 用途: Session 0 的任何 agent 通过 HTTP 请求, 让运行在用户会话(Session 1)的本服务:
 //   看: 截图(全屏/区域/窗口/显示器) + 活动窗口信息 + 显示器元数据
 //   动: 鼠标移动/点击/滚轮 + 键盘输入(含中文)/组合键 — T1 Safe Computer Control (Level 1)
@@ -1791,10 +1791,8 @@ public partial class ShotService
                     }
                     else
                     {
-                        long[] lt; lock (uiaLeaked) lt = uiaLeaked.ToArray();
-                        int nowTick = Environment.TickCount;
-                        var stale = System.Linq.Enumerable.Count(lt, (long x) => (nowTick - x) > UIA_LEAK_TTL);
-                        body = "{\"ok\":true,\"uiaLeaked\":" + lt.Length + ",\"stale\":" + stale + ",\"fused\":" + (lt.Length - stale >= 3 ? "true" : "false") + ",\"ttlMin\":30,\"entries\":[" + string.Join(",", System.Linq.Enumerable.Select(lt, (long x) => "\"" + (nowTick - x) / 1000 + "s ago\"")) + "],\"hint\":\"泄漏线程 30 分钟自动衰减; 或 ?reset=1 立即清零解除熔断\"}";
+                        string[] lt; lock (uiaLeaked) lt = uiaLeaked.ToArray();
+                        body = "{\"ok\":true,\"uiaLeaked\":" + lt.Length + ",\"fused\":" + (lt.Length >= 3 ? "true" : "false") + ",\"entries\":[" + string.Join(",", System.Linq.Enumerable.Select(lt, (string x) => "\"" + JsonEscape(x) + "\"")) + "],\"hint\":\"泄漏线程需重启 shot-service 解除熔断; 或 ?reset=1 立即清零\"}";
                     }
                 }
                 else if (path.StartsWith("/img/"))
@@ -2313,6 +2311,34 @@ public partial class ShotService
         }
         catch (Exception ex) { outText = ex.Message; return false; }
     }
+
+    // 中文用户名路径塞进 cmd/.bat 会被 OEM 码页解乱（阿丹 UTF-8 → GBK 解成 闃夸腹）。
+    // 能拿到纯 ASCII 的 8.3 短路径就用短路径；拿不到则原样返回（上层应用 Encoding.Default 写 bat）。
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern int GetShortPathNameW(string lpszLongPath, StringBuilder lpszShortPath, int cchBuffer);
+
+    static string PathSafeForCmd(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return path;
+        bool pureAscii = true;
+        foreach (char c in path) { if (c > 127) { pureAscii = false; break; } }
+        if (pureAscii) return path;
+        try
+        {
+            var sb = new StringBuilder(512);
+            int n = GetShortPathNameW(path, sb, sb.Capacity);
+            if (n > 0 && n < sb.Capacity)
+            {
+                string s = sb.ToString();
+                pureAscii = true;
+                foreach (char c in s) { if (c > 127) { pureAscii = false; break; } }
+                if (pureAscii) return s;
+            }
+        }
+        catch { }
+        return path;
+    }
+
     static bool TaskExists() { string o; return RunSchtasks("/query /tn \"" + TASK_NAME + "\"", out o); }
     static bool TaskCreate(string exe)
     {
@@ -2828,19 +2854,25 @@ public partial class ShotService
             string dir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
             // 独立安装器脚本: 等文件锁释放 -> 静默安装(替换 exe) -> 自删。
             // 安装器由 cmd start 拉起, 不属于本进程树, 绝不会被 PrepareToInstall 的 taskkill 误杀; 替换完由 iss [Run] 拉起新版。
+            // 【严重编码坑 2026-09-11】File.WriteAllText 默认 UTF-8；中文用户名路径写入 .bat 后，
+            // cmd.exe 按系统 OEM/ANSI 码页(中文 Windows=GBK)读文件 → "阿丹" 变成 "闃夸腹"，
+            // 安装器收到 /DIR=C:\Users\闃夸腹\... 会【新建乱码目录】。
+            // 修法: ① 路径尽量转 8.3 纯 ASCII 短路径 ② bat 必须用 Encoding.Default 写(与 cmd 同码页)。
+            string dirCmd = PathSafeForCmd(dir);
+            string insCmd = PathSafeForCmd(tmp);
             string bat = Path.Combine(Path.GetTempPath(), "wdh-update-" + DateTime.Now.Ticks.ToString("x") + ".bat");
             var sb = new StringBuilder();
             sb.AppendLine("@echo off");
             sb.AppendLine("timeout /t 3 /nobreak >nul 2>&1");
             sb.AppendLine("taskkill /F /IM shot-service.exe >nul 2>&1");
-            sb.AppendLine("set \"INS=" + tmp + "\"");
-            sb.AppendLine("set \"DIR=" + dir + "\"");
+            sb.AppendLine("set \"INS=" + insCmd + "\"");
+            sb.AppendLine("set \"DIR=" + dirCmd + "\"");
             sb.AppendLine("start \"\" /wait \"%INS%\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"%DIR%\"");
             sb.AppendLine("del /f /q \"%~f0\" >nul 2>&1");
-            File.WriteAllText(bat, sb.ToString());
+            File.WriteAllText(bat, sb.ToString(), Encoding.Default);
             try { foreach (var p in Process.GetProcessesByName("shot-watcher")) { try { p.Kill(); } catch { } } } catch { }
             Process.Start(new ProcessStartInfo("cmd.exe", "/c \"" + bat + "\"") { CreateNoWindow = true, UseShellExecute = false });
-            Log("update: self-updater launched (detached installer -> " + dir + "), exiting self to release file lock");
+            Log("update: self-updater launched (detached installer -> " + dir + (dirCmd != dir ? " via short " + dirCmd : "") + "), exiting self to release file lock");
             Thread.Sleep(500);
             Environment.Exit(0); // 退出自身释放 exe 锁, 安装器才能替换; 新版由 iss [Run] 拉起
         }
