@@ -82,6 +82,21 @@
 | 终端/控制台类窗口读不到文字 | 内容是画布渲染，UIA 树里没有。用 `screen_capture` + `ocr_image` 读 |
 | 要三等分/任意比例(系统 Snap Layouts 全支持) | snap 不带 pos，改带网格参数：`cols` 切几列 + `col` 第几列 + `colspan` 跨几列；`rows/row/rowspan` 同理管纵向。横三等分中间 `cols=3 col=2`；竖屏上中下 `rows=3 row=1`；2/3 左 `cols=3 col=1 colspan=2`；四等分左上 `cols=2 col=1 rows=2 row=1`；50/25/25 的右上 `cols=4 col=3 rows=2 row=1`。参数非法会直接报错并说清原因 |
 
+## Win+Z 已知系统问题（老大 2026-09-11 实测定性：系统 bug，非工具问题）
+
+| 布局 | 多窗 fill 实测 | 结论 |
+|---|---|---|
+| L4 半 / L5 左大右窄 | ✅ 稳 | 可用 |
+| **L6 三均分** | ✅ 双 fill 稳定落位 | **多窗首选** |
+| L7 左半+右上下 | 第2格 ZCode api ok 但不落位 | ⚠️ 不可靠 |
+| **L8 四均分** | **选中 ZCode 后 assist 自动退出**（老大手测确认） | ❌ 系统级 bug，四窗组做不成 |
+| L9 中间大 | ZCode fill api ok 不落位，其余 app 正常 | ⚠️ 不可靠 |
+
+规律：失败全部发生在 **ZCode** 缩略图上（Enter 后窗不动/assist 退出）；Edge/设置/MiMo 正常。
+怀疑与 ZCode 最小高 800 + Electron 拒绝缩放有关（全高格 L6 能成，短格 698/683 必挂，L9 全高也偶挂）。
+
+对策：多窗吸附组用 **L6 三均分**；必须四分/含 ZCode 的其它布局时，ZCode 用 grid MoveWindow 摆（无组联动），其余窗走 assist。
+
 ## Win+Z 布局键位（老大实测定论 + 微软官方口径）
 
 **官方**：飞出条布局集合动态（随屏幕/窗口变）；数字=飞出条第几格（行优先）；选完布局 Snap Assist 自动触发点选填位 → 自动成 Snap group；拖分隔条相邻窗联动缩放。
