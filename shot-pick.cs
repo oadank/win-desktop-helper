@@ -397,13 +397,31 @@ partial class ShotService
     //   驱动拖动的 Timer 就无法触发 → 拖动滞后、心跳积压、末尾一次性收起 = 看着像卡死。
     //   日志实锤: 19:56:20 点「问AI」, 19:56:49 才出卡片 —— UI 线程被取词占了 29 秒。
     // 这里在 UI 线程只做"取快照 + 丢后台", 取词全在 ThreadPool, 拿到词再 BeginInvoke 回来画小点。
+    static readonly int pickOwnPid = System.Diagnostics.Process.GetCurrentProcess().Id;
+    // 前台窗口选取: 若前台是我们自己的悬浮窗(点/条/卡片偶发占前台), 用鼠标正下方的顶层窗替代——
+    // 否则 CDP 表按前台进程查端口=查到自己头上(port=0 静默跳 CDP), 症状=时灵时不灵(实锤 2026-09-11 交替失败)
+    static IntPtr PickFgWindow(int x, int y)
+    {
+        IntPtr fg = GetForegroundWindow();
+        try
+        {
+            uint pid; GetWindowThreadProcessId(fg, out pid);
+            if ((int)pid != pickOwnPid) return fg;
+            IntPtr w = WindowFromPoint(new Point(x, y));
+            if (w != IntPtr.Zero) { IntPtr root = GetAncestor(w, 2); if (root != IntPtr.Zero) w = root; }
+            if (w != IntPtr.Zero && w != fg) { Log("pick fg=self -> using point window hwnd=" + w); return w; }
+        }
+        catch { }
+        return fg;
+    }
+
     static void PickHandleAsync(int x, int y, bool click, int x0, int y0)
     {
         if (Interlocked.Exchange(ref pickBusy, 1) == 1) return;
         try
         {
             if (click && (pickCard != null || pickBarWin != null)) { Interlocked.Exchange(ref pickBusy, 0); return; }
-            IntPtr fgAt = GetForegroundWindow();
+            IntPtr fgAt = PickFgWindow(x, y);
             if (click)
             {
                 // 限流: 单击取词是跨进程 UIA COM, 乱点会连环发起拖慢全系统。
@@ -702,6 +720,12 @@ partial class ShotService
         int t0 = Environment.TickCount;
         try
         {
+            // 诊断行: 失败时一眼看出前台到底是谁/CDP 端口解析成什么(交替失败=前台被自家悬浮窗占用的实锤路径)
+            {
+                string fpn = "?"; int fgp = 0;
+                try { uint fp; GetWindowThreadProcessId(fgAt, out fp); fgp = (int)fp; fpn = System.Diagnostics.Process.GetProcessById(fp).ProcessName; } catch { }
+                Log("pick(" + (click ? "click" : "drag") + ") fg=[" + fpn + "] pid=" + fgp + " cdp=" + PickCdpPort(fgAt) + " pt=" + x + "," + y);
+            }
             if (click)
             {
                 // 浏览器: 单击/双击取词归扩展(pick-inject) —— 原生不发; 终端: 红线不发
