@@ -545,7 +545,20 @@ partial class ShotService
         catch { return ""; }
     }
 
-    // 单 target: 连 ws → evaluate getSelection 的 base64 → 解码。任何失败 = ""
+    // 读选区表达式: ①document 选区 ②activeElement 输入框选区(getSelection 看不见 textarea/input)
+    // ③同进程 iframe 的选区(主 frame 看不见子 frame, 穿透 contentDocument, 跨域自动跳过)。
+    // 全单引号避免 JSON 转义; 结果走 btoa 避开 JSON 编码。
+    static readonly string pickCdpExpr =
+        "btoa(unescape(encodeURIComponent((function(){var t='';" +
+        "try{if(window.getSelection&&getSelection())t=getSelection().toString()||'';}catch(e){}" +
+        "if(!t){try{var a=document.activeElement;" +
+        "if(a&&(a.tagName==='TEXTAREA'||a.tagName==='INPUT')&&typeof a.selectionStart==='number'&&a.selectionEnd!==a.selectionStart)t=a.value.slice(a.selectionStart,a.selectionEnd);}catch(e){}}" +
+        "if(!t){try{var fs=document.querySelectorAll('iframe');" +
+        "for(var i=0;i<fs.length;i++){var d=null;try{d=fs[i].contentDocument;}catch(e){}" +
+        "if(d&&d.getSelection){var s2=d.getSelection().toString()||'';if(s2){t=s2;break;}}}}catch(e){}}" +
+        "return t;})())))";
+
+    // 单 target: 连 ws → evaluate 选区表达式的 base64 → 解码。任何失败 = ""
     static string CdpEvalSelection(string wsUrl)
     {
         try
@@ -554,8 +567,7 @@ partial class ShotService
             {
                 using (System.Threading.CancellationTokenSource ctsC = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(1000)))
                 { ws.ConnectAsync(new Uri(wsUrl), ctsC.Token).GetAwaiter().GetResult(); }
-                string expr = "btoa(unescape(encodeURIComponent((window.getSelection&&getSelection()?getSelection().toString():''))))";
-                byte[] msg = Encoding.UTF8.GetBytes("{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" + expr + "\",\"returnByValue\":true}}");
+                byte[] msg = Encoding.UTF8.GetBytes("{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" + pickCdpExpr + "\",\"returnByValue\":true}}");
                 using (System.Threading.CancellationTokenSource ctsS = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(800)))
                 { ws.SendAsync(new ArraySegment<byte>(msg), System.Net.WebSockets.WebSocketMessageType.Text, true, ctsS.Token).GetAwaiter().GetResult(); }
                 byte[] rx = new byte[65536];
@@ -588,19 +600,32 @@ partial class ShotService
             }
             System.Text.RegularExpressions.MatchCollection mc = System.Text.RegularExpressions.Regex.Matches(
                 list, "\"webSocketDebuggerUrl\"\\s*:\\s*\"(ws://[^\"]*/devtools/(?:page|iframe)/[^\"]+)\"");
-            foreach (System.Text.RegularExpressions.Match m in mc)
+            string got = CdpSweep(mc);
+            if (string.IsNullOrWhiteSpace(got))
             {
-                string got = CdpEvalSelection(m.Groups[1].Value);
-                if (!string.IsNullOrWhiteSpace(got))
-                {
-                    Log("pick cdp: " + (Environment.TickCount - t0) + "ms port=" + port + " chars=" + got.Length + " | " + PickOneLine(got));
-                    return got;
-                }
+                // 选区落定晚于读取的兜底: 双击选词在 mouseup 后一瞬才进 DOM, 80ms 后重扫
+                Thread.Sleep(80);
+                got = CdpSweep(mc);
             }
-            Log("pick cdp: " + (Environment.TickCount - t0) + "ms port=" + port + " targets=" + mc.Count + " sel empty");
+            if (!string.IsNullOrWhiteSpace(got))
+            {
+                Log("pick cdp: " + (Environment.TickCount - t0) + "ms port=" + port + " chars=" + got.Length + " | " + PickOneLine(got));
+                return got;
+            }
+            Log("pick cdp: " + (Environment.TickCount - t0) + "ms port=" + port + " targets=" + mc.Count + " sel empty(含重试)");
             return "";
         }
         catch (Exception ex) { Log("pick cdp err: " + ex.Message); return ""; }
+    }
+
+    static string CdpSweep(System.Text.RegularExpressions.MatchCollection mc)
+    {
+        foreach (System.Text.RegularExpressions.Match m in mc)
+        {
+            string got = CdpEvalSelection(m.Groups[1].Value);
+            if (!string.IsNullOrWhiteSpace(got)) return got;
+        }
+        return "";
     }
 
     // click=true = 用户只是**单击**(没有划选)。2026-09-07 老大要的"点击时也弹出悬浮球"。
