@@ -6,5 +6,5 @@
 [assembly: AssemblyProduct("Win Desktop Helper")]
 [assembly: AssemblyCompany("oadank")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.0.19")]
-[assembly: AssemblyFileVersion("0.0.19")]
+[assembly: AssemblyVersion("0.0.20")]
+[assembly: AssemblyFileVersion("0.0.20")]
