@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Win Desktop Helper 划词",
+  "version": "0.1.0",
+  "description": "浏览器划词 → 本地悬浮球（只传文字，球贴光标）",
+  "host_permissions": ["http://127.0.0.1:18800/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["config.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["activeTab", "scripting"]
+}

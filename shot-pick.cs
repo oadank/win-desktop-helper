@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Net;
@@ -403,8 +403,10 @@ partial class ShotService
                 // 真本事路线 —— 本地应用 UIA 优先(无副作用); 拿不到 = **截选区矩形 OCR**。
                 // OCR 全局生效: 浏览器(Chromium 不给 UIA 文本)/终端(conhost UIA 有毒)/图片/PDF 全通吃,
                 // 零按键注入、零剪贴板占用、零副作用。选区矩形 = 钩子 DOWN/UP 坐标(x0,y0)-(x,y)。
+                // 浏览器划选归 Edge 扩展 /pick-inject 所有 —— 原生钩子让位, 避免双球/双源。
                 bool terminal = PickIsTerminal(fgAt);
-                if (!terminal)
+                bool browser = PickIsBrowser(fgAt);
+                if (!terminal && !browser)
                 {
                     try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
                 }
@@ -566,6 +568,31 @@ partial class ShotService
             }
         }
         catch (Exception ex) { Log("pick ocr err: " + ex.Message); return ""; }
+    }
+
+    // Edge MV3 扩展 POST /pick-inject 入口: 只收文字, 球贴光标(方案A, 零 DPI 换算)
+    // 返回 null=成功; 非 null=错误信息
+    static string PickInject(string text)
+    {
+        try
+        {
+            text = (text ?? "").Trim();
+            if (text.Length == 0) return "empty text";
+            if (pickEnabled != 1) return "pick disabled";
+            if (text.Length > 2000) text = text.Substring(0, 2000);
+            POINT p;
+            if (!GetCursorPos(out p)) return "GetCursorPos failed";
+            pickSel = text;
+            pickLastX = p.x; pickLastY = p.y;
+            pickShownAt = Environment.TickCount;
+            pickBusy = 0; // 扩展路径无 OCR 等待
+            Control s = pickSync;
+            if (s == null || !s.IsHandleCreated) return "pick UI not ready";
+            s.BeginInvoke(new MethodInvoker(delegate { ShowPickDot(p.x, p.y); }));
+            Log("pick-inject: " + text.Length + " chars @ " + p.x + "," + p.y + " | " + PickOneLine(text));
+            return null;
+        }
+        catch (Exception ex) { Log("pick-inject err: " + ex.Message); return ex.Message; }
     }
 
     // ---- 小点 / 工具条 / 卡片 ----

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -300,12 +300,47 @@ partial class ShotService
             case "max": case "maximize": mode = "max"; break;
             case "min": case "minimize": mode = "min"; break;
             case "restore": mode = "restore"; break;
-            default: return "{\"ok\":false,\"error\":\"pos 无效: left/right/top/bottom/topleft/topright/bottomleft/bottomright/max/min/restore\"}";
+            case "sysleft": case "sysright": case "systop": case "sysbottom":
+            case "systopleft": case "systopright": case "sysbottomleft": case "sysbottomright":
+                // 真·系统 Snap Layouts 键盘流: Win+方向 → Esc 退出 Snap Assist
+                // (老大: 不发 Esc 会拉着其它窗一起排)
+                mode = "syskbd";
+                break;
+            default: return "{\"ok\":false,\"error\":\"pos 无效: left/right/top/bottom/topleft/topright/bottomleft/bottomright/max/min/restore/sysleft|sysright|systop|sysbottom|systopleft|systopright|sysbottomleft|sysbottomright (sys*=真系统吸附+Esc)\"}";
         }
         bool iconic = false, zoomed = false;
         try { iconic = IsIconic(h); } catch { }
         try { zoomed = IsZoomed(h); } catch { }
         if (mode == "min") ShowWindow(h, SW_MINIMIZE);
+        else if (mode == "syskbd")
+        {
+            // 真·系统吸附: 先激活目标窗, 再 Win+方向; 结束必 Esc 关 Snap Assist
+            if (iconic || zoomed) { ShowWindow(h, SW_RESTORE); Thread.Sleep(150); }
+            SetForegroundWindow(h);
+            Thread.Sleep(80);
+            string vkArrow = "0x25"; // left
+            if (pos == "sysright" || pos == "systopright" || pos == "sysbottomright") vkArrow = "0x27";
+            else if (pos == "systop" || pos == "systopleft" || pos == "systopright") vkArrow = "0x26";
+            else if (pos == "sysbottom" || pos == "sysbottomleft" || pos == "sysbottomright") vkArrow = "0x28";
+            // Win+方向: 先按 Win, 再主键, 再松主键, 再松 Win
+            keybd_event(0x5B, 0, 0, UIntPtr.Zero);
+            System.Threading.Thread.Sleep(20);
+            ushort av = (ushort)System.Convert.ToUInt16(vkArrow, 16);
+            keybd_event((byte)av, 0, 0, UIntPtr.Zero);
+            keybd_event((byte)av, 0, 2, UIntPtr.Zero);
+            System.Threading.Thread.Sleep(120);
+            keybd_event(0x5B, 0, 2, UIntPtr.Zero);
+            System.Threading.Thread.Sleep(350);
+            // Snap Assist 会弹出来选「另一个窗贴到另一半」——必须 Esc 否则会误贴其它窗
+            keybd_event(0x1B, 0, 0, UIntPtr.Zero); keybd_event(0x1B, 0, 2, UIntPtr.Zero);
+            System.Threading.Thread.Sleep(80);
+            Thread.Sleep(180);
+            RECT src; GetWindowRect(h, out src);
+            int nowMonS = Array.IndexOf(screens, System.Windows.Forms.Screen.FromHandle(h)) + 1;
+            Log("win snap syskbd: " + h + " pos=" + pos + " mon=" + nowMonS + " (Esc closed Snap Assist)");
+            return "{\"ok\":true,\"pos\":\"" + pos + "\",\"mode\":\"syskbd\",\"monitor\":" + nowMonS + ",\"monitors\":" + screens.Length +
+                   ",\"rect\":{\"x\":" + src.Left + ",\"y\":" + src.Top + ",\"w\":" + (src.Right - src.Left) + ",\"h\":" + (src.Bottom - src.Top) + "},\"note\":\"system snap + Esc\"}";
+        }
         else
         {
             if (iconic || zoomed) { ShowWindow(h, SW_RESTORE); Thread.Sleep(150); } // 最小化/最大化状态下 MoveWindow 无效

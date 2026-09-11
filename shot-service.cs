@@ -1707,6 +1707,33 @@ public partial class ShotService
                 string val = (k.Length > 1) ? Uri.UnescapeDataString(k[1]) : "";
                 q[key] = val;
             }
+            // POST body(Edge 扩展 /pick-inject 走 UTF-8 JSON, 不塞 query 避免编码/长度坑)
+            string reqBody = "";
+            {
+                int hdrEnd = req.IndexOf("\r\n\r\n");
+                int contentLength = 0;
+                foreach (string line in lines)
+                {
+                    if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                        int.TryParse(line.Substring(15).Trim(), out contentLength);
+                }
+                if (hdrEnd >= 0 && contentLength > 0)
+                {
+                    int bodyStart = hdrEnd + 4;
+                    int have = Math.Max(0, got - bodyStart);
+                    while (have < contentLength && got < 262144)
+                    {
+                        int n = ns.Read(buf, got, Math.Min(8192, contentLength - have));
+                        if (n <= 0) break;
+                        got += n; have += n;
+                    }
+                    if (have > 0)
+                    {
+                        int take = Math.Min(have, contentLength);
+                        reqBody = Encoding.UTF8.GetString(buf, bodyStart, take);
+                    }
+                }
+            }
 
             bool headerOverflow = got >= buf.Length && req.IndexOf("\r\n\r\n") < 0; // R8-2: 16KB 截断不再静默假成功
             bool needUserSession = path.StartsWith("/mouse") || path.StartsWith("/keyboard") || path == "/shot" || path.StartsWith("/app") || path == "/open-repo" || path.StartsWith("/record") || path.StartsWith("/ui") || path.StartsWith("/win") || path == "/longshot";
@@ -1751,6 +1778,20 @@ public partial class ShotService
                     }
                     body = "{\"ok\":true,\"enabled\":" + volEnabled + ",\"reverse\":" + volReverse + ",\"step\":" + volStep +
                            ",\"triggers\":" + Interlocked.Read(ref volTriggers) + ",\"calls\":" + Interlocked.Read(ref volCalls) + ",\"taskbarWnds\":" + taskbarWnds.Length + ",\"rects\":\"" + dr.ToString() + "\",\"wheel\":{\"pt\":" + Interlocked.Read(ref volLastWheelPtX) + "," + Interlocked.Read(ref volLastWheelPtY) + ",\"hit\":" + Interlocked.Read(ref volLastWheelHit) + ",\"tick\":" + Interlocked.Read(ref volLastWheelTicks) + "},\"hook\":\"" + volHook + "\"}";
+                }
+                else if (path == "/pick-inject")
+                {
+                    // Edge 扩展划词注入(方案A): 只收文本, 球贴 GetCursorPos(零 DPI 换算)
+                    string inj = q.ContainsKey("text") ? q["text"] : "";
+                    if (reqBody.Length > 0)
+                    {
+                        // {"text":"..."} 简单抽字段, 避免整包 JSON 解析依赖
+                        var m = System.Text.RegularExpressions.Regex.Match(reqBody, "\"text\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+                        if (m.Success) inj = m.Groups[1].Value.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\\"", "\"").Replace("\\\\", "\\");
+                    }
+                    string err = PickInject(inj);
+                    if (err != null) { code = 400; body = "{\"ok\":false,\"error\":\"" + JsonEscape(err) + "\"}"; }
+                    else body = "{\"ok\":true,\"via\":\"pick-inject\",\"chars\":" + (inj ?? "").Trim().Length + "}";
                 }
                 else if (path == "/pick-config")
                 {
