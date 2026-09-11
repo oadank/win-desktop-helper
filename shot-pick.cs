@@ -510,6 +510,7 @@ partial class ShotService
         new string[]{ "zcode",       "9224" },
     };
     static readonly Dictionary<uint, object[]> pickCdpCache = new Dictionary<uint, object[]>();  // pid -> [port, tick]
+    static readonly Dictionary<string, int> pickCdpPenalty = new Dictionary<string, int>();      // wsUrl -> 惩罚截止 tick(死/慢 target 60s 内跳过)
 
     static int PickCdpPort(IntPtr hwnd)
     {
@@ -558,21 +559,22 @@ partial class ShotService
         "if(d&&d.getSelection){var s2=d.getSelection().toString()||'';if(s2){t=s2;break;}}}}catch(e){}}" +
         "return t;})())))";
 
-    // 单 target: 连 ws → evaluate 选区表达式的 base64 → 解码。任何失败 = ""
+    // 单 target: 连 ws → evaluate 选区表达式的 base64 → 解码。
+    // 返回: null=连接/超时失败(记 60s 惩罚), ""=读干净但没选区, 其他=选中文本
     static string CdpEvalSelection(string wsUrl)
     {
         try
         {
             using (System.Net.WebSockets.ClientWebSocket ws = new System.Net.WebSockets.ClientWebSocket())
             {
-                using (System.Threading.CancellationTokenSource ctsC = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(1000)))
+                using (System.Threading.CancellationTokenSource ctsC = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(250)))
                 { ws.ConnectAsync(new Uri(wsUrl), ctsC.Token).GetAwaiter().GetResult(); }
                 byte[] msg = Encoding.UTF8.GetBytes("{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" + pickCdpExpr + "\",\"returnByValue\":true}}");
-                using (System.Threading.CancellationTokenSource ctsS = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(800)))
+                using (System.Threading.CancellationTokenSource ctsS = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(250)))
                 { ws.SendAsync(new ArraySegment<byte>(msg), System.Net.WebSockets.WebSocketMessageType.Text, true, ctsS.Token).GetAwaiter().GetResult(); }
                 byte[] rx = new byte[65536];
                 System.Net.WebSockets.WebSocketReceiveResult rr;
-                using (System.Threading.CancellationTokenSource ctsR = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(800)))
+                using (System.Threading.CancellationTokenSource ctsR = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(250)))
                 { rr = ws.ReceiveAsync(new ArraySegment<byte>(rx), ctsR.Token).GetAwaiter().GetResult(); }
                 string s = Encoding.UTF8.GetString(rx, 0, rr.Count);
                 System.Text.RegularExpressions.Match m =
@@ -581,7 +583,11 @@ partial class ShotService
                 return Encoding.UTF8.GetString(Convert.FromBase64String(m.Groups[1].Value));
             }
         }
-        catch { return ""; }
+        catch
+        {
+            lock (pickCdpPenalty) { pickCdpPenalty[wsUrl] = Environment.TickCount + 60000; }
+            return null;
+        }
     }
 
     // 入口: 目标是 CDP 应用 → 遍历 page/iframe targets，先读到非空选区即返回
@@ -598,32 +604,47 @@ partial class ShotService
                 Log("pick cdp: /json/list fail port=" + port + " " + (Environment.TickCount - t0) + "ms (app 没带调试口启动?)");
                 return "";
             }
-            System.Text.RegularExpressions.MatchCollection mc = System.Text.RegularExpressions.Regex.Matches(
-                list, "\"webSocketDebuggerUrl\"\\s*:\\s*\"(ws://[^\"]*/devtools/(?:page|iframe)/[^\"]+)\"");
-            string got = CdpSweep(mc);
+            // 只扫 type=page/iframe 的 target: ZCode 这类还挂 4 个 worker(无 window/getSelection, 可能不回包), 按 URL 前缀滤不掉——
+            // worker 的 ws 路径同样是 /devtools/page/, 必须看 "type" 字段
+            List<string> urls = new List<string>();
+            foreach (System.Text.RegularExpressions.Match em in System.Text.RegularExpressions.Regex.Matches(list, "\\{[^{}]*\\}"))
+            {
+                string entry = em.Value;
+                if (!System.Text.RegularExpressions.Regex.IsMatch(entry, "\"type\"\\s*:\\s*\"(page|iframe)\"")) continue;
+                System.Text.RegularExpressions.Match wm = System.Text.RegularExpressions.Regex.Match(entry, "\"webSocketDebuggerUrl\"\\s*:\\s*\"(ws://[^\"]+)\"");
+                if (wm.Success) urls.Add(wm.Groups[1].Value);
+            }
+            string got = CdpSweep(urls, t0);
             if (string.IsNullOrWhiteSpace(got))
             {
                 // 选区落定晚于读取的兜底: 双击选词在 mouseup 后一瞬才进 DOM, 80ms 后重扫
                 Thread.Sleep(80);
-                got = CdpSweep(mc);
+                got = CdpSweep(urls, t0);
             }
             if (!string.IsNullOrWhiteSpace(got))
             {
                 Log("pick cdp: " + (Environment.TickCount - t0) + "ms port=" + port + " chars=" + got.Length + " | " + PickOneLine(got));
                 return got;
             }
-            Log("pick cdp: " + (Environment.TickCount - t0) + "ms port=" + port + " targets=" + mc.Count + " sel empty(含重试)");
+            Log("pick cdp: " + (Environment.TickCount - t0) + "ms port=" + port + " targets=" + urls.Count + " sel empty(含重试)");
             return "";
         }
         catch (Exception ex) { Log("pick cdp err: " + ex.Message); return ""; }
     }
 
-    static string CdpSweep(System.Text.RegularExpressions.MatchCollection mc)
+    // 全局预算 350ms: 死 target 各自 250ms 超时会把取词拖到秒级(实测 5 targets 烧 6.6s, pickBusy 锁死吞掉后续双击=成功率腰斩)
+    static string CdpSweep(List<string> urls, int t0)
     {
-        foreach (System.Text.RegularExpressions.Match m in mc)
+        foreach (string u in urls)
         {
-            string got = CdpEvalSelection(m.Groups[1].Value);
-            if (!string.IsNullOrWhiteSpace(got)) return got;
+            lock (pickCdpPenalty)
+            {
+                int until;
+                if (pickCdpPenalty.TryGetValue(u, out until) && Environment.TickCount < until) continue;
+            }
+            if (Environment.TickCount - t0 > 350) break;
+            string got = CdpEvalSelection(u);
+            if (!string.IsNullOrEmpty(got)) return got;
         }
         return "";
     }
@@ -688,11 +709,14 @@ partial class ShotService
                 if (PickIsTerminal(fgAt)) { Log("pick(click): terminal target, skipped"); return; }
                 // CDP 直读优先(方案D): Electron 调试口毫秒级读真选区; 空=落回 UIA(聊天输入框选区 getSelection 看不到, 还得靠 UIA)
                 try { string cdp = PickViaCdp(fgAt); if (!string.IsNullOrWhiteSpace(cdp)) { text = cdp; how = "cdp"; } } catch { }
-                if (string.IsNullOrWhiteSpace(text))
-                    try { text = PickWordAtPoint(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia词"; } catch { }
+                int uiaCost = 0;
                 if (string.IsNullOrWhiteSpace(text))
                 {
-                    try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia选区"; } catch { }
+                    int tU = Environment.TickCount;
+                    try { text = PickWordAtPoint(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia词"; } catch { }
+                    if (string.IsNullOrWhiteSpace(text))
+                    { try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia选区"; } catch { } }
+                    uiaCost = Environment.TickCount - tU;
                 }
                 // 剪贴板链 (2026-09-11 老大拍板 STranslate 方案, _ref_clipboardhelper.cs):
                 // Electron 聊天窗 UIA 读选区时灵时不灵(无障碍树懒加载) → 模拟 Ctrl+C 读真选区。
@@ -703,8 +727,8 @@ partial class ShotService
                     if (!string.IsNullOrWhiteSpace(clip)) { text = clip; how = "clip"; }
                     Log("pick(click): clip " + (Environment.TickCount - t0) + "ms | " + (string.IsNullOrWhiteSpace(clip) ? "(no change)" : PickOneLine(clip)));
                 }
-                int costMs = Environment.TickCount - t0;
-                if (costMs > 700) { pickSlowUntil = Environment.TickCount + 30000; Log("pick(click): slow UIA target " + costMs + "ms, backoff 30s"); }
+                // 退避只看 UIA 耗时: CDP+clip 全落空的正常 miss ~900ms 不该触发 30s 禁言(那是 UIA 挂死场景的保险)
+                if (uiaCost > 700) { pickSlowUntil = Environment.TickCount + 30000; Log("pick(click): slow UIA target " + uiaCost + "ms, backoff 30s"); }
                 if (string.IsNullOrWhiteSpace(text)) return;   // 取不到字 = 不出点(空点已废, 老大不满意"出的点没内容")
                 if (text.Trim().Length > 200) text = text.Substring(0, 200);
             }
