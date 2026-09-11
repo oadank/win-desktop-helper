@@ -662,8 +662,9 @@ partial class ShotService
                 if (PickIsBrowser(fgAt)) { Log("pick(click): browser target, skipped"); return; }
                 if (PickIsTerminal(fgAt)) { Log("pick(click): terminal target, skipped"); return; }
                 // CDP 直读优先(方案D): Electron 调试口毫秒级读真选区; 空=落回 UIA(聊天输入框选区 getSelection 看不到, 还得靠 UIA)
-                try { string cdp = PickViaCdp(fgAt); if (!string.IsNullOrWhiteSpace(cdp)) { text = cdp; how = "cdp词"; } } catch { }
-                try { text = PickWordAtPoint(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia词"; } catch { }
+                try { string cdp = PickViaCdp(fgAt); if (!string.IsNullOrWhiteSpace(cdp)) { text = cdp; how = "cdp"; } } catch { }
+                if (string.IsNullOrWhiteSpace(text))
+                    try { text = PickWordAtPoint(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia词"; } catch { }
                 if (string.IsNullOrWhiteSpace(text))
                 {
                     try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia选区"; } catch { }
