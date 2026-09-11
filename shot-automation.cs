@@ -365,8 +365,8 @@ partial class ShotService
                 case "ztopright": case "systopright": dLay = 8; dZone = 2; break;
                 case "zbottomleft": case "sysbottomleft": dLay = 8; dZone = 3; break;
                 case "zbottomright": case "sysbottomright": dLay = 8; dZone = 4; break;
-                case "ztop": dLay = 7; dZone = 1; break;
-                case "zbottom": dLay = 7; dZone = 2; break;
+                case "ztop": case "zbottom":
+                    return "{\"ok\":false,\"error\":\"纯上下两半不在 4-9 纯分割格里(7=左半+右半上下分)。上/下用 sys 系或 zkbd+layout/zone 手选\"}";
                 case "zkbd": default: break;
             }
             if (lay <= 0) lay = dLay;
