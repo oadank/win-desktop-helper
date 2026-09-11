@@ -2110,10 +2110,11 @@ public partial class ShotService
                         {
                             int sc = 0, sl = 0, ss = 0, sr = 0, srw = 0, srs = 0;
                             int layoutKey = 0, zoneKey = 0;
+                            bool escAfter = q.ContainsKey("esc") && (q["esc"] == "1" || q["esc"] == "true");
                             TryInt(q, "cols", out sc); TryInt(q, "col", out sl); TryInt(q, "colspan", out ss);
                             TryInt(q, "rows", out sr); TryInt(q, "row", out srw); TryInt(q, "rowspan", out srs);
                             TryInt(q, "layout", out layoutKey); TryInt(q, "zone", out zoneKey);
-                            body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "", sc, sl, ss, sr, srw, srs, layoutKey, zoneKey);
+                            body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "", sc, sl, ss, sr, srw, srs, layoutKey, zoneKey, escAfter);
                         }
                         else if (verb == "close") body = WinClose(wh);
                         else if (verb == "move")
@@ -3241,7 +3242,8 @@ public partial class ShotService
                     if (verb == "snap") return McpText(WinSnap(wh, McpParam(a, "pos"), McpParam(a, "monitor"),
                         McpParamInt(a, "cols"), McpParamInt(a, "col"), McpParamInt(a, "colspan"),
                         McpParamInt(a, "rows"), McpParamInt(a, "row"), McpParamInt(a, "rowspan"),
-                        McpParamInt(a, "layout"), McpParamInt(a, "zone")), false);
+                        McpParamInt(a, "layout"), McpParamInt(a, "zone"),
+                        McpParam(a, "esc") == "1" || McpParam(a, "esc") == "true"), false);
                     if (verb == "move") return McpText(WinMove(wh, McpParamInt(a, "x"), McpParamInt(a, "y"), McpParamInt(a, "w"), McpParamInt(a, "h")), false);
                     return McpText("unknown verb (activate/max/min/restore/close/move/wait/list)", true);
                 }

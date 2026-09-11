@@ -73,7 +73,7 @@
 | `app_run` 返回的 hwnd 找不到窗口 | 多进程应用会换窗，用 `list_apps` 按 process 重新取 |
 | 布局想贴半屏 | 别用 move 手算坐标，用 snap；返回 target≠rect 说明应用有最小尺寸约束，按 rect 补差 |
 | **全都 ok 但啥也没发生**（菜单不弹/键无反应） | UIPI：目标窗口管理员权限 + 本程序普通权限 → 输入被静默丢弃。`health` 看 `elevated`，false 就重建提权（见铁律 7） |
-| **贴位首选=Win+Z / Win+方向** | 三均分等复杂布局 → `snap pos=zthirdleft\|zthirdmid\|zthirdright`（系统 Win+Z）；半屏/四分 → `pos=sysleft\|sysright\|systopleft\|…`。发键前验 `front=目标`；**系统贴靠后必 Esc** 关 Snap Assist；贴靠助手延迟弹出也 Esc；应用最小高/宽钳制按 rect 补差 |
+| **贴位首选=Win+Z / Win+方向** | 三均分 → `pos=zthirdleft\|zthirdmid\|zthirdright`（本机 **layout=6** zone=1/2/3；**9=中间大两边小**）；半屏/四分 → `sysleft\|sysright\|systopleft\|…`。发键前验 `front=目标`；**Esc 只在取消时**（`esc=1`），连续多窗贴靠默认不 Esc；贴靠助手抢焦点再 Esc；应用最小高/宽钳制按 rect 补差 |
 | **点后台/最小化窗口=顶窗或落空** | `mouse_click` 返回 `at.front`；严格模式传 `front=1`，落点非前台直接拒点。先 `win_manage activate` 再点 |
 | `win_manage close` 报 `post failed` | 同一根因：权限不足导致 PostMessage 被拒。提权后正常返回 `closed:true` |
 | **Win11 记事本未保存关不掉** | `close` 返回 ok 只代表发了 WM_CLOSE；未保存时弹 ContentDialog，UIA 枚举不到 Button，`n` 会打进正文。关窗后必须 `list_apps` 复查，见「记事本」坑 |

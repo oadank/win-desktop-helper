@@ -220,8 +220,10 @@ partial class ShotService
 
     // ==================== Win+Z 系统 Snap Layouts（三均分/任意布局真系统吸附） ====================
     // 老大确认: Win+Z = 系统全部贴边选项。三均分没有官方 Win+方向快捷键，必须走 Win+Z。
-    // 键盘流: 激活窗 → Win+Z → 数字选布局 → 数字选区域 → Esc 收口（防 Snap Assist 拉其它窗）。
-    // 布局/区域序号随窗宽、Win11 小版本变化 —— 可用 layout=/zone= 覆盖；默认值是 1920 常见映射。
+    // 本机实测(2026-09-11): **三均分 layout=6** zone=1/2/3=左/中/右; layout=9 是中间大两边小, 勿当三均分。
+    // 键盘流: 激活窗 → Win+Z → 数字选布局 → 数字选区域。
+    // Esc **只在明确取消时**发; 连续多窗贴靠默认不 Esc(否则会掐掉 Snap Assist, 下一窗接不上)。
+    // 布局/区域序号随窗宽、Win11 小版本变化 —— 可用 layout=/zone= 覆盖。
     static void KbdTap(byte vk)
     {
         keybd_event(vk, 0, 0, UIntPtr.Zero);
@@ -250,14 +252,13 @@ partial class ShotService
         return (byte)(0x30 + n); // VK_0..VK_9
     }
 
-    // Win+Z 键盘流。layoutKey/zoneKey: 0=按 pos 预设; 1-9=显式数字键
-    static string WinSnapZ(IntPtr h, string pos, string mon, int layoutKey, int zoneKey)
+    // Win+Z 键盘流。layoutKey/zoneKey: 0=按 pos 预设; 1-9=显式数字键。escAfter=1 才在结尾 Esc。
+    static string WinSnapZ(IntPtr h, string pos, string mon, int layoutKey, int zoneKey, bool escAfter)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
         if (!IsWindow(h)) return "{\"ok\":false,\"error\":\"invalid handle: 窗口已关闭, 重新 list_apps 采样\"}";
         pos = (pos ?? "").ToLowerInvariant();
-        // 预设 → (默认布局号, 默认区域号)。布局号随窗口可用布局列表变化, 不对时用 layout=/zone= 改。
-        // 1920 宽常见: 1=半分 2=左+右上下 3=三列 4=四格 5=三行…
+        // 预设 → (默认布局号, 默认区域号)。本机三列 layout=9。
         int lay = layoutKey, zone = zoneKey;
         if (lay <= 0 || zone <= 0)
         {
@@ -266,9 +267,9 @@ partial class ShotService
             {
                 case "zleft": case "sysleft": dLay = 1; dZone = 1; break;
                 case "zright": case "sysright": dLay = 1; dZone = 2; break;
-                case "zthirdleft": case "thirdleft": dLay = 3; dZone = 1; break;
-                case "zthirdmid": case "thirdmid": case "thirdmiddle": dLay = 3; dZone = 2; break;
-                case "zthirdright": case "thirdright": dLay = 3; dZone = 3; break;
+                case "zthirdleft": case "thirdleft": dLay = 6; dZone = 1; break;
+                case "zthirdmid": case "thirdmid": case "thirdmiddle": dLay = 6; dZone = 2; break;
+                case "zthirdright": case "thirdright": dLay = 6; dZone = 3; break;
                 case "ztopleft": case "systopleft": dLay = 4; dZone = 1; break;
                 case "ztopright": case "systopright": dLay = 4; dZone = 2; break;
                 case "zbottomleft": case "sysbottomleft": dLay = 4; dZone = 3; break;
@@ -278,26 +279,25 @@ partial class ShotService
             if (lay <= 0) lay = dLay;
             if (zone <= 0) zone = dZone;
         }
-        if (lay <= 0) lay = 3; // 缺省当三列（老大主诉求）
+        if (lay <= 0) lay = 6; // 缺省三均分(老大实测 layout=6; layout=9 是中间大两边小)
         if (zone <= 0) zone = 1;
 
         try { if (IsIconic(h)) { ShowWindow(h, SW_RESTORE); Thread.Sleep(150); } } catch { }
-        // 前台: 借 activate 的多级置前
         WinActivate(h);
-        Thread.Sleep(120);
+        Thread.Sleep(150);
         KbdWinZ();
         KbdTap(DigitVk(lay));
-        Thread.Sleep(200);
+        Thread.Sleep(220);
         KbdTap(DigitVk(zone));
-        Thread.Sleep(350);
-        KbdEsc(); // 关 Snap Assist / 残留飞出条, 防止拉着其它窗一起贴
-        Thread.Sleep(150);
+        Thread.Sleep(400);
+        if (escAfter) KbdEsc(); // 仅显式取消时
         RECT rc; GetWindowRect(h, out rc);
         int nowMon = Array.IndexOf(System.Windows.Forms.Screen.AllScreens, System.Windows.Forms.Screen.FromHandle(h)) + 1;
-        Log("win snap Win+Z: " + h + " pos=" + pos + " layout=" + lay + " zone=" + zone + " mon=" + nowMon + " (Esc)");
+        Log("win snap Win+Z: " + h + " pos=" + pos + " layout=" + lay + " zone=" + zone + " mon=" + nowMon + (escAfter ? " Esc" : " noEsc"));
         return "{\"ok\":true,\"pos\":\"" + JsonEscape(pos) + "\",\"mode\":\"zkbd\",\"layout\":" + lay + ",\"zone\":" + zone +
+               ",\"esc\":" + (escAfter ? "true" : "false") +
                ",\"monitor\":" + nowMon + ",\"rect\":{\"x\":" + rc.Left + ",\"y\":" + rc.Top +
-               ",\"w\":" + (rc.Right - rc.Left) + ",\"h\":" + (rc.Bottom - rc.Top) + "},\"note\":\"Win+Z system snap + Esc\"}";
+               ",\"w\":" + (rc.Right - rc.Left) + ",\"h\":" + (rc.Bottom - rc.Top) + "}}";
     }
 
     // 窗口贴靠(分屏) —— 把 Win+方向键那套变成工具默认能力
@@ -311,9 +311,13 @@ partial class ShotService
     // 半屏用 MoveWindow 直接算, 比模拟按键稳: 不受前台焦点限制, 多屏可精确指定, 且返回实际 rect 可验证
     static string WinSnap(IntPtr h, string pos, string mon, int cols, int col, int cspan, int rows, int row, int rspan)
     {
-        return WinSnap(h, pos, mon, cols, col, cspan, rows, row, rspan, 0, 0);
+        return WinSnap(h, pos, mon, cols, col, cspan, rows, row, rspan, 0, 0, false);
     }
     static string WinSnap(IntPtr h, string pos, string mon, int cols, int col, int cspan, int rows, int row, int rspan, int layoutKey, int zoneKey)
+    {
+        return WinSnap(h, pos, mon, cols, col, cspan, rows, row, rspan, layoutKey, zoneKey, false);
+    }
+    static string WinSnap(IntPtr h, string pos, string mon, int cols, int col, int cspan, int rows, int row, int rspan, int layoutKey, int zoneKey, bool escAfter)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
         if (!IsWindow(h)) return "{\"ok\":false,\"error\":\"invalid handle: 窗口已关闭, 重新 list_apps 采样\"}";
@@ -341,7 +345,7 @@ partial class ShotService
         // 触发: pos=z* / zkbd / zthird* / 布局键显式给了 layout=
         if (pos.StartsWith("z") || layoutKey > 0)
         {
-            return WinSnapZ(h, pos, mon, layoutKey, zoneKey);
+            return WinSnapZ(h, pos, mon, layoutKey, zoneKey, escAfter);
         }
 
         // 网格模式: cols/col/colspan + rows/row/rowspan —— 一套参数覆盖 Win11 Snap Layouts 全部布局 + 任意比例
@@ -406,7 +410,7 @@ partial class ShotService
             case "zleft": case "zright": case "zthirdleft": case "zthirdmid": case "zthirdright":
             case "ztopleft": case "ztopright": case "zbottomleft": case "zbottomright": case "zkbd":
             case "thirdleft": case "thirdmid": case "thirdright":
-                return WinSnapZ(h, pos, mon, layoutKey, zoneKey);
+                return WinSnapZ(h, pos, mon, layoutKey, zoneKey, escAfter);
             default: return "{\"ok\":false,\"error\":\"pos 无效: left/right/top/bottom/topleft/topright/bottomleft/bottomright/max/min/restore/sysleft|sysright|systop|sysbottom|systopleft|systopright|sysbottomleft|sysbottomright (sys*=真系统吸附+Esc)\"}";
         }
         bool iconic = false, zoomed = false;
@@ -415,7 +419,7 @@ partial class ShotService
         if (mode == "min") ShowWindow(h, SW_MINIMIZE);
         else if (mode == "syskbd")
         {
-            // 真·系统吸附: 先激活目标窗, 再 Win+方向; 结束必 Esc 关 Snap Assist
+            // 真·系统吸附: 先激活目标窗, 再 Win+方向; Esc 仅 escAfter=1 时(取消/防 Snap Assist 拉其它窗)
             if (iconic || zoomed) { ShowWindow(h, SW_RESTORE); Thread.Sleep(150); }
             SetForegroundWindow(h);
             Thread.Sleep(80);
@@ -432,15 +436,18 @@ partial class ShotService
             System.Threading.Thread.Sleep(120);
             keybd_event(0x5B, 0, 2, UIntPtr.Zero);
             System.Threading.Thread.Sleep(350);
-            // Snap Assist 会弹出来选「另一个窗贴到另一半」——必须 Esc 否则会误贴其它窗
-            keybd_event(0x1B, 0, 0, UIntPtr.Zero); keybd_event(0x1B, 0, 2, UIntPtr.Zero);
-            System.Threading.Thread.Sleep(80);
+            if (escAfter)
+            {
+                keybd_event(0x1B, 0, 0, UIntPtr.Zero); keybd_event(0x1B, 0, 2, UIntPtr.Zero);
+                System.Threading.Thread.Sleep(80);
+            }
             Thread.Sleep(180);
             RECT src; GetWindowRect(h, out src);
             int nowMonS = Array.IndexOf(screens, System.Windows.Forms.Screen.FromHandle(h)) + 1;
-            Log("win snap syskbd: " + h + " pos=" + pos + " mon=" + nowMonS + " (Esc closed Snap Assist)");
-            return "{\"ok\":true,\"pos\":\"" + pos + "\",\"mode\":\"syskbd\",\"monitor\":" + nowMonS + ",\"monitors\":" + screens.Length +
-                   ",\"rect\":{\"x\":" + src.Left + ",\"y\":" + src.Top + ",\"w\":" + (src.Right - src.Left) + ",\"h\":" + (src.Bottom - src.Top) + "},\"note\":\"system snap + Esc\"}";
+            Log("win snap syskbd: " + h + " pos=" + pos + " mon=" + nowMonS + (escAfter ? " Esc" : " noEsc"));
+            return "{\"ok\":true,\"pos\":\"" + pos + "\",\"mode\":\"syskbd\",\"esc\":" + (escAfter ? "true" : "false") +
+                   ",\"monitor\":" + nowMonS + ",\"monitors\":" + screens.Length +
+                   ",\"rect\":{\"x\":" + src.Left + ",\"y\":" + src.Top + ",\"w\":" + (src.Right - src.Left) + ",\"h\":" + (src.Bottom - src.Top) + "}}";
         }
         else
         {
