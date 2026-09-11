@@ -266,12 +266,13 @@ partial class ShotService
                 // 已经有选词元素在屏上(点/工具条/卡片): 点空白 = 纯取消, 绝不再发起单击取词
                 // (单击取词对底层窗口发 UIA, 慢目标挂 700ms+ —— 老大实测"点空白取消反而卡")
                 if (PickDotRect != null || pickBarWin != null || pickCard != null)
-                { s.BeginInvoke(new MethodInvoker(delegate { PickDismiss(); })); return; }
+                { Log("pick click: EAT-dismiss (element onscreen) pos=" + ux + "," + uy); s.BeginInvoke(new MethodInvoker(delegate { PickDismiss(); })); return; }
                 if (PickNear(PickBarRect, ux, uy, PICK_TOL) || PickNear(PickCardRect, ux, uy, PICK_TOL) ||
                     PickNear(PickAskRect, ux, uy, PICK_TOL)) return;   // 贴着元素: 不动它
                 // 这一下是"顺手关掉提问框"(DOWN 时它还开着): 不再二次触发取词
                 if (askJustClosed) return;
                 // 单击别处: 也弹悬浮球(见 PickHandleAsync click 模式 —— 只读 UIA 现有选区, 绝不发 Ctrl+C)
+                Log("pick click: pass->dblclick-judge pos=" + ux + "," + uy);
                 s.BeginInvoke(new MethodInvoker(delegate { PickHandleAsync(ux, uy, true, 0, 0); }));
                 return;
             }
@@ -438,7 +439,14 @@ partial class ShotService
                 uint dcT = GetDoubleClickTime();
                 bool dblClick = (now - pickLastClickCap >= 0 && now - pickLastClickCap < (int)dcT) &&
                                 Math.Abs(x - pickLastClickX) * 2 <= dcW && Math.Abs(y - pickLastClickY) * 2 <= dcH;
-                if (!dblClick) { pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y; Interlocked.Exchange(ref pickBusy, 0); return; }
+                if (!dblClick)
+                {
+                    int gapDbg = now - pickLastClickCap;
+                    bool samePos = Math.Abs(x - pickLastClickX) * 2 <= dcW && Math.Abs(y - pickLastClickY) * 2 <= dcH;
+                    pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y;
+                    Log("pick click: single 记锚点 gap=" + gapDbg + "ms/窗口" + dcT + "ms samePos=" + samePos);
+                    Interlocked.Exchange(ref pickBusy, 0); return;
+                }
                 pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y;
                 if (now < pickRClickUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }   // 右键让路窗口内: 不取词
                 if (now < pickSlowUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }     // 慢目标退避窗口内: 不取词
