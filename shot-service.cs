@@ -2117,19 +2117,6 @@ public partial class ShotService
                             TryInt(q, "rows", out sr); TryInt(q, "row", out srw); TryInt(q, "rowspan", out srs);
                             TryInt(q, "layout", out layoutKey); TryInt(q, "zone", out zoneKey);
                             body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "", sc, sl, ss, sr, srw, srs, layoutKey, zoneKey, escAfter);
-                            if (hasFill)
-                            {
-                                // 关键(实测踩坑): fill 目标若挂在旧 snap group 里, 会被排除在 Snap Assist 外(ZCode 案例)。
-                                // 先 restore 脱组(吸附态→浮动), 再让第一窗 Win+Z, assist 才会列出它们。
-                                foreach (string nm in q["fill"].Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
-                                {
-                                    string t = nm.Trim(); if (t.Length == 0) continue;
-                                    IntPtr fh = FindMainWinByProc(t);
-                                    if (fh == IntPtr.Zero) fh = FindWindowByTitle(t);
-                                    if (fh != IntPtr.Zero && fh != wh) { WinShow(fh, SW_RESTORE, "restored"); Thread.Sleep(120); }
-                                }
-                                Thread.Sleep(300);
-                            }
                             if (hasFill && body.Contains("\"ok\":true"))
                             {
                                 Thread.Sleep(900); // 等 Snap Assist 就绪(过早 Enter 会空放, 实测偶发)
@@ -2176,9 +2163,7 @@ public partial class ShotService
                             rr.Append("{\"ok\":true,\"via\":\"relaunch\",\"name\":\"" + JsonEscape(q["name"]) + "\"");
                             body = rr.ToString() + ",\"hint\":\"已通过 relaunch 拉起\"}";
                         }
-                        else
-                        {
-                            if (q.ContainsKey("relaunch") && q["relaunch"] == "1")
+                        else if (q.ContainsKey("relaunch") && q["relaunch"] == "1")
                         {
                             body = TrayRelaunch(q["name"]);
                         }
@@ -2186,8 +2171,6 @@ public partial class ShotService
                         {
                             body = TrayClick(q["name"], btn, dv == 1, q.ContainsKey("mode") && q["mode"] == "uiaclick");
                         }
-                        }
-                        body = TrayClick(q["name"], btn, dv == 1, q.ContainsKey("mode") && q["mode"] == "uiaclick");
                     }
                     Log("[tray] " + target);
                 }
@@ -3271,17 +3254,6 @@ public partial class ShotService
                     {
                         string fillNames = McpParam(a, "fill");
                         bool escAfter = fillNames.Length > 0 ? false : (McpParam(a, "esc") == "" || McpParam(a, "esc") == "1" || McpParam(a, "esc") == "true");
-                        if (fillNames.Length > 0)
-                        {
-                            foreach (string nm in fillNames.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
-                            {
-                                string t = nm.Trim(); if (t.Length == 0) continue;
-                                IntPtr fh = FindMainWinByProc(t);
-                                if (fh == IntPtr.Zero) fh = FindWindowByTitle(t);
-                                if (fh != IntPtr.Zero && fh != wh) { WinShow(fh, SW_RESTORE, "restored"); Thread.Sleep(120); }
-                            }
-                            Thread.Sleep(300);
-                        }
                         string snapBody = WinSnap(wh, McpParam(a, "pos"), McpParam(a, "monitor"),
                             McpParamInt(a, "cols"), McpParamInt(a, "col"), McpParamInt(a, "colspan"),
                             McpParamInt(a, "rows"), McpParamInt(a, "row"), McpParamInt(a, "rowspan"),
