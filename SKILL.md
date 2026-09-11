@@ -125,6 +125,15 @@
 5. 给本服务加 MCP 工具三处都要动: shot-service.cs 的 McpCall switch case + McpToolsJson 条目 + **mcp-bridge.js 注册表数组与 buildUrl 路由**(bridge 有独立白名单, 漏改直接 unknown tool)。
 配置入口: 设置页「划词」节 / HTTP GET /pick-config?enabled=0|1 / MCP pick_config。开关立即生效+持久化到 shot-service.json pick 节。
 
+## 划词 CDP 直读链 (方案D, 2026-09-11 实装, v0.0.20 已发)
+
+- 原理: Electron 应用带 `--remote-debugging-port` 启动 → helper 按前台进程名查表(MiMo=9222/WorkBuddy=9223/ZCode=9224, shot-pick.cs pickCdpApps) → ws 连 page/iframe target evaluate `getSelection` 直读真选区(毫秒级, 零UIA零按键零剪贴板, base64 往返避转义)。空才落回 UIA→剪贴板链。浏览器仍归 Edge 扩展, 终端红线不变。读表达式含三盲区补丁: 输入框走 activeElement.selectionStart、同进程 iframe 走 contentDocument 穿透、空后 80ms 重扫。
+- 启动参数固化在快捷方式(桌面\软件\ + 开始菜单)与 WorkBuddy HKCU Run 键。**自动更新器会重写 Run 键/裸拉起丢参数(实锤)**: 应用更新后划词 Electron 失效 → 先 `curl 127.0.0.1:<port>/json/version` 验口, 丢了补参数重启。
+- `/json/list` 不止 page: ZCode 挂 4 个 worker target(无 getSelection 且可能不回包)。**必须按 "type" 字段过滤**(worker 的 ws 路径同为 /devtools/page/, URL 滤不掉)+350ms 全局预算+失败 target 60s 惩罚缓存。教训: 未过滤时 5 targets 烧 6.6s, pickBusy 锁占死吞光后续双击=成功率腰斩。
+- 双击"一次出一不出"根因(实锤): 09-07"点空白=收起浮元素"规则把双击第一下整口吞掉且不记锚点。修法 dismiss+chain: 收起后该点击照样进双击判定。泛训: 悬浮球交互状态机分支互相咬合, 新规则先问"它吃了谁"。
+- 区域截图热键是候选表先抢先得 `[Win+Shift+A→Ctrl+Shift+S→Win+Shift+S]`(shot-service.cs HotkeyRegister 区), 实例间漂移坑肌肉记忆 → **配置显式钉死 `capture.hotkeyRegion`**(本机 repo+安装目录均已钉 Ctrl+Shift+S)。
+- 发版四件套同步 bump: shot-service.cs `APP_VERSION` 常量 + AssemblyInfo.cs + setup.iss(AppVersion/OutputBaseFilename)。**打包必须走 _pkg 隔离目录**(仓库根 shot-service.json 有真 key, 在仓库根跑 ISCC=泄密; 打包前对 pkg 文件扫 key 串自检)。坑: PS5.1 读无 BOM UTF-8 中文注释 .ps1=引号炸解析(脚本写纯 ASCII); Git Bash 会把 `/VERYSILENT` 路径化成垃圾参数(Inno 弹 GUI, 用 PowerShell Start-Process 传参); Inno6 的 CurStepChanged 必须 procedure 不是 function。
+
 ## 免激活浮窗拖动不跟手的根因与修法
 
 免激活浮窗"拖动不跟手"根因与修法 (2026-09-07 划词卡片实测, 跟随率 20/20=100%):
