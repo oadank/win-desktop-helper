@@ -25,6 +25,44 @@ partial class ShotService
     static volatile int pickUserAct;   // TickCount of last physical mouse/button/wheel event seen by hook
     const int PICK_MOVE_MIN2 = 144;                   // 位移平方 <144(<12px) = 单击, 不算划选
     static int pickEnabled = 1;
+
+    // ---- I-BEAM 光标门卫 (STranslate 2.0 MIT 参考 _ref_mousehook.cs) ----
+    // 手势期间光标是否为工字形(文本选择光标): 是=真的在选文字, 否=滑杆/按钮/UI 标签。
+    // 确定性判定, 治"不该弹的弹、该弹的不弹"—— 替代控件类型过滤/选区空判定等一切猜测。
+    static IntPtr pickIBeamCursor;      // PickInit 时 LoadCursor(IDC_IBEAM) 缓存句柄
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct PICKCURSORINFO
+    {
+        public uint cbSize;
+        public uint flags;
+        public IntPtr hCursor;
+        public long pt;               // POINT (int x,int y) 合并避免同名结构冲突
+    }
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool GetCursorInfo(ref PICKCURSORINFO pci);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern IntPtr LoadCursor(IntPtr hInstance, IntPtr lpCursorName);
+    static readonly IntPtr IDC_IBEAM = new IntPtr(32513);   // MAKEINTRESOURCE(IDC_IBEAM)
+    static bool PickIsIBeamCursor()
+    {
+        try
+        {
+            if (pickIBeamCursor == IntPtr.Zero) return false;
+            PICKCURSORINFO ci = new PICKCURSORINFO();
+            ci.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(PICKCURSORINFO));
+            if (!GetCursorInfo(ref ci)) return false;
+            return ci.hCursor == pickIBeamCursor;
+        }
+        catch { return false; }
+    }
+    static bool pickSeenIBeam;          // 本次手势期间见过工字形(DOWN 记初始, MOVE 累积, UP 判定后清)
+
+    // 双击判定用系统值 (STranslate): 手感与系统一致, 不硬编码 450ms/12px
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern uint GetDoubleClickTime();
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern int GetSystemMetrics(int nIndex);
+    const int SM_CXDOUBLECLK = 36, SM_CYDOUBLECLK = 37;
     static Control pickSync;
     static bool pickDownFlag;
     static int pickX0, pickY0;
@@ -40,6 +78,7 @@ partial class ShotService
     {
         try
         {
+            pickIBeamCursor = LoadCursor(IntPtr.Zero, IDC_IBEAM);   // I-beam 门卫: 缓存工字形光标句柄
             Thread t = new Thread(new ThreadStart(PickLoop));
             t.SetApartmentState(ApartmentState.STA);
             t.IsBackground = true;
@@ -92,6 +131,7 @@ partial class ShotService
             if (msg == PICK_DOWN)
             {
                 pickDownFlag = true; pickX0 = x; pickY0 = y;
+                pickSeenIBeam = PickIsIBeamCursor();          // I-beam 门卫: DOWN 记初始
                 pickDownOnDot = PickHit(PickDotRect, x, y);
                 pickDownOnBar = PickHit(PickBarRect, x, y);
                 pickDownOnCard = PickHit(PickCardRect, x, y);
@@ -115,6 +155,7 @@ partial class ShotService
             }
             if (msg == PICK_MOVE)
             {
+                if (pickDownFlag) pickSeenIBeam |= PickIsIBeamCursor();   // 手势期间累积
                 if (pickDragging || pickDownOnCard) { pickCurX = x; pickCurY = y; }
                 Interlocked.Increment(ref pickTrackSeen);
                 return;
@@ -173,6 +214,14 @@ partial class ShotService
             if (pickDownOnAsk) { pickDownOnAsk = false; return; }               // 提问框里拖选文字: 正常编辑, 不触发取词
             if (askJustClosed) return;                                          // 提问框刚被这一下关掉: 本轮手势不取词
             if (cardWasTouched) return;                                         // 刚在卡片上按住过: 不重复取词
+            pickSeenIBeam |= PickIsIBeamCursor();                               // UP 时刻也查一次(快手势 MOVE 可能漏)
+            bool wasTextGesture = pickSeenIBeam; pickSeenIBeam = false;         // 取走即清(下一手势重新记)
+            if (!wasTextGesture)
+            {
+                // I-beam 门卫: 整个手势期间光标从未变工字形 = 不是在选文本(滑杆/按钮/画布)
+                Log("pick: gesture not on text (no I-beam) — silent skip");
+                return;
+            }
             // 出点改为"取词成功才出"(OCR 作废后 UIA 16ms 级, 无需预出; 预出点+完成后重建 = 双跳+空点闪)
             s.BeginInvoke(new MethodInvoker(delegate { PickHandle(ux, uy, pickX0, pickY0); }));
         }
@@ -290,8 +339,13 @@ partial class ShotService
                 // 但**双击选词**必须放行: 双击间隔 <300ms 且同位置 —— 吞掉它 = "双击没点"(老大实测),
                 // 之后点别处才把旧选区读出来, 点乱冒。只有"不同位置的快速连点"才节流。
                 int now = Environment.TickCount;
-                // 1A(老大裁决): 单击选词砍掉 —— 只有"450ms 内同位置(12px)第二击"= 双击选词才取词。
-                bool dblClick = (now - pickLastClickCap < 450) && Math.Abs(x - pickLastClickX) < 12 && Math.Abs(y - pickLastClickY) < 12;
+                // 1A(老大裁决): 单击选词砍掉 —— 只有"系统双击时限内同位置"= 双击选词才取词。
+                // 双击判定用系统值(STranslate): GetDoubleClickTime + SM_C*DOUBLECLK, 手感与系统一致。
+                int dcW = Math.Max(1, GetSystemMetrics(SM_CXDOUBLECLK));
+                int dcH = Math.Max(1, GetSystemMetrics(SM_CYDOUBLECLK));
+                uint dcT = GetDoubleClickTime();
+                bool dblClick = (now - pickLastClickCap >= 0 && now - pickLastClickCap < (int)dcT) &&
+                                Math.Abs(x - pickLastClickX) * 2 <= dcW && Math.Abs(y - pickLastClickY) * 2 <= dcH;
                 if (!dblClick) { pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y; Interlocked.Exchange(ref pickBusy, 0); return; }
                 pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y;
                 if (now < pickRClickUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }   // 右键让路窗口内: 不取词
@@ -373,6 +427,50 @@ partial class ShotService
     // click=true = 用户只是**单击**(没有划选)。2026-09-07 老大要的"点击时也弹出悬浮球"。
     // 只允许无副作用取词: ①UIA 拿光标所在的那个词(Word 单元) ②退一步读现有选区。
     // **绝不发 Ctrl+C**: 单击不产生选区, 这时全局复制 = 把用户刚点中的输入框里的东西/别处内容当"词"抓走。
+    // ---- 取词 2: 剪贴板链（2026-09-11 老大拍板，STranslate MIT 参考 _ref_clipboardhelper.cs）----
+    // UIA 读不到选区的场景(Electron 无障碍树懒加载)用模拟 Ctrl+C 读真选区。
+    // 姿势: 快照(文本+剪贴板序列号) → 清残留修饰键 → SendInput Ctrl+C → 10ms 轮询序列号 ≤500ms →
+    // 变了等 30ms → 读文本。判据: 序列号变 ∥ 文本变 ∥ 原剪贴板空 → 出字; 否则返回空=静默放弃。
+    // 红线: 调用方必须已排除终端(conhost GetSelection 有内部复制副作用+^C 中断)。
+    // 剪贴板不还原(老大拍板): 划完剪贴板=选中的文本, 「划完能粘」是特性。
+    static string PickViaClipboard()
+    {
+        string original = "";
+        uint seq0 = 0;
+        try { original = System.Windows.Forms.Clipboard.GetText() ?? ""; } catch { }
+        try { seq0 = GetClipboardSequenceNumber(); } catch { }
+
+        // 清残留修饰键(STranslate 注释: 不清=模拟复制失败主因): L/R Ctrl、Alt、Win、Shift 全 KeyUp
+        keybd_event(0xA2, 0, 2, UIntPtr.Zero); keybd_event(0xA3, 0, 2, UIntPtr.Zero);
+        keybd_event(0xA4, 0, 2, UIntPtr.Zero); keybd_event(0xA5, 0, 2, UIntPtr.Zero);
+        keybd_event(0x5B, 0, 2, UIntPtr.Zero); keybd_event(0x5C, 0, 2, UIntPtr.Zero);
+        keybd_event(0xA0, 0, 2, UIntPtr.Zero); keybd_event(0xA1, 0, 2, UIntPtr.Zero);
+        keybd_event(0x10, 0, 2, UIntPtr.Zero);
+
+        // Ctrl+C: VK+扫描码一起给(纯 VK 无扫描码会被 Chromium 无视——旧版零成功根因)
+        keybd_event(0x11, 0x1D, 0, UIntPtr.Zero);            // Ctrl down
+        keybd_event(0x43, 0x2E, 0, UIntPtr.Zero);            // C down
+        keybd_event(0x43, 0x2E, 2, UIntPtr.Zero);            // C up
+        keybd_event(0x11, 0x1D, 2, UIntPtr.Zero);            // Ctrl up
+
+        bool changed = false;
+        int t0 = Environment.TickCount;
+        while (Environment.TickCount - t0 < 500)
+        {
+            System.Threading.Thread.Sleep(10);
+            try { if (GetClipboardSequenceNumber() != seq0) { changed = true; break; } } catch { }
+        }
+        if (changed) System.Threading.Thread.Sleep(30);      // 内容稳定
+        string now = "";
+        try { now = System.Windows.Forms.Clipboard.GetText() ?? ""; } catch { }
+        if (changed || now != original || string.IsNullOrEmpty(original))
+        {
+            string t = (now ?? "").Trim();
+            return t.Length <= 1 ? "" : t;                   // 单字符当没取到
+        }
+        return "";                                           // 剪贴板没变 = 复制失败, 静默
+    }
+
     static void PickCaptureWork(int x, int y, bool click, IntPtr fgAt, int actBase, int x0, int y0)
     {
         string text = "", how = "";
@@ -381,8 +479,7 @@ partial class ShotService
         {
             if (click)
             {
-                // 浏览器: 单击取词一律不发(单击高频, 三连 UIA 调用是右键卡 7 秒主凶) —— 2026-09-08 老大拍板
-                // 终端: 也不发(conhost 的 UIA GetSelection 有内部 Ctrl+C 副作用, 见 pickTerminalNames 注释)
+                // 浏览器: 单击/双击取词归扩展(pick-inject) —— 原生不发; 终端: 红线不发
                 if (PickIsBrowser(fgAt)) { Log("pick(click): browser target, skipped"); return; }
                 if (PickIsTerminal(fgAt)) { Log("pick(click): terminal target, skipped"); return; }
                 try { text = PickWordAtPoint(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia词"; } catch { }
@@ -390,33 +487,43 @@ partial class ShotService
                 {
                     try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia选区"; } catch { }
                 }
-                // UIA 慢目标退避: 这个窗口的跨进程 UIA 调用超过 700ms = 它的 UI 线程迟钝,
-                // 继续调用会一直霸占对方 UI 线程(实测: 右键菜单延迟 7 秒) → 30 秒内不再对它单击取词
+                // 剪贴板链 (2026-09-11 老大拍板 STranslate 方案, _ref_clipboardhelper.cs):
+                // Electron 聊天窗 UIA 读选区时灵时不灵(无障碍树懒加载) → 模拟 Ctrl+C 读真选区。
+                // 判据: 序列号变 ∥ 文本变 ∥ 原剪贴板空 → 出字; 否则静默。不还原=划完能粘(老大拍板)。
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    string clip = PickViaClipboard();
+                    if (!string.IsNullOrWhiteSpace(clip)) { text = clip; how = "clip"; }
+                    Log("pick(click): clip " + (Environment.TickCount - t0) + "ms | " + (string.IsNullOrWhiteSpace(clip) ? "(no change)" : PickOneLine(clip)));
+                }
                 int costMs = Environment.TickCount - t0;
                 if (costMs > 700) { pickSlowUntil = Environment.TickCount + 30000; Log("pick(click): slow UIA target " + costMs + "ms, backoff 30s"); }
-                if (string.IsNullOrWhiteSpace(text)) return;   // 单击空白处(桌面/图片): 不打扰
+                if (string.IsNullOrWhiteSpace(text)) return;   // 取不到字 = 不出点(空点已废, 老大不满意"出的点没内容")
                 if (text.Trim().Length > 200) text = text.Substring(0, 200);
             }
             else
             {
-                // 2026-09-08 定稿(老大终审判决: Ctrl+C 抢剪贴板方案整体作废, "能触发就触发, 不触发是能力问题"):
-                // 真本事路线 —— 本地应用 UIA 优先(无副作用); 拿不到 = **截选区矩形 OCR**。
-                // OCR 全局生效: 浏览器(Chromium 不给 UIA 文本)/终端(conhost UIA 有毒)/图片/PDF 全通吃,
-                // 零按键注入、零剪贴板占用、零副作用。选区矩形 = 钩子 DOWN/UP 坐标(x0,y0)-(x,y)。
-                // 浏览器划选归 Edge 扩展 /pick-inject 所有 —— 原生钩子让位, 避免双球/双源。
+                // 拖选: UIA 优先(本地应用), 剪贴板兜底(Electron/聊天类)。
+                // OCR 永久退出取词链(老大 2026-09-11 终审: 识别的全是错误, 不可靠)。
+                // 浏览器划选归 Edge 扩展所有 —— 原生让位。
                 bool terminal = PickIsTerminal(fgAt);
                 bool browser = PickIsBrowser(fgAt);
                 if (!terminal && !browser)
                 {
                     try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        string clip = PickViaClipboard();
+                        if (!string.IsNullOrWhiteSpace(clip)) { text = clip; how = "clip"; }
+                        Log("pick(drag): clip fallback | " + (string.IsNullOrWhiteSpace(clip) ? "(no change)" : PickOneLine(clip)));
+                    }
                 }
-                // OCR 兜底作废(老大实测 6-9s 期间所有点击被 busy 吞 = "卡死"); 浏览器划选 UIA 拿不到 = 不出球。
-                // Edge 扩展(pick-inject 注入)是后续浏览器方案, 本轮不做。
             }
             if (string.IsNullOrWhiteSpace(text))
             {
-                // UIA 拿不到(Electron 虚拟 DOM 不确定性)也出球 —— 球上工具点击时 lazy 再读选区
-                Log("pick: text empty (" + (Environment.TickCount - t0) + "ms), still showing dot");
+                // 全链(UIA+剪贴板)拿不到字 = 静默放弃, 不出空点(老大: "出的点没内容"=浪费信任)
+                Log("pick: text empty (" + (Environment.TickCount - t0) + "ms) via " + how + " — silent give-up, no ball");
+                return;
             }
             text = text.Trim();
             if (text.Length > 2000) text = text.Substring(0, 2000);

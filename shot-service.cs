@@ -2117,12 +2117,32 @@ public partial class ShotService
                             TryInt(q, "rows", out sr); TryInt(q, "row", out srw); TryInt(q, "rowspan", out srs);
                             TryInt(q, "layout", out layoutKey); TryInt(q, "zone", out zoneKey);
                             body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "", sc, sl, ss, sr, srw, srs, layoutKey, zoneKey, escAfter);
+                            if (hasFill)
+                            {
+                                // 关键(实测踩坑): fill 目标若挂在旧 snap group 里, 会被排除在 Snap Assist 外(ZCode 案例)。
+                                // 先 restore 脱组(吸附态→浮动), 再让第一窗 Win+Z, assist 才会列出它们。
+                                foreach (string nm in q["fill"].Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                                {
+                                    string t = nm.Trim(); if (t.Length == 0) continue;
+                                    IntPtr fh = FindMainWinByProc(t);
+                                    if (fh == IntPtr.Zero) fh = FindWindowByTitle(t);
+                                    if (fh != IntPtr.Zero && fh != wh) { WinShow(fh, SW_RESTORE, "restored"); Thread.Sleep(120); }
+                                }
+                                Thread.Sleep(300);
+                            }
                             if (hasFill && body.Contains("\"ok\":true"))
                             {
-                                Thread.Sleep(500); // 等 Snap Assist 出现
+                                Thread.Sleep(900); // 等 Snap Assist 就绪(过早 Enter 会空放, 实测偶发)
                                 string fillRes = SnapAssistFill(q["fill"]);
                                 body = body.Substring(0, body.Length - 1) + ",\"fill\":" + fillRes + "}";
                             }
+                        }
+                        else if (verb == "snapfill")
+                        {
+                            // Snap Assist 单步填位(方向键+Enter): 先 /win/snap 开 assist, 客户端逐步调用逐步验证
+                            string nm = q.ContainsKey("name") ? q["name"] : "";
+                            if (nm.Length == 0) { code = 400; body = "{\"ok\":false,\"error\":\"need name=标题/进程名子串\"}"; }
+                            else body = SnapAssistFill(nm);
                         }
                         else if (verb == "close") body = WinClose(wh);
                         else if (verb == "move")
@@ -3251,6 +3271,17 @@ public partial class ShotService
                     {
                         string fillNames = McpParam(a, "fill");
                         bool escAfter = fillNames.Length > 0 ? false : (McpParam(a, "esc") == "" || McpParam(a, "esc") == "1" || McpParam(a, "esc") == "true");
+                        if (fillNames.Length > 0)
+                        {
+                            foreach (string nm in fillNames.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                            {
+                                string t = nm.Trim(); if (t.Length == 0) continue;
+                                IntPtr fh = FindMainWinByProc(t);
+                                if (fh == IntPtr.Zero) fh = FindWindowByTitle(t);
+                                if (fh != IntPtr.Zero && fh != wh) { WinShow(fh, SW_RESTORE, "restored"); Thread.Sleep(120); }
+                            }
+                            Thread.Sleep(300);
+                        }
                         string snapBody = WinSnap(wh, McpParam(a, "pos"), McpParam(a, "monitor"),
                             McpParamInt(a, "cols"), McpParamInt(a, "col"), McpParamInt(a, "colspan"),
                             McpParamInt(a, "rows"), McpParamInt(a, "row"), McpParamInt(a, "rowspan"),

@@ -252,78 +252,48 @@ partial class ShotService
         return (byte)(0x30 + n); // VK_0..VK_9
     }
 
-    // ==================== Snap Assist 点选填位（系统吸附组的正确姿势） ====================
-    // 老大定论(2026-09-11): 每窗各自 Win+Z = 三个独立窗, 边界不联动; 正确 = 只有第一个窗 Win+Z 选布局,
-    // 之后 Snap Assist 列出其余窗口缩略图, **点选**它们占用预留位 → 三窗成一吸附组, 拖边一起动。
-    // 实现: 第一窗贴完(不 Esc) → 从桌面 UIA 找 Name 含目标标题/进程名的缩略图(排除 app 自身窗口) → 点中心。
-    // 顶层可见窗清单(Snap Assist 点选时用来排除 app 本体: Chrome 子元素 NativeWindowHandle=0, hwnd 过滤拦不住)
-    struct SnapTopWnd { public IntPtr h; public string title; public RECT r; }
-    static List<SnapTopWnd> SnapTopWindows()
-    {
-        var list = new List<SnapTopWnd>();
-        EnumWindows(delegate(IntPtr h, IntPtr lp)
-        {
-            if (GetAncestor(h, 2) != h) return true;
-            if (!IsWindowVisible(h)) return true;
-            var tb = new StringBuilder(256); GetWindowTextW(h, tb, 256);
-            string t = tb.ToString(); if (t.Length == 0) return true;
-            RECT r; GetWindowRect(h, out r);
-            list.Add(new SnapTopWnd { h = h, title = t, r = r });
-            return true;
-        }, IntPtr.Zero);
-        return list;
-    }
-    static bool RectClose(RECT a, RECT b)
-    {
-        return Math.Abs(a.Left - b.Left) < 12 && Math.Abs(a.Top - b.Top) < 12 &&
-               Math.Abs((a.Right - a.Left) - (b.Right - b.Left)) < 12 &&
-               Math.Abs((a.Bottom - a.Top) - (b.Bottom - b.Top)) < 12;
-    }
-
-    static string SnapAssistClickOne(string match, IntPtr excludeHwnd)
+    // ==================== Snap Assist 方向键填位（老大方案 2026-09-11, 零鼠标零坐标） ====================
+    // 老大定论: 每窗各自 Win+Z = 独立窗不联动; 正确 = 第一个窗 Win+Z 选布局, Snap Assist 悬浮其余窗缩略图,
+    // **方向键移动焦点 + Enter 确认**（点缩略图会点错位, 弃用鼠标）。实现: 读 FocusedElement.Name 匹配目标 → Enter。
+    // 焦点扫描序列 →×6 ↓ ↑ ←×6, 卡死(同名连读×3)用 Tab 跳出, 9s 超时带轨迹报错。
+    static string SnapAssistKbdOne(string match)
     {
         try
         {
-            var tops = SnapTopWindows(); // 一次性采样
-            var root = System.Windows.Automation.AutomationElement.RootElement;
-            foreach (var el in WalkLimited(root, 4000))
+            var trail = new StringBuilder();
+            string last = "";
+            int stuck = 0;
+            byte[] seq = { 0x27,0x27,0x27,0x27,0x27,0x27, 0x28, 0x26, 0x25,0x25,0x25,0x25,0x25,0x25 };
+            int i = 0;
+            int deadline = Environment.TickCount + 9000;
+            while (Environment.TickCount < deadline)
             {
-                string n = null;
-                try { n = el.Current.Name; } catch { }
-                if (string.IsNullOrEmpty(n) || n.IndexOf(match, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                IntPtr elHwnd = IntPtr.Zero;
-                try { elHwnd = new IntPtr(el.Current.NativeWindowHandle); } catch { }
-                if (elHwnd != IntPtr.Zero)
+                var fe = System.Windows.Automation.AutomationElement.FocusedElement;
+                string n = ""; try { n = fe.Current.Name ?? ""; } catch { }
+                if (trail.Length < 400) trail.Append("[").Append(JsonEscape(n.Length > 24 ? n.Substring(0, 24) : n)).Append("]");
+                if (!string.IsNullOrEmpty(n) && n.IndexOf(match, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    if (elHwnd == excludeHwnd) continue;
-                    var clsB = new StringBuilder(128);
-                    GetClassNameW(elHwnd, clsB, 128);
-                    string cls = clsB.ToString();
-                    if (cls == "Shell_TrayWnd" || cls == "Progman" || cls == "WorkerW") continue;
+                    // 只对 XAML 缩略图回车(hwnd==0)。本体窗的 UIA 元素带真 hwnd —— Enter 它=白按(还会拉前台)
+                    int fh = 0; try { fh = fe.Current.NativeWindowHandle; } catch { }
+                    if (fh != 0) { KbdTap(seq[i < seq.Length ? i : 0]); i++; Thread.Sleep(150); continue; }
+                    KbdTap(0x0D); // Enter 确认该缩略图
+                    Thread.Sleep(650); // 等落位 / assist 进入下一格
+                    Log("snapassist kbd: matched [" + (n.Length > 40 ? n.Substring(0, 40) : n) + "] -> Enter");
+                    return "{\"ok\":true,\"matched\":\"" + JsonEscape(n.Length > 60 ? n.Substring(0, 60) : n) + "\"}";
                 }
-                var r = el.Current.BoundingRectangle;
-                var elRect = new RECT { Left = (int)r.X, Top = (int)r.Y, Right = (int)(r.X + r.Width), Bottom = (int)(r.Y + r.Height) };
-                // 几何排除: 与"标题含 match 的本体窗"矩形重合 = 就是本体(非 Snap Assist 缩略图)
-                bool isSelf = false;
-                foreach (var w in tops)
-                {
-                    if (w.title.IndexOf(match, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                    if (elHwnd == w.h || RectClose(elRect, w.r)) { isSelf = true; break; }
-                }
-                if (isSelf) continue;
-                if (r.Width < 80 || r.Height < 80) continue;
-                int cx = (int)(r.X + r.Width / 2), cy = (int)(r.Y + r.Height / 2);
-                MouseMove(cx, cy); Thread.Sleep(90);
-                MouseClick("left", 1);
-                Log("snapassist click: match=" + match + " name=[" + (n.Length > 40 ? n.Substring(0, 40) : n) + "] @ " + cx + "," + cy);
-                return "{\"ok\":true,\"matched\":\"" + JsonEscape(n.Length > 60 ? n.Substring(0, 60) : n) + "\",\"at\":{\"x\":" + cx + ",\"y\":" + cy + "}}";
+                if (n == last) stuck++; else stuck = 0;
+                last = n;
+                if (stuck >= 3) { KbdTap(0x09); stuck = 0; Thread.Sleep(140); continue; } // Tab 跳出卡死
+                if (i >= seq.Length) { KbdTap(0x09); i = 0; }
+                KbdTap(seq[i]); i++;
+                Thread.Sleep(150);
             }
-            return "{\"ok\":false,\"error\":\"Snap Assist 里没找到含 '" + JsonEscape(match) + "' 的缩略图(Snap Assist 可能已关, 或缩略图名不匹配)\"}";
+            return "{\"ok\":false,\"error\":\"方向键扫描超时没匹配 '" + JsonEscape(match) + "', 焦点轨迹: " + trail.ToString() + "\"}";
         }
         catch (Exception ex) { return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}"; }
     }
 
-    // 依次点选 fill 列表填满剩余区; 返回逐项结果
+    // 依次方向键选填 fill 列表; 返回逐项结果
     static string SnapAssistFill(string namesRaw)
     {
         var results = new List<string>();
@@ -332,10 +302,9 @@ partial class ShotService
         {
             string m = raw.Trim();
             if (m.Length == 0) continue;
-            string r = SnapAssistClickOne(m, IntPtr.Zero);
+            string r = SnapAssistKbdOne(m);
             results.Add(r);
-            Thread.Sleep(650); // 等上一格落位、下一格 Snap Assist 就绪
-            if (r.Contains("\"ok\":false")) break;
+            if (r.Contains("\"ok\":false")) { KbdEsc(); break; } // 失败即 Esc: 焦点可能已掉回普通 app, 别让方向键继续在里面乱走
         }
         return "{\"ok\":true,\"fills\":[" + string.Join(",", results) + "]}";
     }
