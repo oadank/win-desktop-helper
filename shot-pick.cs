@@ -26,10 +26,11 @@ partial class ShotService
     const int PICK_MOVE_MIN2 = 144;                   // 位移平方 <144(<12px) = 单击, 不算划选
     static int pickEnabled = 1;
 
-    // ---- I-BEAM 光标门卫 (STranslate 2.0 MIT 参考 _ref_mousehook.cs) ----
-    // 手势期间光标是否为工字形(文本选择光标): 是=真的在选文字, 否=滑杆/按钮/UI 标签。
-    // 确定性判定, 治"不该弹的弹、该弹的不弹"—— 替代控件类型过滤/选区空判定等一切猜测。
-    static IntPtr pickIBeamCursor;      // PickInit 时 LoadCursor(IDC_IBEAM) 缓存句柄
+    // ---- I-BEAM 光标门卫 (思路自 STranslate MIT; 句柄比对在 Win11 失效, 2026-09-11 改形状识别) ----
+    // 实锤(探针): 记事本工字形光标句柄=0x10003, 标准 IDC_IBEAM=0x10005 —— 应用自定义句柄比对永远 false,
+    // 5 连误挡(venv/effort)。改判"蒙版里存在高度≥70%图高的连续实心竖带": 工字形(任何实现)必有这条竖线,
+    // 箭头/手形/沙漏没有。结果按句柄缓存(每句柄只算一次位图), 零热路径开销。
+    static IntPtr pickIBeamCursor;      // 标准 IDC_IBEAM 句柄(快路径)
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     struct PICKCURSORINFO
     {
@@ -43,15 +44,84 @@ partial class ShotService
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     static extern IntPtr LoadCursor(IntPtr hInstance, IntPtr lpCursorName);
     static readonly IntPtr IDC_IBEAM = new IntPtr(32513);   // MAKEINTRESOURCE(IDC_IBEAM)
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct PICKICONINFO
+    {
+        public int fIcon;
+        public uint xHotspot, yHotspot;
+        public IntPtr hbmMask, hbmColor;
+    }
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool GetIconInfo(IntPtr hIcon, ref PICKICONINFO piconinfo);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    static extern int GetObjectW(IntPtr h, int c, out PICKBITMAP bm);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    static extern int GetBitmapBits(IntPtr hBitmap, int cb, byte[] lpvBits);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    static extern bool DeleteObject(IntPtr hObject);
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct PICKBITMAP
+    {
+        public int bmType, bmWidth, bmHeight, bmWidthBytes;
+        public short bmPlanes, bmBitsPixel;
+        public IntPtr bmBits;
+    }
+    static readonly System.Collections.Hashtable pickCursorShapeCache = new System.Collections.Hashtable();   // hCursor -> bool(isIBeam)
+
     static bool PickIsIBeamCursor()
     {
         try
         {
-            if (pickIBeamCursor == IntPtr.Zero) return false;
             PICKCURSORINFO ci = new PICKCURSORINFO();
             ci.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(PICKCURSORINFO));
             if (!GetCursorInfo(ref ci)) return false;
-            return ci.hCursor == pickIBeamCursor;
+            if (ci.hCursor == IntPtr.Zero) return false;
+            if (ci.hCursor == pickIBeamCursor) return true;     // 标准句柄快路径
+            lock (pickCursorShapeCache)
+            {
+                if (pickCursorShapeCache.ContainsKey(ci.hCursor)) return (bool)pickCursorShapeCache[ci.hCursor];
+                bool isIbeam = PickCursorLooksIBeam(ci.hCursor);
+                pickCursorShapeCache[ci.hCursor] = isIbeam;
+                if (!isIbeam) Log("pick gate: cursor " + ci.hCursor.ToInt64() + " = non-ibeam shape");
+                else Log("pick gate: cursor " + ci.hCursor.ToInt64() + " = ibeam shape (custom)");
+                return isIbeam;
+            }
+        }
+        catch { return false; }
+    }
+
+    // 蒙版列轮廓: 任一列的 set 位高度 ≥ 70% 蒙版高 = 存在实心竖带 = 工字形
+    static bool PickCursorLooksIBeam(IntPtr hCursor)
+    {
+        try
+        {
+            PICKICONINFO ii = new PICKICONINFO();
+            if (!GetIconInfo(hCursor, ref ii)) return false;
+            try
+            {
+                PICKBITMAP bm;
+                if (GetObjectW(ii.hbmMask, System.Runtime.InteropServices.Marshal.SizeOf(typeof(PICKBITMAP)), out bm) == 0 || bm.bmWidth <= 0)
+                    return false;
+                int w = bm.bmWidth, h = Math.Abs(bm.bmHeight);
+                int rowBytes = ((w + 15) / 16) * 2;             // 蒙版按 WORD 对齐
+                if (h % 2 == 0 && bm.bmHeight > 0) { /* AND+XOR 双面: 取上半 AND 面也行; 直接全读更稳 */ }
+                byte[] buf = new byte[rowBytes * h];
+                if (GetBitmapBits(ii.hbmMask, buf.Length, buf) == 0) return false;
+                int fullCols = 0;
+                for (int x = 0; x < w; x++)
+                {
+                    int set = 0;
+                    for (int y = 0; y < h; y++)
+                        if ((buf[y * rowBytes + x / 8] & (0x80 >> (x % 8))) != 0) set++;
+                    if (set >= h * 7 / 10) fullCols++;
+                }
+                return fullCols >= 3;                            // 竖带至少 3 列宽(1px 线也有 AA 邻列)
+            }
+            finally
+            {
+                if (ii.hbmMask != IntPtr.Zero) DeleteObject(ii.hbmMask);
+                if (ii.hbmColor != IntPtr.Zero) DeleteObject(ii.hbmColor);
+            }
         }
         catch { return false; }
     }
@@ -214,7 +284,8 @@ partial class ShotService
             if (pickDownOnAsk) { pickDownOnAsk = false; return; }               // 提问框里拖选文字: 正常编辑, 不触发取词
             if (askJustClosed) return;                                          // 提问框刚被这一下关掉: 本轮手势不取词
             if (cardWasTouched) return;                                         // 刚在卡片上按住过: 不重复取词
-            pickSeenIBeam |= PickIsIBeamCursor();                               // UP 时刻也查一次(快手势 MOVE 可能漏)
+            // UP 时刻不追加查询(GetCursorInfo 在 UP 瞬间常已切回箭头=误挡, 实测 venv/effort 被挡) ——
+            // 只用 DOWN+MOVE 累积值, 与 STranslate 一致(它 UP 时不查, 用 _hasSeenIBeam 累积)
             bool wasTextGesture = pickSeenIBeam; pickSeenIBeam = false;         // 取走即清(下一手势重新记)
             if (!wasTextGesture)
             {
@@ -341,12 +412,15 @@ partial class ShotService
                 int now = Environment.TickCount;
                 // 1A(老大裁决): 单击选词砍掉 —— 只有"系统双击时限内同位置"= 双击选词才取词。
                 // 双击判定用系统值(STranslate): GetDoubleClickTime + SM_C*DOUBLECLK, 手感与系统一致。
+                // 双击豁免 I-beam 门卫: 双击本身已是强约束(系统时限+同位), 快双击时 DOWN 瞬间光标
+                // 可能还是上一击的箭头残留(实测 venv/effort 被误挡)——门卫只管拖选和单击。
                 int dcW = Math.Max(1, GetSystemMetrics(SM_CXDOUBLECLK));
                 int dcH = Math.Max(1, GetSystemMetrics(SM_CYDOUBLECLK));
                 uint dcT = GetDoubleClickTime();
                 bool dblClick = (now - pickLastClickCap >= 0 && now - pickLastClickCap < (int)dcT) &&
                                 Math.Abs(x - pickLastClickX) * 2 <= dcW && Math.Abs(y - pickLastClickY) * 2 <= dcH;
                 if (!dblClick) { pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y; Interlocked.Exchange(ref pickBusy, 0); return; }
+                pickSeenIBeam = true;   // 豁免: 双击直通取词链
                 pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y;
                 if (now < pickRClickUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }   // 右键让路窗口内: 不取词
                 if (now < pickSlowUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }     // 慢目标退避窗口内: 不取词
