@@ -95,7 +95,7 @@ const TOOLS = [
   },
   {
     name: 'mouse_click',
-    description: '点击（带坐标先移动再点）。button=left|right|middle，double=1 双击，triple=1 三击（选整行/段），mods=shift/ctrl/alt/win 按住修饰键点击（如 shift+click 选范围、ctrl+click 多选）',
+    description: '点击（带坐标先移动再点）。button=left|right|middle，double=1 双击，triple=1 三击（选整行/段），mods=shift/ctrl/alt/win 按住修饰键点击。返回 at=落点顶层窗口(process/title/front)；front=1 时落点非前台直接拒点',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -103,7 +103,8 @@ const TOOLS = [
         button: { type: 'string', description: 'left|right|middle' },
         double: { type: 'number', description: '0|1' },
         triple: { type: 'number', description: '0|1 三连击(选整行/段); 坐标务必取行内 rect.x+20 以上、行垂直中线 —— 打左边缘 2px 会被 RichEdit 边距命中区变成全选(实测坑)' },
-        mods: { type: 'string', description: 'shift|ctrl|alt|win，可组合如 ctrl+shift' }
+        mods: { type: 'string', description: 'shift|ctrl|alt|win，可组合如 ctrl+shift' },
+        front: { type: 'number', description: '1=严格模式，落点窗口不是前台直接拒点' }
       }
     }
   },
@@ -441,14 +442,14 @@ const TOOLS = [
   // ---- 托盘/隐藏窗口 (托盘应用窗口失踪时用) ----
   {
     name: 'tray_click',
-    description: '点击系统托盘/任务栏图标。用途: 托盘应用(如 ZCode/微信类 Electron 应用)进程活着但窗口失踪时, 双击托盘图标唤回主窗。name=图标名(含糊匹配, 主区找不到会自动展开溢出区找), button=left(默认)/right, double=1 双击(多数托盘应用双击=打开主窗口, 单击可能只弹预览)。点击后必须重新采样验证: window_info(process=应用进程名) 或 win_manage(action=listall)。',
+    description: '托盘唤回(Win+B 键盘流)。name=图标名；Enter 单击；勿 double=1（会把刚显示的窗再藏回去）；找不到如实 ok:false 带焦点轨迹。点击后重新 window_info(process=...) 或 win_manage listall 验证',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
-        name: { type: 'string', description: '图标名, 如 ZCode' },
-        relaunch: { type: 'number', description: '1=直接再启动应用 exe(单实例互斥拉前台, 比 tray 双击可靠); 0=托盘双击(默认)' },
+        name: { type: 'string', description: '图标名, 如 WorkBuddy' },
+        relaunch: { type: 'number', description: '1=直接再启动应用 exe; 0=托盘键盘流(默认)' },
         button: { type: 'string', description: 'left(默认)/right' },
-        double: { type: 'number', description: '0=单击(推荐, 显示窗); 1=双击(会切回隐藏, 别用)' }
+        double: { type: 'number', description: '0=单击(推荐); 1=勿用(Enter×2 会把刚显示的窗再藏回去)' }
       },
       required: ['name']
     }
@@ -531,6 +532,7 @@ function buildUrl(name, a) {
       if (a.double) qs.push('double=' + a.double);
       if (a.triple) qs.push('triple=' + a.triple);
       if (a.mods) qs.push('mods=' + enc(a.mods));
+      if (a.front) qs.push('front=' + a.front);
       return { path: '/mouse/click', qs };
     }
     case 'mouse_down': return { path: '/mouse/down', qs: a.button ? ['button=' + a.button] : [] };

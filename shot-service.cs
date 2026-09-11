@@ -543,8 +543,8 @@ public partial class ShotService
             var root = System.Windows.Automation.AutomationElement.RootElement;
             var tray = root.FindFirst(System.Windows.Automation.TreeScope.Children,
                 new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ClassNameProperty, "Shell_TrayWnd"));
-            var hit = FindTrayButton(tray, name);
-            string via = "taskbar";
+            var hit = FindTrayButton(tray, name, false); // 主路径禁任务栏按钮兜底
+            string via = "tray-icon";
             if (hit == null)
             {
                 // Win11 键盘流(实测全通, 老大指路 Win+B): Win+B 聚焦托盘 → 回车展开溢出 → 目标图标已获焦 → 回车=双击。
@@ -567,8 +567,9 @@ public partial class ShotService
                     {
                         var fe = System.Windows.Automation.AutomationElement.FocusedElement;
                         string fn2 = ""; try { fn2 = fe.Current.Name ?? ""; } catch { }
-                        if (step < 8) focusTrail.Append(step).Append(":[").Append(fn2.Length > 24 ? fn2.Substring(0, 24) : fn2).Append("] ");
-                        if (fn2.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0) { fFinalName = fn2; break; }
+                        if (step < 8) focusTrail.Append(step).Append(":[").Append(FocusName24(fe)).Append("] ");
+                        string mHit = KbdFocusMatch(fe, name);
+                        if (mHit != null) { fFinalName = mHit; break; }
                         keybd_event((byte)0x25, 0, 0, UIntPtr.Zero); keybd_event((byte)0x25, 0, 2, UIntPtr.Zero); // ←
                         System.Threading.Thread.Sleep(110);
                     }
@@ -581,8 +582,9 @@ public partial class ShotService
                         for (int step = 0; step < 25 && fFinalName == ""; step++)
                         {
                             var fe = System.Windows.Automation.AutomationElement.FocusedElement;
-                            string fn2 = ""; try { fn2 = fe.Current.Name ?? ""; } catch { }
-                            if (fn2.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0) { fFinalName = fn2; break; }
+                            if (step < 10) focusTrail.Append("T" + step + ":[" + FocusName24(fe) + "] ");
+                            string mHit = KbdFocusMatch(fe, name);
+                            if (mHit != null) { fFinalName = mHit; break; }
                             keybd_event((byte)0x27, 0, 0, UIntPtr.Zero); keybd_event((byte)0x27, 0, 2, UIntPtr.Zero); // →
                             System.Threading.Thread.Sleep(110);
                         }
@@ -601,8 +603,9 @@ public partial class ShotService
                             for (int step = 0; step < 30 && fFinalName == ""; step++)
                             {
                                 var fe = System.Windows.Automation.AutomationElement.FocusedElement;
-                                string fn2 = ""; try { fn2 = fe.Current.Name ?? ""; } catch { }
-                                if (fn2.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0) { fFinalName = fn2; break; }
+                                if (step < 10) focusTrail.Append("O" + step + ":[" + FocusName24(fe) + "] ");
+                                string mHit = KbdFocusMatch(fe, name);
+                                if (mHit != null) { fFinalName = mHit; break; }
                                 keybd_event((byte)0x25, 0, 0, UIntPtr.Zero); keybd_event((byte)0x25, 0, 2, UIntPtr.Zero); // ←
                                 System.Threading.Thread.Sleep(110);
                             }
@@ -617,6 +620,7 @@ public partial class ShotService
                     if (dbl) { System.Threading.Thread.Sleep(150); keybd_event((byte)0x0D, 0, 0, UIntPtr.Zero); keybd_event((byte)0x0D, 0, 2, UIntPtr.Zero); }
                     System.Threading.Thread.Sleep(300);
                     keybd_event((byte)0x1B, 0, 0, UIntPtr.Zero); keybd_event((byte)0x1B, 0, 2, UIntPtr.Zero); // Esc 收弹层
+                    Log("tray kbd ok: path=" + (scanPath == "" ? "taskbar段" : scanPath) + " name=[" + fFinalName + "]");
                     return "{\"ok\":true,\"found\":true,\"via\":\"kbd(Win+B " + scanPath + " Enter" + (dbl ? "×2" : "") + ")\",\"name\":\"" + JsonEscape(fFinalName.Length > 40 ? fFinalName.Substring(0, 40) : fFinalName) + "\",\"clicked\":\"" + (dbl ? "double" : button) + "\"}";
                 }
                 // 旧 UIA flyout 路线保留备用 (mode=uiaclick): Win11 溢出弹层多为应用自绘, FromPoint 常落空
@@ -625,7 +629,7 @@ public partial class ShotService
                 POINT mpO; if (GetCursorPos(out mpO))
                 {
                     var fly = System.Windows.Automation.AutomationElement.FromPoint(new System.Windows.Point(mpO.x, mpO.y));
-                    if (fly != null) hit = FindTrayButton(fly, name);
+                    if (fly != null) hit = FindTrayButton(fly, name, true); // uiaclick 显式模式保留任务栏兜底
                 }
                 via = "overflow";
             }
@@ -639,7 +643,31 @@ public partial class ShotService
         catch (Exception e) { return "{\"ok\":false,\"error\":\"" + JsonEscape(e.Message) + "\"}"; }
     }
 
-    static System.Windows.Automation.AutomationElement FindTrayButton(System.Windows.Automation.AutomationElement scope, string name)
+    // Win+B 键盘流焦点判定: 名字含 name 且**跳过任务栏程序按钮陷阱位**。
+    // 陷阱: 窗口缩托盘后任务栏按钮仍存在(WorkBuddy x=619 同名), 焦点扫到就 Enter=隐藏/最小化切换而非唤回。
+    static string KbdFocusMatch(System.Windows.Automation.AutomationElement fe, string name)
+    {
+        if (fe == null) return null;
+        string n = ""; try { n = fe.Current.Name ?? ""; } catch { }
+        if (n == "" || n.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0) return null;
+        try
+        {
+            string cls = fe.Current.ClassName ?? "";
+            var r = fe.Current.BoundingRectangle;
+            bool traySide = cls.StartsWith("SystemTray") || r.X > 1600;
+            if (!traySide && r.Y > SystemInformation.VirtualScreen.Bottom - 80) return null;
+        }
+        catch { }
+        return n;
+    }
+
+    static string FocusName24(System.Windows.Automation.AutomationElement fe)
+    {
+        try { string s = fe.Current.Name; if (s == null) return ""; return s.Length > 24 ? s.Substring(0, 24) : s; }
+        catch { return "?err"; }
+    }
+
+    static System.Windows.Automation.AutomationElement FindTrayButton(System.Windows.Automation.AutomationElement scope, string name, bool allowTaskbarFallback)
     {
         if (scope == null || name == null || name == "") return null;
         System.Windows.Automation.AutomationElement fallback = null;
@@ -658,7 +686,7 @@ public partial class ShotService
                     bool trayZone = cls.StartsWith("SystemTray") || r.X > 1600; // 托盘区在屏右侧(2560 宽的 62% 以右)
                     if (!trayZone)
                     {
-                        if (fallback == null) fallback = el; // 用户显式要点任务栏按钮时仍可用
+                        if (allowTaskbarFallback && fallback == null) fallback = el;
                         continue;
                     }
                 }
@@ -913,7 +941,7 @@ public partial class ShotService
         string trayName = !string.IsNullOrEmpty(process) ? process : title;
         if (string.IsNullOrEmpty(trayName))
             return "{\"ok\":false,\"error\":\"need process= or title= or hwnd=\",\"steps\":[" + JsonArr(steps) + "]}";
-        steps.Add("tray_click '" + trayName + "' double=1 -> " + TrayClick(trayName, "left", true));
+        steps.Add("tray_click '" + trayName + "' Enter单击 -> " + TrayClick(trayName, "left", false)); // double=1 会 Enter×2 把刚显示的窗再藏回去
 
         int deadline = Environment.TickCount + waitMs;
         IntPtr nh = IntPtr.Zero; bool stable = false;
@@ -1912,9 +1940,23 @@ public partial class ShotService
                     bool dbl = q.ContainsKey("double") && q["double"] == "1";
                     bool triple = q.ContainsKey("triple") && q["triple"] == "1";
                     string mods = q.ContainsKey("mods") ? q["mods"].ToLowerInvariant() : "";
+                    bool wantFront = q.ContainsKey("front") && q["front"] == "1";
+                    bool landFront = false; string landJson = "";
+                    if (hasXY)
+                    {
+                        IntPtr landRoot = GetAncestor(WindowFromPoint(new System.Drawing.Point(x, y)), 2);
+                        if (landRoot == IntPtr.Zero) landRoot = WindowFromPoint(new System.Drawing.Point(x, y));
+                        landJson = LandJson(landRoot, out landFront);
+                    }
                     // UIPI 预检: 目标窗口若是管理员权限而自己是普通权限, 点击会被系统静默丢弃 → 直接拦下报错, 不假报 ok
                     string uipi = UipiCheck(hasXY ? WindowFromPoint(new System.Drawing.Point(x, y)) : GetForegroundWindow());
                     if (uipi != null) { code = 409; body = uipi; Log("[ctrl] mouse click BLOCKED by uipi"); }
+                    else if (wantFront && hasXY && !landFront)
+                    {
+                        code = 409;
+                        body = "{\"ok\":false,\"error\":\"落点窗口不是前台 —— 已拒点(front=1)。浏览器最小化时盲点/点错窗两案同源；先 activate 或 listall 核对再点\",\"at\":" + landJson + "}";
+                        Log("[ctrl] mouse click BLOCKED front=1 land=" + landJson);
+                    }
                     else
                     {
                         if (hasXY) MouseMove(x, y);
@@ -1924,8 +1966,9 @@ public partial class ShotService
                         for (int i = mvks.Length - 1; i >= 0; i--) keybd_event(mvks[i], 0, 2, UIntPtr.Zero); // KEYEVENTF_KEYUP 逆序松开
                         body = "{\"ok\":true,\"button\":\"" + button + "\"" + (dbl ? ",\"double\":true" : "") + (triple ? ",\"triple\":true" : "") +
                                (mods != "" ? ",\"mods\":\"" + JsonEscape(mods) + "\"" : "") +
-                               (hasXY ? ",\"x\":" + x + ",\"y\":" + y : "") + "}";
-                        Log("[ctrl] mouse click " + button + (triple ? " triple" : (dbl ? " dbl" : "")) + (mods != "" ? " mods=" + mods : "") + (hasXY ? " @ " + x + "," + y : ""));
+                               (hasXY ? ",\"x\":" + x + ",\"y\":" + y : "") +
+                               (landJson != "" ? ",\"at\":" + landJson : "") + "}";
+                        Log("[ctrl] mouse click " + button + (triple ? " triple" : (dbl ? " dbl" : "")) + (mods != "" ? " mods=" + mods : "") + (hasXY ? " @ " + x + "," + y : (landJson != "" ? " land=" + landJson : "")));
                     }
                 }
                 else if (path == "/mouse/scroll")
@@ -2378,6 +2421,19 @@ public partial class ShotService
             return true;
         }
         catch (Exception ex) { Log("relaunch as admin failed: " + ex.Message); return false; }
+    }
+
+    // 落点窗口回报: mouse_click 坐标点击时报告命中的顶层窗口(process/title/front)
+    static string LandJson(IntPtr root, out bool front)
+    {
+        front = false;
+        if (root == IntPtr.Zero) return "{\"process\":\"\",\"title\":\"\",\"front\":false}";
+        int pid = 0; GetWindowThreadProcessId(root, out pid);
+        string proc = ""; try { proc = Process.GetProcessById(pid).ProcessName; } catch { }
+        StringBuilder sb = new StringBuilder(256);
+        string title = GetWindowTextW(root, sb, 256) > 0 ? sb.ToString() : "";
+        front = root == GetForegroundWindow();
+        return "{\"hwnd\":" + root.ToInt64() + ",\"pid\":" + pid + ",\"process\":\"" + JsonEscape(proc) + "\",\"title\":\"" + JsonEscape(title.Length > 60 ? title.Substring(0, 60) : title) + "\",\"front\":" + (front ? "true" : "false") + "}";
     }
 
     // 输入拦截预检: 目标窗口是管理员权限、而自己是普通权限 → 系统会把合成输入**静默丢掉**,
@@ -3234,7 +3290,7 @@ public partial class ShotService
             "{\"name\":\"active_window\",\"description\":\"获取当前活动窗口信息 {title,process,rect}\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"monitors\",\"description\":\"列出显示器元数据（分辨率/主屏/设备名）\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"mouse_move\",\"description\":\"移动鼠标到物理像素坐标\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\"]}}," +
-            "{\"name\":\"mouse_click\",\"description\":\"点击。button=left|right|middle，double=1 双击，triple=1 三击选整行(坐标务必行内 rect.x+20 以上, 左边缘2px触发全选实测坑)，mods=shift/ctrl/alt 按住修饰键点击(选范围/多选)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"},\"triple\":{\"type\":\"number\"},\"mods\":{\"type\":\"string\"}}}}," +
+            "{\"name\":\"mouse_click\",\"description\":\"点击。button=left|right|middle，double=1 双击，triple=1 三击选整行(坐标务必行内 rect.x+20 以上, 左边缘2px触发全选实测坑)，mods=shift/ctrl/alt 按住修饰键点击(选范围/多选)。返回 at=落点顶层窗口(process/title/front)；front=1 时落点非前台直接拒点\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"},\"triple\":{\"type\":\"number\"},\"mods\":{\"type\":\"string\"},\"front\":{\"type\":\"number\"}}}}," +
             "{\"name\":\"mouse_scroll\",\"description\":\"滚轮：正数=向上滚，负数=向下滚（典型 ±120/格）。可选 x,y 先移动到目标坐标再滚\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"delta\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"delta\"]}}," +
             "{\"name\":\"keyboard_type\",\"description\":\"向当前聚焦输入框打字。中文/emoji 直接支持（Unicode 事件，不依赖输入法）。≤2000 字符\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"text\":{\"type\":\"string\"},\"nl\":{\"type\":\"string\"}},\"required\":[\"text\"]}}," +
             "{\"name\":\"keyboard_press\",\"description\":\"按组合键，如 ctrl+shift+a / enter / alt+f4 / win / ctrl+s\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"keys\":{\"type\":\"string\"}},\"required\":[\"keys\"]}}," +
@@ -3262,7 +3318,7 @@ public partial class ShotService
             "{\"name\":\"ui_read\",\"description\":\"按索引读元素Name/Value/类名/类型(比OCR准)。title=窗口标题,i=索引\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"}},\"required\":[\"i\"]}," +
             "{\"name\":\"get_skill\",\"description\":\"【必须先调用】获取本服务 SKILL 操作手册（铁律/避坑/流程）。所有工具首次调用前强制先读本 SKILL，否则报错。踩坑必须 update_skill 写回，禁止只写记忆。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"update_skill\",\"description\":\"【踩坑必写】把新踩坑经验写回共享 SKILL.md（全体 agent 共享，立即生效）。title=小节标题，entry=markdown 正文\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"entry\":{\"type\":\"string\"}},\"required\":[\"title\",\"entry\"]}}," +
-            "{\"name\":\"tray_click\",\"description\":\"点击系统托盘/任务栏图标(托盘应用窗口失踪时用它唤回主窗)。name=图标名含糊匹配, button=left/right, double=1 双击(多数托盘应用双击开主窗)。点击后重新 window_info(process=...) 或 win_manage listall 验证窗口是否出现\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"name\":{\"type\":\"string\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"}},\"required\":[\"name\"]}}" +
+            "{\"name\":\"tray_click\",\"description\":\"托盘唤回(Win+B 键盘流)。name=图标名；Enter 单击；勿 double=1（会把刚显示的窗再藏回去）；找不到如实 ok:false 带焦点轨迹。点击后重新 window_info(process=...) 或 win_manage listall 验证\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"name\":{\"type\":\"string\"},\"button\":{\"type\":\"string\"},\"double\":{\"type\":\"number\"}},\"required\":[\"name\"]}}" +
             "]";
     }
 
