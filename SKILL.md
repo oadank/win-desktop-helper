@@ -50,7 +50,7 @@
 | 语义定位/点击/读写 | `ui_tree` `ui_find` `ui_click(ref\|name, expect=, verify=1)` `ui_read` `ui_set` `ui_select` |
 | 证明"点对了" | `ui_click(..., expect="预期出现的文字")` → 返回 `expect.found` |
 | 窗口信息/管理 | `window_info`(支持 process 精确匹配) `active_window` `list_apps` `win_manage` `monitors` |
-| 半屏/四分/三均分 | **吸附组正道(唯一正确)**：第一窗 `win_manage(snap, pos=zkbd, layout=6, zone=1, fill=ZCode,标题子串)` —— Win+Z 选布局6选区1，**Snap Assist 自动点选** fill 列表填满剩余区 → 三窗成一组拖边联动。**别每窗各发 Win+Z**（三个独立窗，边不联动）。预设 `zthirdleft\|zthirdmid\|zthirdright` = layout 6 zone 1/2/3；无 fill 时选完 zone 自动 Esc 提交 |
+| 半屏/四分/三均分 | **三分屏秒操作（老大定稿 2026-09-11）**：① 任选一窗 `win_manage(snap, hwnd=X, pos=zkbd, layout=6, zone=1, esc=0, fill=标题子串1,标题子串2)` —— 一条命令成组。**铁则**：fill 用**窗口标题子串**（缩略图名=标题，进程名必败：msedge→"DSH 本地构建"）；**不做任何预处理**（restore/脱组全多余，assist 自动列出所有 app 含最小化）；失败自动重开 assist 重试。分步版：`esc=0` snap → `win_manage(verb=snapfill, hwnd=X, name=标题子串)` 逐步验 |
 | 找失踪窗口 | `win_manage(action=listall, pid=)` 含隐藏/最小化/托盘化的窗口 |
 | **深度恢复(冻结/没窗口)** | `tray_click(name=, double=0)` 键盘流(Win+B+方向键扫描, 默认) → 窗稳定后 `win_manage(snap=)` 贴位；`app_restore` 为兼容保留但托盘环节同走键盘流 |
 | 托盘唤回 | `tray_click(name=, double=0)` —— Win+B 键盘流扫描主区+溢出层（图标被藏也能点），不再用坐标点托盘 |
@@ -73,7 +73,7 @@
 | `app_run` 返回的 hwnd 找不到窗口 | 多进程应用会换窗，用 `list_apps` 按 process 重新取 |
 | 布局想贴半屏 | 别用 move 手算坐标，用 snap；返回 target≠rect 说明应用有最小尺寸约束，按 rect 补差 |
 | **全都 ok 但啥也没发生**（菜单不弹/键无反应） | UIPI：目标窗口管理员权限 + 本程序普通权限 → 输入被静默丢弃。`health` 看 `elevated`，false 就重建提权（见铁律 7） |
-| **贴位首选=Win+Z / Win+方向** | 三均分 → `pos=zthirdleft\|zthirdmid\|zthirdright`（本机 **layout=6** zone=1/2/3；**9=中间大两边小**）；半屏/四分 → `sysleft\|sysright\|systopleft\|…`。发键前验 `front=目标`。**选完 zone 后必须 Esc 提交**（默认 esc=1）：不收口窗停在 Snap Assist 悬浮预览，系统不算贴牢、邻窗不是吸附组。连续贴多窗 = 每窗完整走一遍 Win+Z+Esc |
+| **贴位首选=Win+Z 吸附组** | 三均分 → `snap pos=zkbd, layout=6, zone=1, esc=0` + `snapfill(name=标题子串)` 逐格填（见上方"三分屏秒操作"铁则）；半屏/四分 → layout 4/8 同法或 `sysleft\|systopleft`（Win+方向）。发键前验 `front=目标`；应用最小高会钳制（694 被钳成 800 属正常，非失败） |
 | **点后台/最小化窗口=顶窗或落空** | `mouse_click` 返回 `at.front`；严格模式传 `front=1`，落点非前台直接拒点。先 `win_manage activate` 再点 |
 | `win_manage close` 报 `post failed` | 同一根因：权限不足导致 PostMessage 被拒。提权后正常返回 `closed:true` |
 | **Win11 记事本未保存关不掉** | `close` 返回 ok 只代表发了 WM_CLOSE；未保存时弹 ContentDialog，UIA 枚举不到 Button，`n` 会打进正文。关窗后必须 `list_apps` 复查，见「记事本」坑 |
