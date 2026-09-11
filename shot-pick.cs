@@ -498,6 +498,111 @@ partial class ShotService
         catch { return false; }
     }
 
+    // ---- 取词 0: CDP 直读（2026-09-11 方案D，老大拍板）----
+    // Electron 应用带 --remote-debugging-port 启动（快捷方式已加：MiMo=9222/WorkBuddy=9223/ZCode=9224），
+    // DevTools 协议对每个 page/iframe target 发 Runtime.evaluate 读 getSelection —— 真选区、
+    // 毫秒级、零 UIA 零按键零剪贴板。文本走 base64 往返避开 JSON 转义（页面 btoa / C# FromBase64）。
+    // 空/口没开/超时 = 返回 ""，调用方落回 UIA/剪贴板老链。127.0.0.1 上口没开=连接拒绝<5ms，不拖节奏。
+    // 红线不受影响：终端/浏览器不在映射表，天然不碰。
+    static readonly string[][] pickCdpApps = new string[][] {
+        new string[]{ "xiaomi mimo", "9222" },
+        new string[]{ "workbuddy",   "9223" },
+        new string[]{ "zcode",       "9224" },
+    };
+    static readonly Dictionary<uint, object[]> pickCdpCache = new Dictionary<uint, object[]>();  // pid -> [port, tick]
+
+    static int PickCdpPort(IntPtr hwnd)
+    {
+        try
+        {
+            if (hwnd == IntPtr.Zero) return 0;
+            uint pid; GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0) return 0;
+            lock (pickCdpCache)
+            {
+                object[] c; int now = Environment.TickCount;
+                if (pickCdpCache.TryGetValue(pid, out c) && now - (int)c[1] < 300000) return (int)c[0];
+            }
+            int port = 0;
+            string n = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
+            foreach (string[] a in pickCdpApps) if (n == a[0]) { port = int.Parse(a[1]); break; }
+            lock (pickCdpCache) { pickCdpCache[pid] = new object[] { port, Environment.TickCount }; }
+            return port;
+        }
+        catch { return 0; }
+    }
+
+    static string CdpHttpGet(string url, int timeoutMs)
+    {
+        try
+        {
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+            req.Method = "GET"; req.Timeout = timeoutMs; req.ReadWriteTimeout = timeoutMs; req.Proxy = null;
+            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+            using (System.IO.StreamReader sr = new System.IO.StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                return sr.ReadToEnd();
+        }
+        catch { return ""; }
+    }
+
+    // 单 target: 连 ws → evaluate getSelection 的 base64 → 解码。任何失败 = ""
+    static string CdpEvalSelection(string wsUrl)
+    {
+        try
+        {
+            using (System.Net.WebSockets.ClientWebSocket ws = new System.Net.WebSockets.ClientWebSocket())
+            {
+                using (System.Threading.CancellationTokenSource ctsC = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(1000)))
+                { ws.ConnectAsync(new Uri(wsUrl), ctsC.Token).GetAwaiter().GetResult(); }
+                string expr = "btoa(unescape(encodeURIComponent((window.getSelection&&getSelection()?getSelection().toString():''))))";
+                byte[] msg = Encoding.UTF8.GetBytes("{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"" + expr + "\",\"returnByValue\":true}}");
+                using (System.Threading.CancellationTokenSource ctsS = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(800)))
+                { ws.SendAsync(new ArraySegment<byte>(msg), System.Net.WebSockets.WebSocketMessageType.Text, true, ctsS.Token).GetAwaiter().GetResult(); }
+                byte[] rx = new byte[65536];
+                System.Net.WebSockets.WebSocketReceiveResult rr;
+                using (System.Threading.CancellationTokenSource ctsR = new System.Threading.CancellationTokenSource(TimeSpan.FromMilliseconds(800)))
+                { rr = ws.ReceiveAsync(new ArraySegment<byte>(rx), ctsR.Token).GetAwaiter().GetResult(); }
+                string s = Encoding.UTF8.GetString(rx, 0, rr.Count);
+                System.Text.RegularExpressions.Match m =
+                    System.Text.RegularExpressions.Regex.Match(s, "\"value\"\\s*:\\s*\"([A-Za-z0-9+/=]+)\"");
+                if (!m.Success) return "";
+                return Encoding.UTF8.GetString(Convert.FromBase64String(m.Groups[1].Value));
+            }
+        }
+        catch { return ""; }
+    }
+
+    // 入口: 目标是 CDP 应用 → 遍历 page/iframe targets，先读到非空选区即返回
+    static string PickViaCdp(IntPtr fgAt)
+    {
+        int port = PickCdpPort(fgAt);
+        if (port == 0) return "";
+        int t0 = Environment.TickCount;
+        try
+        {
+            string list = CdpHttpGet("http://127.0.0.1:" + port + "/json/list", 600);
+            if (list.Length == 0)
+            {
+                Log("pick cdp: /json/list fail port=" + port + " " + (Environment.TickCount - t0) + "ms (app 没带调试口启动?)");
+                return "";
+            }
+            System.Text.RegularExpressions.MatchCollection mc = System.Text.RegularExpressions.Regex.Matches(
+                list, "\"webSocketDebuggerUrl\"\\s*:\\s*\"(ws://[^\"]*/devtools/(?:page|iframe)/[^\"]+)\"");
+            foreach (System.Text.RegularExpressions.Match m in mc)
+            {
+                string got = CdpEvalSelection(m.Groups[1].Value);
+                if (!string.IsNullOrWhiteSpace(got))
+                {
+                    Log("pick cdp: " + (Environment.TickCount - t0) + "ms port=" + port + " chars=" + got.Length + " | " + PickOneLine(got));
+                    return got;
+                }
+            }
+            Log("pick cdp: " + (Environment.TickCount - t0) + "ms port=" + port + " targets=" + mc.Count + " sel empty");
+            return "";
+        }
+        catch (Exception ex) { Log("pick cdp err: " + ex.Message); return ""; }
+    }
+
     // click=true = 用户只是**单击**(没有划选)。2026-09-07 老大要的"点击时也弹出悬浮球"。
     // 只允许无副作用取词: ①UIA 拿光标所在的那个词(Word 单元) ②退一步读现有选区。
     // **绝不发 Ctrl+C**: 单击不产生选区, 这时全局复制 = 把用户刚点中的输入框里的东西/别处内容当"词"抓走。
@@ -556,6 +661,8 @@ partial class ShotService
                 // 浏览器: 单击/双击取词归扩展(pick-inject) —— 原生不发; 终端: 红线不发
                 if (PickIsBrowser(fgAt)) { Log("pick(click): browser target, skipped"); return; }
                 if (PickIsTerminal(fgAt)) { Log("pick(click): terminal target, skipped"); return; }
+                // CDP 直读优先(方案D): Electron 调试口毫秒级读真选区; 空=落回 UIA(聊天输入框选区 getSelection 看不到, 还得靠 UIA)
+                try { string cdp = PickViaCdp(fgAt); if (!string.IsNullOrWhiteSpace(cdp)) { text = cdp; how = "cdp词"; } } catch { }
                 try { text = PickWordAtPoint(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia词"; } catch { }
                 if (string.IsNullOrWhiteSpace(text))
                 {
@@ -584,7 +691,12 @@ partial class ShotService
                 bool browser = PickIsBrowser(fgAt);
                 if (!terminal && !browser)
                 {
-                    try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
+                    // CDP 直读优先(方案D): Electron 拖选=文档级选区, getSelection 必有; 空才落 UIA/剪贴板
+                    try { string cdp = PickViaCdp(fgAt); if (!string.IsNullOrWhiteSpace(cdp)) { text = cdp; how = "cdp"; } } catch { }
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
+                    }
                     if (string.IsNullOrWhiteSpace(text))
                     {
                         string clip = PickViaClipboard();
