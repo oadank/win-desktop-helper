@@ -125,7 +125,7 @@ partial class ShotService
         }
         catch { return false; }
     }
-    static bool pickSeenIBeam;          // 本次手势期间见过工字形(DOWN 记初始, MOVE 累积, UP 判定后清)
+    static bool pickSeenIBeam;          // 本次手势期间见过工字形(DOWN 记初始, MOVE 累积, UP 判定后清) —— 钩子线程独占(门卫只管拖选路径), 勿在他线程写
 
     // 双击判定用系统值 (STranslate): 手感与系统一致, 不硬编码 450ms/12px
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -430,15 +430,15 @@ partial class ShotService
                 int now = Environment.TickCount;
                 // 1A(老大裁决): 单击选词砍掉 —— 只有"系统双击时限内同位置"= 双击选词才取词。
                 // 双击判定用系统值(STranslate): GetDoubleClickTime + SM_C*DOUBLECLK, 手感与系统一致。
-                // 双击豁免 I-beam 门卫: 双击本身已是强约束(系统时限+同位), 快双击时 DOWN 瞬间光标
-                // 可能还是上一击的箭头残留(实测 venv/effort 被误挡)——门卫只管拖选和单击。
+                // 双击不需要 I-beam 豁免: 门卫本来就只管拖选路径(isClick 分支直进这里, 钩子端不读该旗标),
+                // 双击自身已有系统时限+同位强约束。(2026-09-11 评审揪出曾在此写 pickSeenIBeam=true "豁免":
+                //  对本击 no-op, 且 UI 线程写钩子线程旗标=调度错位时污染下一轮拖选门卫, 已删)
                 int dcW = Math.Max(1, GetSystemMetrics(SM_CXDOUBLECLK));
                 int dcH = Math.Max(1, GetSystemMetrics(SM_CYDOUBLECLK));
                 uint dcT = GetDoubleClickTime();
                 bool dblClick = (now - pickLastClickCap >= 0 && now - pickLastClickCap < (int)dcT) &&
                                 Math.Abs(x - pickLastClickX) * 2 <= dcW && Math.Abs(y - pickLastClickY) * 2 <= dcH;
                 if (!dblClick) { pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y; Interlocked.Exchange(ref pickBusy, 0); return; }
-                pickSeenIBeam = true;   // 豁免: 双击直通取词链
                 pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y;
                 if (now < pickRClickUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }   // 右键让路窗口内: 不取词
                 if (now < pickSlowUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }     // 慢目标退避窗口内: 不取词
@@ -723,7 +723,7 @@ partial class ShotService
             // 诊断行: 失败时一眼看出前台到底是谁/CDP 端口解析成什么(交替失败=前台被自家悬浮窗占用的实锤路径)
             {
                 string fpn = "?"; int fgp = 0;
-                try { uint fp; GetWindowThreadProcessId(fgAt, out fp); fgp = (int)fp; fpn = System.Diagnostics.Process.GetProcessById(fp).ProcessName; } catch { }
+                try { uint fp; GetWindowThreadProcessId(fgAt, out fp); fgp = (int)fp; fpn = System.Diagnostics.Process.GetProcessById((int)fp).ProcessName; } catch { }
                 Log("pick(" + (click ? "click" : "drag") + ") fg=[" + fpn + "] pid=" + fgp + " cdp=" + PickCdpPort(fgAt) + " pt=" + x + "," + y);
             }
             if (click)
