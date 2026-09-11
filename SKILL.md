@@ -50,7 +50,7 @@
 | 语义定位/点击/读写 | `ui_tree` `ui_find` `ui_click(ref\|name, expect=, verify=1)` `ui_read` `ui_set` `ui_select` |
 | 证明"点对了" | `ui_click(..., expect="预期出现的文字")` → 返回 `expect.found` |
 | 窗口信息/管理 | `window_info`(支持 process 精确匹配) `active_window` `list_apps` `win_manage` `monitors` |
-| 半屏/四分之一布局 | `win_manage(action=snap, hwnd=, pos=left\|right\|…\|sysleft\|sysright\|…, monitor=)`；`sys*`=真系统 Win+方向 + **Esc 关 Snap Assist**；无 sys 前缀=MoveWindow 画矩形 |
+| 半屏/四分/三均分 | **三均分用 Win+Z**：`pos=zthirdleft\|zthirdmid\|zthirdright`（或 `zkbd`+`layout=`+`zone=`）；半屏/四分可 `sysleft\|sysright\|systopleft\|…`（Win+方向）；无前缀=MoveWindow。系统路径**结束必 Esc** 关 Snap Assist |
 | 找失踪窗口 | `win_manage(action=listall, pid=)` 含隐藏/最小化/托盘化的窗口 |
 | **深度恢复(冻结/没窗口)** | `tray_click(name=, double=0)` 键盘流(Win+B+方向键扫描, 默认) → 窗稳定后 `win_manage(snap=)` 贴位；`app_restore` 为兼容保留但托盘环节同走键盘流 |
 | 托盘唤回 | `tray_click(name=, double=0)` —— Win+B 键盘流扫描主区+溢出层（图标被藏也能点），不再用坐标点托盘 |
@@ -73,7 +73,7 @@
 | `app_run` 返回的 hwnd 找不到窗口 | 多进程应用会换窗，用 `list_apps` 按 process 重新取 |
 | 布局想贴半屏 | 别用 move 手算坐标，用 snap；返回 target≠rect 说明应用有最小尺寸约束，按 rect 补差 |
 | **全都 ok 但啥也没发生**（菜单不弹/键无反应） | UIPI：目标窗口管理员权限 + 本程序普通权限 → 输入被静默丢弃。`health` 看 `elevated`，false 就重建提权（见铁律 7） |
-| **贴位首选=Win+方向键** | 发键前验 `front=目标`；**系统贴靠后必再发 Esc** 关掉 Snap Assist（否则会拉着其它窗一起排）；贴靠助手延迟弹出也 Esc；应用最小高/宽钳制按 rect 补差 |
+| **贴位首选=Win+Z / Win+方向** | 三均分等复杂布局 → `snap pos=zthirdleft\|zthirdmid\|zthirdright`（系统 Win+Z）；半屏/四分 → `pos=sysleft\|sysright\|systopleft\|…`。发键前验 `front=目标`；**系统贴靠后必 Esc** 关 Snap Assist；贴靠助手延迟弹出也 Esc；应用最小高/宽钳制按 rect 补差 |
 | **点后台/最小化窗口=顶窗或落空** | `mouse_click` 返回 `at.front`；严格模式传 `front=1`，落点非前台直接拒点。先 `win_manage activate` 再点 |
 | `win_manage close` 报 `post failed` | 同一根因：权限不足导致 PostMessage 被拒。提权后正常返回 `closed:true` |
 | **Win11 记事本未保存关不掉** | `close` 返回 ok 只代表发了 WM_CLOSE；未保存时弹 ContentDialog，UIA 枚举不到 Button，`n` 会打进正文。关窗后必须 `list_apps` 复查，见「记事本」坑 |

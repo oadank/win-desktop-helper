@@ -69,7 +69,9 @@ const TOOLS = [
         x: { type: 'number' }, y: { type: 'number' },
         w: { type: 'number', description: 'move 时的宽度(服务端必填)' },
         h: { type: 'number', description: 'move 时的高度(服务端必填)' },
-        pos: { type: 'string', description: 'action=snap 时必填: left 左半屏 / right 右半屏 / top 上半 / bottom 下半 / topleft|topright|bottomleft|bottomright 四分之一屏 / max 最大化 / min 最小化 / restore 还原' },
+        pos: { type: 'string', description: 'action=snap: left|right|top|bottom|topleft|…=MoveWindow 画矩形; sysleft|sysright|…=真系统 Win+方向+Esc; zthirdleft|zthirdmid|zthirdright|zkbd=真系统 Win+Z Snap Layouts+Esc(三均分首选); max|min|restore' },
+        layout: { type: 'number', description: 'Win+Z 布局数字键 1-9(缺省按 pos 预设, 三列常=3; 不对时改这个)' },
+        zone: { type: 'number', description: 'Win+Z 区域数字键 1-9(三列左中右=1/2/3)' },
         monitor: { type: 'string', description: 'action=snap 时可选: 第几块屏(1..n) 或 next 移到下一屏 / prev 上一屏; 不给 = 窗口当前所在屏。多屏布局用这个' },
         cols: { type: 'number', description: 'action=snap 网格布局: 横向切几列(1-12)。横三等分 cols=3; 竖屏三等分用 rows' },
         col: { type: 'number', description: 'action=snap 网格布局: 占第几列(1-based, 必须 <= cols)' },
@@ -511,10 +513,13 @@ function buildUrl(name, a) {
       if (a.pid !== undefined) qs.push('pid=' + a.pid);
       if (a.pos) qs.push('pos=' + enc(a.pos));
       if (a.monitor) qs.push('monitor=' + enc(a.monitor));
-      // 网格布局参数 (cols/col/colspan + rows/row/rowspan): 覆盖 Win11 Snap Layouts 全部布局 + 任意比例
+      // 网格布局参数 (cols/col/colspan + rows/row/rowspan): MoveWindow 画矩形
       ['cols', 'col', 'colspan', 'rows', 'row', 'rowspan'].forEach((k) => {
         if (a[k] !== undefined) qs.push(k + '=' + a[k]);
       });
+      // Win+Z 系统 Snap Layouts: pos=zthirdleft|zthirdmid|zthirdright|zkbd 或显式 layout/zone
+      if (a.layout !== undefined) qs.push('layout=' + a.layout);
+      if (a.zone !== undefined) qs.push('zone=' + a.zone);
       return { path: '/win/' + act, qs };
     }
     case 'tray_click': {

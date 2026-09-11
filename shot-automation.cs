@@ -218,13 +218,102 @@ partial class ShotService
 
     [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
 
+    // ==================== Win+Z 系统 Snap Layouts（三均分/任意布局真系统吸附） ====================
+    // 老大确认: Win+Z = 系统全部贴边选项。三均分没有官方 Win+方向快捷键，必须走 Win+Z。
+    // 键盘流: 激活窗 → Win+Z → 数字选布局 → 数字选区域 → Esc 收口（防 Snap Assist 拉其它窗）。
+    // 布局/区域序号随窗宽、Win11 小版本变化 —— 可用 layout=/zone= 覆盖；默认值是 1920 常见映射。
+    static void KbdTap(byte vk)
+    {
+        keybd_event(vk, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(15);
+        keybd_event(vk, 0, 2, UIntPtr.Zero);
+        Thread.Sleep(40);
+    }
+    static void KbdEsc()
+    {
+        keybd_event(0x1B, 0, 0, UIntPtr.Zero);
+        keybd_event(0x1B, 0, 2, UIntPtr.Zero);
+        Thread.Sleep(60);
+    }
+    static void KbdWinZ()
+    {
+        keybd_event(0x5B, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(20);
+        KbdTap(0x5A); // Z
+        keybd_event(0x5B, 0, 2, UIntPtr.Zero);
+        Thread.Sleep(400); // 等 Snap Layouts 条出现
+    }
+    static byte DigitVk(int n)
+    {
+        if (n < 1) n = 1;
+        if (n > 9) n = 9;
+        return (byte)(0x30 + n); // VK_0..VK_9
+    }
+
+    // Win+Z 键盘流。layoutKey/zoneKey: 0=按 pos 预设; 1-9=显式数字键
+    static string WinSnapZ(IntPtr h, string pos, string mon, int layoutKey, int zoneKey)
+    {
+        if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
+        if (!IsWindow(h)) return "{\"ok\":false,\"error\":\"invalid handle: 窗口已关闭, 重新 list_apps 采样\"}";
+        pos = (pos ?? "").ToLowerInvariant();
+        // 预设 → (默认布局号, 默认区域号)。布局号随窗口可用布局列表变化, 不对时用 layout=/zone= 改。
+        // 1920 宽常见: 1=半分 2=左+右上下 3=三列 4=四格 5=三行…
+        int lay = layoutKey, zone = zoneKey;
+        if (lay <= 0 || zone <= 0)
+        {
+            int dLay = 0, dZone = 0;
+            switch (pos)
+            {
+                case "zleft": case "sysleft": dLay = 1; dZone = 1; break;
+                case "zright": case "sysright": dLay = 1; dZone = 2; break;
+                case "zthirdleft": case "thirdleft": dLay = 3; dZone = 1; break;
+                case "zthirdmid": case "thirdmid": case "thirdmiddle": dLay = 3; dZone = 2; break;
+                case "zthirdright": case "thirdright": dLay = 3; dZone = 3; break;
+                case "ztopleft": case "systopleft": dLay = 4; dZone = 1; break;
+                case "ztopright": case "systopright": dLay = 4; dZone = 2; break;
+                case "zbottomleft": case "sysbottomleft": dLay = 4; dZone = 3; break;
+                case "zbottomright": case "sysbottomright": dLay = 4; dZone = 4; break;
+                case "zkbd": default: break;
+            }
+            if (lay <= 0) lay = dLay;
+            if (zone <= 0) zone = dZone;
+        }
+        if (lay <= 0) lay = 3; // 缺省当三列（老大主诉求）
+        if (zone <= 0) zone = 1;
+
+        try { if (IsIconic(h)) { ShowWindow(h, SW_RESTORE); Thread.Sleep(150); } } catch { }
+        // 前台: 借 activate 的多级置前
+        WinActivate(h);
+        Thread.Sleep(120);
+        KbdWinZ();
+        KbdTap(DigitVk(lay));
+        Thread.Sleep(200);
+        KbdTap(DigitVk(zone));
+        Thread.Sleep(350);
+        KbdEsc(); // 关 Snap Assist / 残留飞出条, 防止拉着其它窗一起贴
+        Thread.Sleep(150);
+        RECT rc; GetWindowRect(h, out rc);
+        int nowMon = Array.IndexOf(System.Windows.Forms.Screen.AllScreens, System.Windows.Forms.Screen.FromHandle(h)) + 1;
+        Log("win snap Win+Z: " + h + " pos=" + pos + " layout=" + lay + " zone=" + zone + " mon=" + nowMon + " (Esc)");
+        return "{\"ok\":true,\"pos\":\"" + JsonEscape(pos) + "\",\"mode\":\"zkbd\",\"layout\":" + lay + ",\"zone\":" + zone +
+               ",\"monitor\":" + nowMon + ",\"rect\":{\"x\":" + rc.Left + ",\"y\":" + rc.Top +
+               ",\"w\":" + (rc.Right - rc.Left) + ",\"h\":" + (rc.Bottom - rc.Top) + "},\"note\":\"Win+Z system snap + Esc\"}";
+    }
+
     // 窗口贴靠(分屏) —— 把 Win+方向键那套变成工具默认能力
     //   pos: left 左半屏 / right 右半屏 / top 上半 / bottom 下半
-    //        topleft 左上 / topright 右上 / bottomleft 左下 / bottomright 右下 (四分之一屏)
+    //        topleft 左上 / top right / bottomleft / bottomright (四分之一屏)
     //        max 最大化 / min 最小化 / restore 还原
+    //        sysleft|sysright|…  真系统 Win+方向 + Esc
+    //        zthirdleft|zthirdmid|zthirdright / zkbd  真系统 Win+Z Snap Layouts + Esc
+    //   layout=/zone=  Win+Z 布局/区域数字键(1-9, 缺省按 pos 预设; 三列常=布局3)
     //   monitor: 1..n 指定第几块屏 / next 下一块 / prev 上一块 (不给 = 窗口当前所在屏)
     // 半屏用 MoveWindow 直接算, 比模拟按键稳: 不受前台焦点限制, 多屏可精确指定, 且返回实际 rect 可验证
     static string WinSnap(IntPtr h, string pos, string mon, int cols, int col, int cspan, int rows, int row, int rspan)
+    {
+        return WinSnap(h, pos, mon, cols, col, cspan, rows, row, rspan, 0, 0);
+    }
+    static string WinSnap(IntPtr h, string pos, string mon, int cols, int col, int cspan, int rows, int row, int rspan, int layoutKey, int zoneKey)
     {
         if (h == IntPtr.Zero) return "{\"ok\":false,\"error\":\"window not found\"}";
         if (!IsWindow(h)) return "{\"ok\":false,\"error\":\"invalid handle: 窗口已关闭, 重新 list_apps 采样\"}";
@@ -248,12 +337,20 @@ partial class ShotService
         int x = wa.X, y = wa.Y, w = wa.Width, hh = wa.Height;
         int halfW = wa.Width / 2, restW = wa.Width - halfW, halfH = wa.Height / 2, restH = wa.Height - halfH;
 
+        // Win+Z 系统 Snap Layouts: 三均分等系统布局（真吸附 + Esc）
+        // 触发: pos=z* / zkbd / zthird* / 布局键显式给了 layout=
+        if (pos.StartsWith("z") || layoutKey > 0)
+        {
+            return WinSnapZ(h, pos, mon, layoutKey, zoneKey);
+        }
+
         // 网格模式: cols/col/colspan + rows/row/rowspan —— 一套参数覆盖 Win11 Snap Layouts 全部布局 + 任意比例
         //   横三等分: cols=3 col=1|2|3      竖屏上中下: rows=3 row=1|2|3
         //   2/3 左:   cols=3 col=1 colspan=2        四等分: cols=2 rows=2 col/row 组合
         //   左半+右上: cols=2 col=1 / cols=4 col=3 rows=2 row=1
+        //   真系统三均分请用 pos=zthirdleft|zthirdmid|zthirdright（Win+Z）, 网格是 MoveWindow 画矩形
         bool gridMode = cols > 0 || col > 0 || cspan > 0 || rows > 0 || row > 0 || rspan > 0;
-        if (gridMode)
+        if (gridMode && !pos.StartsWith("z"))
         {
             if (cols < 1) cols = 1;
             if (rows < 1) rows = 1;
@@ -302,10 +399,14 @@ partial class ShotService
             case "restore": mode = "restore"; break;
             case "sysleft": case "sysright": case "systop": case "sysbottom":
             case "systopleft": case "systopright": case "sysbottomleft": case "sysbottomright":
-                // 真·系统 Snap Layouts 键盘流: Win+方向 → Esc 退出 Snap Assist
-                // (老大: 不发 Esc 会拉着其它窗一起排)
+                // 真·系统吸附: Win+方向(半屏/四分) → Esc 关 Snap Assist
+                // 三均分请用 zthirdleft|zthirdmid|zthirdright (Win+Z)
                 mode = "syskbd";
                 break;
+            case "zleft": case "zright": case "zthirdleft": case "zthirdmid": case "zthirdright":
+            case "ztopleft": case "ztopright": case "zbottomleft": case "zbottomright": case "zkbd":
+            case "thirdleft": case "thirdmid": case "thirdright":
+                return WinSnapZ(h, pos, mon, layoutKey, zoneKey);
             default: return "{\"ok\":false,\"error\":\"pos 无效: left/right/top/bottom/topleft/topright/bottomleft/bottomright/max/min/restore/sysleft|sysright|systop|sysbottom|systopleft|systopright|sysbottomleft|sysbottomright (sys*=真系统吸附+Esc)\"}";
         }
         bool iconic = false, zoomed = false;

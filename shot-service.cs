@@ -2109,9 +2109,11 @@ public partial class ShotService
                         else if (verb == "snap")
                         {
                             int sc = 0, sl = 0, ss = 0, sr = 0, srw = 0, srs = 0;
+                            int layoutKey = 0, zoneKey = 0;
                             TryInt(q, "cols", out sc); TryInt(q, "col", out sl); TryInt(q, "colspan", out ss);
                             TryInt(q, "rows", out sr); TryInt(q, "row", out srw); TryInt(q, "rowspan", out srs);
-                            body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "", sc, sl, ss, sr, srw, srs);
+                            TryInt(q, "layout", out layoutKey); TryInt(q, "zone", out zoneKey);
+                            body = WinSnap(wh, q.ContainsKey("pos") ? q["pos"] : "", q.ContainsKey("monitor") ? q["monitor"] : "", sc, sl, ss, sr, srw, srs, layoutKey, zoneKey);
                         }
                         else if (verb == "close") body = WinClose(wh);
                         else if (verb == "move")
@@ -3238,7 +3240,8 @@ public partial class ShotService
                     if (verb == "close") return McpText(WinClose(wh), false);
                     if (verb == "snap") return McpText(WinSnap(wh, McpParam(a, "pos"), McpParam(a, "monitor"),
                         McpParamInt(a, "cols"), McpParamInt(a, "col"), McpParamInt(a, "colspan"),
-                        McpParamInt(a, "rows"), McpParamInt(a, "row"), McpParamInt(a, "rowspan")), false);
+                        McpParamInt(a, "rows"), McpParamInt(a, "row"), McpParamInt(a, "rowspan"),
+                        McpParamInt(a, "layout"), McpParamInt(a, "zone")), false);
                     if (verb == "move") return McpText(WinMove(wh, McpParamInt(a, "x"), McpParamInt(a, "y"), McpParamInt(a, "w"), McpParamInt(a, "h")), false);
                     return McpText("unknown verb (activate/max/min/restore/close/move/wait/list)", true);
                 }
@@ -3339,7 +3342,7 @@ public partial class ShotService
             "{\"name\":\"taskbar_volume\",\"description\":\"任务栏滚轮调音量（常驻功能）。enabled=0/1 开关，step=每次滚轮音量变化百分比(1-20,默认2)，reverse=1 反向(滚轮上=减小)。不带参返回当前状态。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"enabled\":{\"type\":\"number\"},\"step\":{\"type\":\"number\"},\"reverse\":{\"type\":\"number\"}}}}," +
             "{\"name\":\"pick_config\",\"description\":\"划词悬浮球配置。enabled=0/1 开关划词功能(立即生效并持久化); askEndpoint/askKey/askModel 改「问AI」后端(默认 litellm :4000 / GwV4F); askPrompt 问AI附加提示词(定制回答风格, 传 | 清空回默认)。不带参返回当前状态。翻译引擎在设置页「翻译」节配置。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"enabled\":{\"type\":\"number\"},\"askEndpoint\":{\"type\":\"string\"},\"askKey\":{\"type\":\"string\"},\"askModel\":{\"type\":\"string\"},\"askPrompt\":{\"type\":\"string\"}}}}," +
             "{\"name\":\"clipboard_history\",\"description\":\"读取剪贴板历史（常驻监听，最多50条，最新在前）。limit=返回条数(可选)。给AI复用刚复制的内容。\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"limit\":{\"type\":\"number\"}}}}," +
-            "{\"name\":\"win_manage\",\"description\":\"窗口管理。verb=activate|max|min|restore|close|move|wait|list。activate置前台(先解除最小化)；move需x,y,w,h；wait轮询等title窗口出现(timeout毫秒,上限60s)；list按pid列窗口\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"verb\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\",\"description\":\"窗口句柄, 优先于 title (list_apps 采样, 最可靠)\"},\"title\":{\"type\":\"string\"},\"pid\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"timeout\":{\"type\":\"number\"}},\"required\":[\"verb\"]}," +
+            "{\"name\":\"win_manage\",\"description\":\"窗口管理。verb=activate|max|min|restore|snap|close|move|wait|list|listall。snap: 三均分用 pos=zthirdleft|zthirdmid|zthirdright(系统Win+Z+Esc)；半屏/四分 sysleft|sysright|systopleft|…(Win+方向+Esc)；无前缀=MoveWindow 画矩形。layout=/zone= 覆盖 Win+Z 数字键\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"verb\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"title\":{\"type\":\"string\"},\"pid\":{\"type\":\"number\"},\"pos\":{\"type\":\"string\"},\"monitor\":{\"type\":\"string\"},\"cols\":{\"type\":\"number\"},\"col\":{\"type\":\"number\"},\"colspan\":{\"type\":\"number\"},\"rows\":{\"type\":\"number\"},\"row\":{\"type\":\"number\"},\"rowspan\":{\"type\":\"number\"},\"layout\":{\"type\":\"number\"},\"zone\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"timeout\":{\"type\":\"number\"}},\"required\":[\"verb\"]}," +
             "{\"name\":\"mouse_down\",\"description\":\"按住鼠标键不松。button=left(默认)/right/middle。与mouse_up配对可自定义拖拽\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"button\":{\"type\":\"string\"}}}," +
             "{\"name\":\"mouse_up\",\"description\":\"松开鼠标键。button=left(默认)/right/middle\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"button\":{\"type\":\"string\"}}}," +
             "{\"name\":\"mouse_drag\",\"description\":\"左键拖拽一条龙: 从x1,y1按住平滑拖到x2,y2再松开。ms=总时长毫秒(默认300)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x1\":{\"type\":\"number\"},\"y1\":{\"type\":\"number\"},\"x2\":{\"type\":\"number\"},\"y2\":{\"type\":\"number\"},\"ms\":{\"type\":\"number\"}},\"required\":[\"x1\",\"y1\",\"x2\",\"y2\"]}," +
