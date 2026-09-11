@@ -263,10 +263,18 @@ partial class ShotService
                     s.BeginInvoke(new MethodInvoker(delegate { PickDotActivated(); }));
                     return;
                 }
-                // 已经有选词元素在屏上(点/工具条/卡片): 点空白 = 纯取消, 绝不再发起单击取词
-                // (单击取词对底层窗口发 UIA, 慢目标挂 700ms+ —— 老大实测"点空白取消反而卡")
+                // 已经有选词元素在屏上(点/工具条/卡片): 点空白 = 收起元素。
+                // (2026-09-11 老大拍板修: 旧版收起后连事件一起吞=双击第一下死在这、第二下配不上对=
+                //  "一次出一不出"的根因。现在收起之后这一下照样进双击判定: 第一下=关元素+记锚点,
+                //  第二下配对取词。同 pickSync 线程 FIFO, dismiss 恒先跑, PickHandleAsync 里
+                //  card/bar 判空已过。1A 砍了单击取词后本分支零 UIA 零副作用。)
                 if (PickDotRect != null || pickBarWin != null || pickCard != null)
-                { Log("pick click: EAT-dismiss (element onscreen) pos=" + ux + "," + uy); s.BeginInvoke(new MethodInvoker(delegate { PickDismiss(); })); return; }
+                {
+                    Log("pick click: dismiss+chain (element onscreen) pos=" + ux + "," + uy);
+                    s.BeginInvoke(new MethodInvoker(delegate { PickDismiss(); }));
+                    s.BeginInvoke(new MethodInvoker(delegate { PickHandleAsync(ux, uy, true, 0, 0); }));
+                    return;
+                }
                 if (PickNear(PickBarRect, ux, uy, PICK_TOL) || PickNear(PickCardRect, ux, uy, PICK_TOL) ||
                     PickNear(PickAskRect, ux, uy, PICK_TOL)) return;   // 贴着元素: 不动它
                 // 这一下是"顺手关掉提问框"(DOWN 时它还开着): 不再二次触发取词
