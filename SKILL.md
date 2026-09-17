@@ -402,3 +402,27 @@ string resp = await dl;
 **两个仍然成立、但都不是本次失败原因的附带事实**
 - `/ocr` 只返回 `{ok,chars,text}`，**不含 bbox/坐标**（本次实测复核：`{"ok":true,"chars":38,...}`）。靠它"找文字→算坐标"只能估，容易偏几百像素 → 要文字+坐标请用 `C:\D\opt\scripts\ui_probe.py`，或 `/shot?axes=1` 自己读坐标。
 - 被其它窗口完全遮挡的 Electron 窗口，`screen_capture(window=...)` 拿到的是**旧帧**（PrintWindow 对 Electron 无效），且遮挡期间界面不重绘 → 要看某个 agent 执行到哪一步，**别截它的窗口**，直接读 `C:\D\opt\win-desktop-helper\shot-service.log`（实时、全量记录每次 MCP 调用）。
+
+## D7 找输入框先 ui_find(type=Edit)，别拿截图肉眼估坐标
+
+## D7 — 找输入框一律先 `ui_find type=Edit`，别拿截图肉眼估坐标（2026-09-17 小米 MiMo 实测）
+
+**症状**：给 Electron 聊天客户端（小米 MiMo）贴长提示词。`win_manage activate` 成功、`mouse_click` 返回 `at` 也确实命中目标 hwnd、`front:true` —— 但 `ctrl+v` 与 `keyboard_type` **全部静默无效**，输入框一直是空占位符。看着像“应用不接合成输入”，其实是**点到了框外面**。
+
+**根因**：坐标是从 `screen_capture` 截图上肉眼估的。截图本身是 1:1 物理像素没错，但人在缩略图上读偏移量级就错了 —— 估的 y 比真 rect 高 100px+，正好落在提示文案区。
+
+**正解**：
+```
+ui_find(hwnd=133098, type="Edit")
+→ [{"i":149,"name":"描述任务，输入/调用技能","type":"Edit",
+    "rect":{"x":1650,"y":665,"w":866,"h":56},
+    "ref":"42.133116.4.4.1.440719"}]
+```
+Electron 的 contenteditable 组件在 UIA 里就暴露成 `Edit`，**rect 零误差**。
+（之前用 `ui_find(name="描述任务")` 也行，但只有 type 搜是稳的——占位符文字会变。）
+
+**验证“真的进去了”**：粘完**再跑一次 `ui_find(type="Edit")`**，看 rect 变没变 —— 输入框拿到多行内容会撑高（本次 **h 56 → 251**）。rect 不变就是没进去，**回去重查 rect，不要反复重试同一个点**。
+
+**副产物**：`ui_tree` 对这种应用会按 DOM 顺序先吐一大堆侧栏节点（默认 400 上限会被侧栏吃满），**不要指望 ui_tree 能枚举到主编辑区**，直接 `ui_find` 精准找。
+
+**发送**：长文贴完后 `keyboard_press("enter")` 即可（中文/换行都不影响）。发送成功的证据 = 输入区变成气泡 + 出现助手回执。
