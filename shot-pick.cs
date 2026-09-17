@@ -540,7 +540,11 @@ partial class ShotService
     // 红线不受影响：终端/浏览器不在映射表，天然不碰。
     static readonly string[][] pickCdpApps = new string[][] {
         new string[]{ "xiaomi mimo", "9222" },
-        new string[]{ "workbuddy",   "9223" },
+        // 2026-09-12: WorkBuddy 原钉 9223, 但该端口被一个**已死进程(206272)的孤儿 socket** 长期占用
+        // (bind 报 10048; netstat 仍显示 LISTENING 但 tasklist 查不到该 PID, 杀不掉) → WorkBuddy 的
+        // --remote-debugging-port=9223 永远绑不上, CDP 直读 100% 失败, 每次拖选都落到剪贴板注入 Ctrl+C。
+        // 处置: 换 9229(实测空闲)。⚠️ 排查端口别只看 netstat 的 LISTENING —— 用 python socket.bind 金标准测。
+        new string[]{ "workbuddy",   "9229" },
         new string[]{ "zcode",       "9224" },
     };
     static readonly Dictionary<uint, object[]> pickCdpCache = new Dictionary<uint, object[]>();  // pid -> [port, tick]
@@ -692,14 +696,46 @@ partial class ShotService
     // 变了等 30ms → 读文本。判据: 序列号变 ∥ 文本变 ∥ 原剪贴板空 → 出字; 否则返回空=静默放弃。
     // 红线: 调用方必须已排除终端(conhost GetSelection 有内部复制副作用+^C 中断)。
     // 剪贴板不还原(老大拍板): 划完剪贴板=选中的文本, 「划完能粘」是特性。
-    static string PickViaClipboard()
+    // 用户此刻是否按着修饰键(Ctrl/Shift/Alt/Win)。GetAsyncKeyState 低 16 位跨进程语义不可靠,
+    // 只取高位(当前是否按下)。
+    static bool PickAnyModifierDown()
     {
+        try
+        {
+            return (GetAsyncKeyState(0xA2) & 0x8000) != 0 || (GetAsyncKeyState(0xA3) & 0x8000) != 0   // L/R Ctrl
+                || (GetAsyncKeyState(0xA0) & 0x8000) != 0 || (GetAsyncKeyState(0xA1) & 0x8000) != 0   // L/R Shift
+                || (GetAsyncKeyState(0xA4) & 0x8000) != 0 || (GetAsyncKeyState(0xA5) & 0x8000) != 0   // L/R Alt
+                || (GetAsyncKeyState(0x5B) & 0x8000) != 0 || (GetAsyncKeyState(0x5C) & 0x8000) != 0   // L/R Win
+                || (GetAsyncKeyState(0x10) & 0x8000) != 0 || (GetAsyncKeyState(0x11) & 0x8000) != 0   // Shift/Ctrl 通用
+                || (GetAsyncKeyState(0x12) & 0x8000) != 0;                                          // Alt 通用
+        }
+        catch { return false; }
+    }
+
+    static string PickViaClipboard(IntPtr fgAt)
+    {
+        // 2026-09-12 v2 根治「拖选取词打断用户复制」(老大实测: 复制很难成功):
+        // 第一道闸 —— CDP 类应用(Electron: WorkBuddy/ZCode/MiMo)绝不走剪贴板兜底。
+        //   这类应用本该走 CDP 直读(零按键零剪贴板); CDP 挂了也只放弃取词, 不碰键盘不碰剪贴板。
+        //   实测(09-12): WorkBuddy 的 9223 调试口被幽灵 socket 占用 → CDP 100% 失败
+        //   → 每次拖选都落到这里注入全局 Ctrl+C, 正好打断用户自己的复制。
+        if (PickCdpPort(fgAt) != 0) { Log("pick: clip chain skipped — CDP app, never inject Ctrl+C"); return ""; }
+
+        // 第二道闸 —— 以下为 2026-09-12 首版说明:
+        // 本函数为了读 Electron 选区要注入一次全局 Ctrl+C, 但注入前会**无条件强抬 L/R Ctrl 等修饰键**。
+        // 它动手的时刻(mouseup 后 ~0.7-0.9s)正是用户"拖选完按 Ctrl+C"的窗口 → 用户按着的 Ctrl 被抹掉,
+        // 用户自己的 Ctrl+C 退化成裸 C = 复制失败。
+        // 日志实锤: 单日 67 次 drag 兜底, 100% no-change, 前台 fg=[WorkBuddy] 49 次。
+        // 修法: 检测到用户正按着任一修饰键(说明在用键盘, 典型就是在复制) → 放弃本次取词, 一个键都不发。
+        if (PickAnyModifierDown()) { Log("pick: clip chain skipped — user holding modifier, no Ctrl+C injected"); return ""; }
+
         string original = "";
         uint seq0 = 0;
         try { original = System.Windows.Forms.Clipboard.GetText() ?? ""; } catch { }
         try { seq0 = GetClipboardSequenceNumber(); } catch { }
 
         // 清残留修饰键(STranslate 注释: 不清=模拟复制失败主因): L/R Ctrl、Alt、Win、Shift 全 KeyUp
+        // (上面已确认此刻无任何修饰键物理按下, 这步只剩"清系统里卡死的键态", 不会再打断用户)
         keybd_event(0xA2, 0, 2, UIntPtr.Zero); keybd_event(0xA3, 0, 2, UIntPtr.Zero);
         keybd_event(0xA4, 0, 2, UIntPtr.Zero); keybd_event(0xA5, 0, 2, UIntPtr.Zero);
         keybd_event(0x5B, 0, 2, UIntPtr.Zero); keybd_event(0x5C, 0, 2, UIntPtr.Zero);
@@ -763,7 +799,7 @@ partial class ShotService
                 // 判据: 序列号变 ∥ 文本变 ∥ 原剪贴板空 → 出字; 否则静默。不还原=划完能粘(老大拍板)。
                 if (string.IsNullOrWhiteSpace(text))
                 {
-                    string clip = PickViaClipboard();
+                    string clip = PickViaClipboard(fgAt);
                     if (!string.IsNullOrWhiteSpace(clip)) { text = clip; how = "clip"; }
                     Log("pick(click): clip " + (Environment.TickCount - t0) + "ms | " + (string.IsNullOrWhiteSpace(clip) ? "(no change)" : PickOneLine(clip)));
                 }
@@ -789,7 +825,7 @@ partial class ShotService
                     }
                     if (string.IsNullOrWhiteSpace(text))
                     {
-                        string clip = PickViaClipboard();
+                        string clip = PickViaClipboard(fgAt);
                         if (!string.IsNullOrWhiteSpace(clip)) { text = clip; how = "clip"; }
                         Log("pick(drag): clip fallback | " + (string.IsNullOrWhiteSpace(clip) ? "(no change)" : PickOneLine(clip)));
                     }

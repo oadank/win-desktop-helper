@@ -18,14 +18,15 @@ const TOOLS = [
   // ---- 观察 ----
   {
     name: 'screen_capture',
-    description: '截取用户桌面指定区域，返回保存的 PNG 文件路径(可用 Read 工具读图)。region=all 全屏(默认)；screen=N 指定显示器；x,y,w,h 任意矩形(物理像素)；window=窗口标题关键词(截该窗口)',
+    description: '截取用户桌面指定区域，返回保存的 PNG 文件路径(可用 Read 工具读图)。region=all 全屏(默认)；screen=N 指定显示器；x,y,w,h 任意矩形(物理像素)；window=窗口标题关键词(截该窗口)；axes=1 叠加屏幕绝对坐标网格(每50px细线/每100px标数字)，AI 定位专用 —— 看图直接读出目标元素的屏幕坐标喂给 mouse_click，避免盲估坐标。不传则无坐标轴(人工截图/日常用)',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         region: { type: 'string', description: 'all | 忽略表示全屏' },
         screen: { type: 'number', description: '显示器下标' },
         x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' },
-        window: { type: 'string', description: '窗口标题关键词' }
+        window: { type: 'string', description: '窗口标题关键词' },
+        axes: { type: 'number', description: '1=叠加屏幕绝对坐标网格(50px 细线/100px 标数字)，AI 定位专用；不传或 0 = 无坐标轴' }
       }
     }
   },
@@ -488,6 +489,7 @@ function buildUrl(name, a) {
       else if (a.x !== undefined && a.y !== undefined && a.w !== undefined && a.h !== undefined) qs.push('x=' + a.x, 'y=' + a.y, 'w=' + a.w, 'h=' + a.h);
       else if (a.window) qs.push('window=' + enc(a.window));
       else qs.push('region=all');
+      if (a.axes !== undefined && String(a.axes) === '1') qs.push('axes=1');
       return { path: '/shot', qs };
     }
     case 'window_info': {

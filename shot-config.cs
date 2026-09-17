@@ -22,6 +22,9 @@ partial class ShotService
         var d = new Dictionary<string, string>();
         d["ocr.provider"] = Cfg("ocr.provider", "qwen3vl");
         d["ocr.endpoint"] = Cfg("ocr.endpoint", "http://127.0.0.1:11434/api/generate");
+        d["ocr.model"] = Cfg("ocr.model", "");
+        d["ocr.apiKey"] = Cfg("ocr.apiKey", "");
+        d["ocr.apiKeys"] = Cfg("ocr.apiKeys", "");   // 多 key 轮换: "key@endpoint|key@endpoint|..."
         d["translate.provider"] = Cfg("translate.provider", "local");
         d["translate.endpoint"] = Cfg("translate.endpoint", "http://127.0.0.1:11434/api/generate");
         d["translate.model"] = Cfg("translate.model", "qwen3-vl:4b-instruct");
@@ -38,7 +41,7 @@ partial class ShotService
         string path = ConfigPath();
         var sb = new StringBuilder();
         sb.Append("{\n");
-        sb.Append("  \"ocr\": { \"provider\": " + J(d["ocr.provider"]) + ", \"endpoint\": " + J(d["ocr.endpoint"]) + " },\n");
+        sb.Append("  \"ocr\": { \"provider\": " + J(d["ocr.provider"]) + ", \"endpoint\": " + J(d["ocr.endpoint"]) + ", \"model\": " + J(d["ocr.model"]) + ", \"apiKey\": " + J(d["ocr.apiKey"]) + ", \"apiKeys\": " + J(d["ocr.apiKeys"]) + " },\n");
         sb.Append("  \"translate\": {\n");
         sb.Append("    \"provider\": " + J(d["translate.provider"]) + ",\n");
         sb.Append("    \"endpoint\": " + J(d["translate.endpoint"]) + ",\n");
@@ -111,6 +114,7 @@ partial class ShotService
         string loadedBaiduKey = d["translate.baiduKey"];
         string loadedApiKey = d["translate.apiKey"];
         string loadedPickKey = d["pick.askKey"];
+        string loadedOcrKey = d["ocr.apiKey"];
 
         Color cBg = Color.FromArgb(35, 36, 40), cPanel = Color.FromArgb(28, 29, 33), cField = Color.FromArgb(22, 23, 27),
               cText = Color.FromArgb(225, 228, 232), cDim = Color.FromArgb(130, 136, 146),
@@ -176,7 +180,7 @@ partial class ShotService
         ComboBox prov = new ComboBox(); prov.Left = FX; prov.Top = 11; prov.Width = FW; prov.DropDownStyle = ComboBoxStyle.DropDownList;
         prov.FlatStyle = FlatStyle.Flat; prov.BackColor = cField; prov.ForeColor = cText;
         prov.Font = new Font("Microsoft YaHei UI", 9.5f);
-        prov.Items.AddRange(new object[] { "local   本机 LLM · 零花费", "baidu   百度翻译 · 需 APP ID + 密钥" });
+        prov.Items.AddRange(new object[] { "local   本机 LLM · 零花费", "baidu   百度翻译 · 需 APP ID + 密钥", "openai  远程 API · agnes/OpenAI 兼容" });
         prov.DrawMode = DrawMode.OwnerDrawFixed; prov.ItemHeight = 22;
         prov.DrawItem += (s, e) =>
         {
@@ -186,7 +190,7 @@ partial class ShotService
             if (e.Index >= 0)
                 TextRenderer.DrawText(e.Graphics, prov.Items[e.Index].ToString(), prov.Font, e.Bounds, cText, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
         };
-        prov.SelectedIndex = (d["translate.provider"] == "baidu") ? 1 : 0;
+        prov.SelectedIndex = (d["translate.provider"] == "baidu") ? 1 : (d["translate.provider"] == "openai" ? 2 : 0);
         pgTr.Controls.Add(prov);
 
         mkL(pgTr, "目标语言:", LX, 52);
@@ -205,6 +209,7 @@ partial class ShotService
         TextBox lak = mkT(pLocal); lak.Left = 130; lak.Top = 99; lak.Width = 200; lak.PasswordChar = '*'; lak.Text = d["translate.apiKey"];
         CheckBox chkShowL = mkC(pLocal); chkShowL.Text = "显示"; chkShowL.Left = 340; chkShowL.Top = 101; chkShowL.AutoSize = true;
         chkShowL.ForeColor = cDim; chkShowL.Font = new Font("Microsoft YaHei UI", 9f);
+        Label trHint = mkDim(pLocal, "", 12, 130);
 
         Panel pBaidu = new Panel(); pBaidu.Left = LX; pBaidu.Top = 100; pBaidu.Size = new Size(PW - LX * 2, 152);
         pBaidu.BackColor = cPanel; pgTr.Controls.Add(pBaidu);
@@ -220,8 +225,33 @@ partial class ShotService
         chkShow.CheckedChanged += (s, e) => { char pc = chkShow.Checked ? '\0' : '*'; key.PasswordChar = pc; lak.PasswordChar = pc; };
         chkShowL.CheckedChanged += (s, e) => { char pc = chkShowL.Checked ? '\0' : '*'; key.PasswordChar = pc; lak.PasswordChar = pc; chkShow.Checked = chkShowL.Checked; };
 
-        prov.SelectedIndexChanged += (s, e) => { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; };
-        { bool bd = prov.SelectedIndex == 1; pBaidu.Visible = bd; pLocal.Visible = !bd; }
+        // 切换引擎: baidu 显示百度面板; local/openai 共用同一组 endpoint/model/apiKey 字段, 只换标题与提示
+        // 切到 openai 时若端点还是 Ollama 默认值, 自动填 agnes 官方地址 (客户少填一项)
+        Action syncTrPanel = delegate
+        {
+            bool bd = prov.SelectedIndex == 1;
+            bool rem = prov.SelectedIndex == 2;
+            pBaidu.Visible = bd; pLocal.Visible = !bd;
+            llt.Text = rem ? "远程 API (OpenAI 兼容)" : "本地 LLM (Ollama)";
+            trHint.Text = rem
+                ? "OpenAI 兼容: 填 .../v1/chat/completions。agnes 官方 api.agnes-ai.cn/v1/chat/completions"
+                : "本机 Ollama: http://127.0.0.1:11434/api/generate";
+        };
+        prov.SelectedIndexChanged += (s, e) =>
+        {
+            if (prov.SelectedIndex == 2)
+            {
+                if (ep.Text.Trim().Length == 0 || ep.Text.IndexOf(":11434") >= 0) ep.Text = "https://api.agnes-ai.cn/v1/chat/completions";
+                if (model.Text.Trim().Length == 0 || model.Text.IndexOf("qwen3-vl") >= 0) model.Text = "agnes-3.0-flash";
+            }
+            else if (prov.SelectedIndex == 0)
+            {
+                if (ep.Text.IndexOf("agnes-ai") >= 0) ep.Text = "http://127.0.0.1:11434/api/generate";
+                if (model.Text.IndexOf("agnes-3") >= 0) model.Text = "qwen3-vl:4b-instruct";
+            }
+            syncTrPanel();
+        };
+        syncTrPanel();
 
         // 测试区 (内置英文示例, 结果写界面)
         Label demoLabel = new Label(); demoLabel.Text = "示例: The quick brown fox jumps over the lazy dog.";
@@ -243,12 +273,41 @@ partial class ShotService
         ComboBox ocrProv = new ComboBox(); ocrProv.Left = FX; ocrProv.Top = 11; ocrProv.Width = FW; ocrProv.DropDownStyle = ComboBoxStyle.DropDownList;
         ocrProv.FlatStyle = FlatStyle.Flat; ocrProv.BackColor = cField; ocrProv.ForeColor = cText;
         ocrProv.Font = new Font("Microsoft YaHei UI", 9.5f);
-        ocrProv.Items.AddRange(new object[] { "qwen3vl   本机 Ollama (零花费)" });
-        try { ocrProv.SelectedIndex = (d["ocr.provider"] == "qwen3vl") ? 0 : 0; } catch { }
+        ocrProv.Items.AddRange(new object[] { "qwen3vl   本机 Ollama (零花费)", "openai    远程 API · agnes/OpenAI 兼容" });
+        try { ocrProv.SelectedIndex = (d["ocr.provider"] == "openai") ? 1 : 0; } catch { }
         pgOcr.Controls.Add(ocrProv);
         mkL(pgOcr, "endpoint:", LX, 52);
         TextBox ocrEp = mkT(pgOcr); ocrEp.Left = FX; ocrEp.Top = 49; ocrEp.Width = FW; ocrEp.Text = d["ocr.endpoint"];
-        mkDim(pgOcr, "本机 Ollama 需先拉取模型: ollama pull qwen3-vl:4b-instruct", LX, 80);
+        mkL(pgOcr, "模型名:", LX, 84);
+        TextBox ocrModel = mkT(pgOcr); ocrModel.Left = FX; ocrModel.Top = 81; ocrModel.Width = FW; ocrModel.Text = d["ocr.model"];
+        mkL(pgOcr, "API Key:", LX, 116);
+        TextBox ocrAk = mkT(pgOcr); ocrAk.Left = FX; ocrAk.Top = 113; ocrAk.Width = 200; ocrAk.PasswordChar = '*'; ocrAk.Text = d["ocr.apiKey"];
+        CheckBox ocrShow = mkC(pgOcr); ocrShow.Text = "显示"; ocrShow.Left = 340; ocrShow.Top = 115; ocrShow.AutoSize = true;
+        ocrShow.ForeColor = cDim; ocrShow.Font = new Font("Microsoft YaHei UI", 9f);
+        ocrShow.CheckedChanged += (s, e) => { ocrAk.PasswordChar = ocrShow.Checked ? '\0' : '*'; };
+        Label ocrHint = mkDim(pgOcr, "", LX, 148);
+        Action syncOcrPanel = delegate
+        {
+            bool rem = ocrProv.SelectedIndex == 1;
+            ocrHint.Text = rem
+                ? "远程识图: agnes 官方 api.agnes-ai.cn/v1/chat/completions · 模型 agnes-3.0-flash (本机无需装 Ollama)"
+                : "本机 Ollama 需先拉取模型: ollama pull qwen3-vl:4b-instruct";
+        };
+        ocrProv.SelectedIndexChanged += (s, e) =>
+        {
+            if (ocrProv.SelectedIndex == 1)
+            {
+                if (ocrEp.Text.Trim().Length == 0 || ocrEp.Text.IndexOf(":11434") >= 0) ocrEp.Text = "https://api.agnes-ai.cn/v1/chat/completions";
+                if (ocrModel.Text.Trim().Length == 0 || ocrModel.Text.IndexOf("qwen3-vl") >= 0) ocrModel.Text = "agnes-3.0-flash";
+            }
+            else
+            {
+                if (ocrEp.Text.IndexOf("agnes-ai") >= 0) ocrEp.Text = "http://127.0.0.1:11434/api/generate";
+                if (ocrModel.Text.IndexOf("agnes-3") >= 0) ocrModel.Text = "qwen3-vl:4b-instruct";
+            }
+            syncOcrPanel();
+        };
+        syncOcrPanel();
 
         // ==================== 页 3: 截图 ====================
         mkL(pgCap, "保存目录:", LX, 14);
@@ -337,7 +396,9 @@ partial class ShotService
         // ---- 测试: 内置英文示例 -> 翻译成中文, 结果写界面 (零弹窗) ----
         test.Click += (s, e) =>
         {
-            bool isBaidu = prov.SelectedIndex == 1;
+            int pIdx = prov.SelectedIndex;
+            bool isBaidu = pIdx == 1;
+            string pName = isBaidu ? "baidu" : (pIdx == 2 ? "openai" : "local");
             string tAppid = appid.Text.Trim(), tKey = key.Text.Trim();
             string tEp = ep.Text.Trim(), tModel = model.Text.Trim(), tAk = lak.Text.Trim();
             if (isBaidu && (tAppid.Length == 0 || tKey.Length == 0))
@@ -346,6 +407,8 @@ partial class ShotService
                 { testResult.ForeColor = Color.FromArgb(230, 120, 110); testResult.Text = "请先填 APP ID 和密钥"; return; }
                 if (tKey.Length == 0) tKey = loadedBaiduKey;
             }
+            // 密钥框留空 = 沿用已存值 (和保存逻辑一致), 否则"只改模型不改 key"的测试会误报缺 key
+            if (!isBaidu && tAk.Length == 0 && loadedApiKey.Length > 0) tAk = loadedApiKey;
             test.Enabled = false; test.Text = "测试中...";
             testResult.ForeColor = cDim;
             testResult.Text = "测试中, 请稍候...";
@@ -354,9 +417,10 @@ partial class ShotService
                 string okMsg = null, errMsg = null;
                 try
                 {
-                    ITranslateProvider tp = isBaidu
-                        ? (ITranslateProvider)new BaiduTranslateProvider(tAppid, tKey)
-                        : (ITranslateProvider)new LocalLlmTranslateProvider(tEp, tModel, tAk);
+                    ITranslateProvider tp;
+                    if (isBaidu) tp = new BaiduTranslateProvider(tAppid, tKey);
+                    else if (pIdx == 2) tp = new OpenAiTranslateProvider(tEp, tModel, tAk);
+                    else tp = new LocalLlmTranslateProvider(tEp, tModel, tAk);
                     string r = tp.TranslateAsync("The quick brown fox jumps over the lazy dog.", "zh").GetAwaiter().GetResult();
                     okMsg = string.IsNullOrEmpty(r) ? "(返回为空 — 检查引擎/地址/模型)" : r;
                 }
@@ -369,12 +433,12 @@ partial class ShotService
                         if (errMsg != null)
                         {
                             testResult.ForeColor = Color.FromArgb(230, 120, 110);
-                            testResult.Text = "✗ 测试失败 (" + (isBaidu ? "baidu" : "local") + "): " + errMsg;
+                            testResult.Text = "✗ 测试失败 (" + pName + "): " + errMsg;
                         }
                         else
                         {
                             testResult.ForeColor = Color.FromArgb(120, 200, 140);
-                            testResult.Text = "✓ 测试成功 (" + (isBaidu ? "baidu" : "local") + "): " + okMsg;
+                            testResult.Text = "✓ 测试成功 (" + pName + "): " + okMsg;
                         }
                     }));
                 }
@@ -384,15 +448,17 @@ partial class ShotService
 
         if (f.ShowDialog() == DialogResult.OK)
         {
-            d["translate.provider"] = (prov.SelectedIndex == 1) ? "baidu" : "local";
+            d["translate.provider"] = (prov.SelectedIndex == 1) ? "baidu" : (prov.SelectedIndex == 2 ? "openai" : "local");
             d["translate.to"] = to.Text.Trim();
             d["translate.endpoint"] = ep.Text.Trim();
             d["translate.model"] = model.Text.Trim();
             d["translate.apiKey"] = lak.Text.Trim().Length > 0 ? lak.Text.Trim() : loadedApiKey;
             d["translate.baiduAppId"] = appid.Text.Trim();
             d["translate.baiduKey"] = key.Text.Trim().Length > 0 ? key.Text.Trim() : loadedBaiduKey;
-            d["ocr.provider"] = "qwen3vl";
+            d["ocr.provider"] = (ocrProv.SelectedIndex == 1) ? "openai" : "qwen3vl";
             d["ocr.endpoint"] = ocrEp.Text.Trim();
+            d["ocr.model"] = ocrModel.Text.Trim();
+            d["ocr.apiKey"] = ocrAk.Text.Trim().Length > 0 ? ocrAk.Text.Trim() : loadedOcrKey;
             d["capture.dir"] = capDir.Text.Trim();
             d["capture.hotkeyRegion"] = hkRegion.Text.Trim();
             d["capture.hotkeyFull"] = hkFull.Text.Trim();

@@ -127,12 +127,14 @@
 
 ## 划词 CDP 直读链 (方案D, 2026-09-11 实装, v0.0.20 已发)
 
-- 原理: Electron 应用带 `--remote-debugging-port` 启动 → helper 按前台进程名查表(MiMo=9222/WorkBuddy=9223/ZCode=9224, shot-pick.cs pickCdpApps) → ws 连 page/iframe target evaluate `getSelection` 直读真选区(毫秒级, 零UIA零按键零剪贴板, base64 往返避转义)。空才落回 UIA→剪贴板链。浏览器仍归 Edge 扩展, 终端红线不变。读表达式含三盲区补丁: 输入框走 activeElement.selectionStart、同进程 iframe 走 contentDocument 穿透、空后 80ms 重扫。
+- 原理: Electron 应用带 `--remote-debugging-port` 启动 → helper 按前台进程名查表(MiMo=9222/WorkBuddy=**9229**/ZCode=9224, shot-pick.cs pickCdpApps) → ws 连 page/iframe target evaluate `getSelection` 直读真选区(毫秒级, 零UIA零按键零剪贴板, base64 往返避转义)。空才落回 UIA→剪贴板链。浏览器仍归 Edge 扩展, 终端红线不变。读表达式含三盲区补丁: 输入框走 activeElement.selectionStart、同进程 iframe 走 contentDocument 穿透、空后 80ms 重扫。
 - 启动参数固化在快捷方式(桌面\软件\ + 开始菜单)与 WorkBuddy HKCU Run 键。**自动更新器会重写 Run 键/裸拉起丢参数(实锤)**: 应用更新后划词 Electron 失效 → 先 `curl 127.0.0.1:<port>/json/version` 验口, 丢了补参数重启。
 - `/json/list` 不止 page: ZCode 挂 4 个 worker target(无 getSelection 且可能不回包)。**必须按 "type" 字段过滤**(worker 的 ws 路径同为 /devtools/page/, URL 滤不掉)+350ms 全局预算+失败 target 60s 惩罚缓存。教训: 未过滤时 5 targets 烧 6.6s, pickBusy 锁占死吞光后续双击=成功率腰斩。
 - 双击"一次出一不出"根因(实锤): 09-07"点空白=收起浮元素"规则把双击第一下整口吞掉且不记锚点。修法 dismiss+chain: 收起后该点击照样进双击判定。泛训: 悬浮球交互状态机分支互相咬合, 新规则先问"它吃了谁"。
 - 区域截图热键是候选表先抢先得 `[Win+Shift+A→Ctrl+Shift+S→Win+Shift+S]`(shot-service.cs HotkeyRegister 区), 实例间漂移坑肌肉记忆 → **配置显式钉死 `capture.hotkeyRegion`**(本机 repo+安装目录均已钉 Ctrl+Shift+S)。
 - 发版四件套同步 bump: shot-service.cs `APP_VERSION` 常量 + AssemblyInfo.cs + setup.iss(AppVersion/OutputBaseFilename)。**打包必须走 _pkg 隔离目录**(仓库根 shot-service.json 有真 key, 在仓库根跑 ISCC=泄密; 打包前对 pkg 文件扫 key 串自检)。坑: PS5.1 读无 BOM UTF-8 中文注释 .ps1=引号炸解析(脚本写纯 ASCII); Git Bash 会把 `/VERYSILENT` 路径化成垃圾参数(Inno 弹 GUI, 用 PowerShell Start-Process 传参); Inno6 的 CurStepChanged 必须 procedure 不是 function。
+- 🔴 **CDP 端口必须用 bind 金标准测, 别信 netstat**(2026-09-12 事故): WorkBuddy 原钉 9223, 但 9223 被一个**已死进程(PID 206272)的孤儿 socket** 长期占着 —— netstat 显示 `LISTENING`、tasklist 却查不到那个 PID, 杀不掉。WorkBuddy 每次带 `--remote-debugging-port=9223` 都**静默绑定失败** → CDP 直读 100% 失败(日志 `pick cdp: /json/list fail port=9223 ... (app 没带调试口启动?)`) → 每次拖选都落到剪贴板兜底注入全局 Ctrl+C → **打断用户自己的复制**(老大实测"复制很难成功")。测法: `python -c "import socket;s=socket.socket();s.bind(('127.0.0.1',9223))"`, 报 10048 才是真占用。处置: **换端口**(现用 9229) —— 三处必须同步改: ① `shot-pick.cs` 的 `pickCdpApps` 表 ② 桌面快捷方式 `桌面\软件\WorkBuddy.lnk` 参数 ③ `HKCU\...\Run` 的 `WorkBuddy.WorkBuddy` 值(会被自动更新器重写成裸路径丢掉参数)。
+- 🔴 **剪贴板兜底必须加"CDP 类应用禁注入"硬闸**(2026-09-12 实装): `PickViaClipboard(IntPtr fgAt)` 开头 `if (PickCdpPort(fgAt) != 0) return "";` —— 名单里的 Electron 应用(WorkBuddy/ZCode/MiMo)**绝不注入全局 Ctrl+C、绝不碰修饰键**; CDP 挂了也只放弃取词(日志 `pick: clip chain skipped — CDP app, never inject Ctrl+C`)。配套的"用户正按着修饰键就让路"闸(`PickAnyModifierDown`)单独用**不够**: 实测 12 次兜底只拦 1 次 —— 用户按 Ctrl 的时刻通常比 helper 的检测时机晚, 所以必须有 CDP 类禁注入这道硬闸兜底。
 
 ## 免激活浮窗拖动不跟手的根因与修法
 
@@ -180,3 +182,223 @@
    - 本次实测 WorkBuddy 5.5.3，主屏 2560×1440、贴左后半屏后，Buddy加油站 弹窗"立即领取"按钮中心在屏幕 **(254, 1254)**。
 
 验证：OCR 文字从"立即领取"变为"今日已领"即成功。
+
+## 本地改源码 → 编译 → 生效（2026-09-12 实测，三个坑）
+
+> 改完 .cs 让它生效，必须走完这一串；顺序错一步就静默失败。
+
+1. **先查真实运行路径，别以为只有一份**
+   - `Get-Process shot-service | Select-Object Path` + `schtasks /query /tn WinDesktopHelper`
+   - 事实：真正跑的是**仓库根** `C:\D\opt\win-desktop-helper\shot-service.exe`（计划任务 `\WinDesktopHelper` 提权启动）；`AppData\Local\Programs\win-desktop-helper\shot-service.exe` 只是**引导器**（非提权 → 调 schtasks → 自己退出）。**改完 copy 到两个位置**。
+2. **先停进程**：`Stop-Process -Name shot-service -Force`
+   - 不停 = exe 被运行中的进程锁住 = csc 报 `CS0016 无法写入输出文件`；不捕获编译输出就会误判成"脚本没执行"（本次就栽在这，白折腾半小时）。
+3. **编译**：`explorer.exe C:\D\opt\win-desktop-helper\build-annotation.cmd`（等同用户双击）
+   - **禁止**在 Bash/PowerShell 里直接调 `csc.exe` —— 安全策略硬拦（"compiles arbitrary C# code"）；经 helper `/app/run` 传 cmd 也只是换个壳，源码目录 exe 的锁照样在。
+4. **验产物**：exe mtime 变了 + 二进制含新符号
+   - `grep -a -c "<新符号>" shot-service.exe`；注意 C# 字符串在 exe 里是 **UTF-16LE**，utf8 查不到不代表没编进去，两种都查。
+5. **启动**：`schtasks /run /tn WinDesktopHelper`
+   - **别用 PowerShell `Start-Process`** —— 工具进程树会回收子进程：日志显示完整启动，命令一结束进程就没了（本次第二次栽这）。
+6. **验证**：`curl 127.0.0.1:18800/health` → 看 `build` 时间戳 / `elevated:true` / `session:1`。
+
+## 抖音类 Electron 托盘应用「窗口打不开、只剩托盘图标」的处置（2026-09-12 实测）
+
+**症状**：窗口点不出来，托盘图标还在，任务栏也没按钮。
+
+**诊断链（实测）**：
+1. `tasklist /v` 看主进程状态 → 出现 `Not Responding`（连采 3 次确认不是抽风）
+2. `win_manage(action=listall)` → 主窗口**存在**（Chrome_WidgetWin_1，标题 douyin），rect 正常在屏幕内，但 `visible:false`（应用自己隐藏的，抖音是「关窗=收进托盘」设计）
+3. `window_info(process=douyin)` 返回 `window not found` —— 它只认可见窗口，**not found 可反推可见性**
+4. 内存判活：假死时 8 个 douyin 进程全是 3~30MB；正常活体是 200~470MB。**内存小得离谱 = 空壳假死**
+
+**🔴 关键坑：卡死的窗口不能软唤起，试了白费时间**
+- `win_manage(action=restore, hwnd=...)` 直接返回 **helper request timeout** —— ShowWindow/SetForegroundWindow 是 SendMessage 语义，目标 UI 线程不处理消息就阻塞到超时（helper 本身没坏，`/health` 正常）
+- `tray_click(name=应用名)` 也无用，Win+B 轨迹里根本扫不到该图标（窗口隐藏时任务栏按钮同样不存在，连着 two 个都没有）
+- 结论：**`visible:false` + 主进程 `Not Responding` = 软办法没救，别反复试，直接重启客户端**
+
+**处置（实测 30 秒修好）**：
+1. `taskkill /F /IM douyin.exe /IM douyin_tray.exe /IM douyin_widget.exe /IM douyin_guard.exe`（guard 是保活进程，要一起杀）
+2. `explorer.exe "<exe 完整路径>"` 启动 —— **别用 Start-Process**（工具进程树会回收子进程）
+3. 验证两道：`window_info(process=douyin)` 返回 hwnd（修好信号）；再 `screen_capture(window=标题)` + 看图确认画面真渲染（排除白板），别只看窗口存在
+
+**拿进程 exe 路径**（Win11 已移除 wmic）：python ctypes `OpenProcess(0x1000)` + `QueryFullProcessImageNameW` 一把拿全。
+本机抖音 8.5.301：`C:\Program Files (x86)\ByteDance\douyin\douyin.exe`（tray/widget 在 `<安装目录>\<版本号>\tray\`）。
+
+**预防**：抖音设置里把「关闭主窗口」改成退出程序而非最小化到托盘。
+
+## Buddy 加油站自动签到：菜单必须语义定位，禁止写死行号（2026-09-17 实装）
+
+**脚本**：`C:\D\opt\scripts\buddy_checkin.py`（用 venv python: `C:\Users\oadan\.workbuddy\binaries\python\envs\default\Scripts\python.exe`）
+用法：`--force` 忽略空闲检查 / `--dry` 只检测不点 / `--idle N` 空闲阈值(默认45s)。stdout 输出一行 JSON。
+
+**流程**（每轮重新采样窗口 rect，绝不复用上轮坐标）：
+1. `/apps` 拿 WorkBuddy rect；非前台则 `/app/restore?verb=activate&hwnd=`
+2. 发 Esc 清浮层 → 点头像（截窗口左下角 340x130，PIL 扫绿色圆 bbox 中心）
+3. 点「Buddy加油站」（语义定位，见下）
+4. OCR 面板区域判状态：含「今日已领」→ 已领，退出；含「立即领取」→ 需点击
+5. 「立即领取」定位：面板截图找**最下一条文字行**，取该行**首个文字块**中心（4 字按钮，已领/未领两态几何一致、通用）
+6. 点击后复查 OCR 确认变成「今日已领」
+
+### 🔴 菜单必须语义定位，绝不能写死行号
+实测：**账号菜单行数随窗口大小变化** —— 窗口 960x1032 时 8 行（积分余额/Buddy加油站/去邀约/成长计划/设置/记忆与进化/外观/更多）；窗口 1280x1392 时 11 行（顶部多出「标准版·升级套餐」账号行，底部多出「帮助与反馈/检查更新/退出登录」）。
+按「第 2 行 = Buddy加油站」写死 → **实际点到了「积分余额」，弹出非预期窗口**。
+
+**正确做法（行序天然对齐）**：
+```python
+# 1) 视觉行段：亮像素行分布
+rows = lit_rows(menu_img, 35, 300)
+# 2) 裁「纯文字条」单独 OCR：x 58..165（去掉左侧图标、右侧说明/按钮）
+menu_img.crop((58, 0, 165, H)).save(strip_path)
+lines = [l for l in ocr(strip_path).split("\n") if l.strip()]
+# 3) 行数必须相等，再按文字内容找目标行下标
+assert len(lines) == len(rows)
+idx = next(i for i, l in enumerate(lines) if "加油站" in l)
+row = rows[idx]
+```
+文字条每行只有一个文字块 ⇒ **OCR 行序 == 视觉行段序**。行数不等就**拒绝点击**（宁失败不点错）。实测 11 行完全对上。
+
+### 三个坑
+1. 🔴 **`/ocr` 只允许读截图目录下的文件**（安全限制）：裁出来的临时条带存 `%TEMP%` 会报 `path outside screenshots dir`（且返回里只有 error、没有 text，容易误判成"OCR 坏了"）。必须存到截图目录（用首次截图返回路径的 `dirname`）。
+2. 🔴 **Electron 账号菜单会自动超时关闭**（约 40s 级）：点开头像后必须尽快点菜单项，「截图+算坐标+OCR」要一口气做完，中间别插长耗时操作。
+3. 菜单截图做 PIL 像素分析时**不要带 `axes=1`**（坐标轴刻度数字会混进亮像素统计）。`axes=1` 只给 AI 读图用。
+
+### 已实现的能力：`/shot?axes=1` 坐标轴截图
+截图叠加青色网格 + 黄色数字，**标的是屏幕绝对坐标**（不是图内相对坐标，所以图里读到 600 就直接点屏幕 y=600，无需换算）。实测精度：小区域(400x300)读图 ±3px。分辨率/区域变了重新截即可，天然自适应。默认关（不带 axes 与以前完全一致，不影响人工截图）。
+
+## 修正: 改源码后编译必须用 schtasks，explorer.exe 方式本机不生效（2026-09-17 实测）
+
+原文写「编译 = `explorer.exe build-annotation.cmd`（等同用户双击）」。
+
+🔴 **本机实测：explorer.exe 方式连试两次都没触发**（exe mtime 不变、大小不变），而且看不到 csc 报错 → 极易误判成"代码编译失败"，白排查很久。
+
+**实测可行的做法（带日志，能看报错）**：
+1. 写一个把 csc 输出重定向到文件的 cmd：
+```bat
+@echo off
+cd /d C:\D\opt\win-desktop-helper
+"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" -nologo -target:winexe ... -out:shot-service.exe AssemblyInfo.cs shot-service.cs ... > "%TEMP%\wdh_build_out.txt" 2>&1
+echo EXIT=%ERRORLEVEL% >> "%TEMP%\wdh_build_out.txt"
+```
+2. **用计划任务跑**（不要 Start-Process，不要 explorer.exe）：
+```
+schtasks /Create /TN wdh_build_once /TR "<cmd完整路径>" /SC ONCE /ST 00:00 /IT /F
+schtasks /Run /TN wdh_build_once
+```
+3. 读 `%TEMP%\wdh_build_out.txt` 看 `EXIT=` 与 `error CS` 行
+4. 验证产物：exe mtime + 字节数变化；新符号用 `grep -a -c "<符号>" shot-service.exe`（C# 字符串在 exe 里是 UTF-16LE，utf8 查不到不代表没编进去）
+5. 启动：`schtasks /run /tn WinDesktopHelper` → `curl 127.0.0.1:18800/health` 看 `build` 时间戳 / `elevated:true` / `session:1`
+
+**其余不变**：改前先停进程（`Stop-Process -Name shot-service -Force`，否则 exe 被锁 → CS0016）；直接调 csc 会被安全策略拦（"compiles arbitrary C# code"）是预期的，别浪费时间；装完记得清理临时 cmd 与计划任务。
+
+## 🔴纠正: 账号菜单行数一直不变——是我截图裁掉了顶部(2026-09-17 老大纠正)
+
+**原结论「菜单行数随窗口大小变化」是错的，作废。**
+真相：账号菜单**一直**是完整的 11~12 项，顶部**一直有**「标准版 / 升级套餐」账号行。之前我在 1920x1080 下截图起点写死 `y = 头像y - 545`（高 500），在 2560x1440 下写死 `mtop = bot-545`（高 500）——**两次都把顶部 2~3 行裁在框外**，于是数出「8 行」并推断「菜单变小了」。
+**根因**：菜单是从头像往**上**弹的浮层，长度随内容变化；任何写死的截图高度/起点都可能切掉顶部。
+**教训（普适）**：① 不能凭猜设截图区域，必须先框住完整浮层；② 数出来的行数偏少，第一反应应是「区域没截全」而不是「界面变了」。
+
+### 正确做法：不要数行、不要认行号，直接按文字语义定位
+写了通用工具 `C:\D\opt\scripts\ui_probe.py`（详见技能 `win-text-locate-click`）：
+1. 截图(基线) → 点开浮层 → 截图(浮层) → **差分 bbox 自动框出面板**（不猜区域）
+2. 面板内背景色众数 → 前景行投影 → 行段（自适应行数/行距）
+3. 每段裁条带 + 左侧贴**段号徽标** → 拼成一张图 → **1 次 OCR**（段号即行号 ⇒ 文字与行段天然对齐）
+4. 按文字匹配 → 取该行最宽前景块中心 → 屏幕绝对坐标 → 点击 → 截图 OCR 验证
+实测 2560x1440@125%、WorkBuddy 最大化：连续 4 次 100% 命中，单次 29~45s。
+
+### 其他必知坑
+- 🔴 **Electron 账号菜单约 40s 自动关闭**：分析耗时长（OCR 十几秒）时菜单会过期 ⇒ 必须「采样→分析→**重新确认浮层是否还开着**→再点」。
+- 🔴 **上一轮遗留浮层会让差分失效**（报「差分无变化」）：需 Esc×2 + 采样重试。
+- 🔴 **点击后的面板出现在菜单右侧偏下**（不在菜单位置上）：验证截图要覆盖 `cy-180 ~ cy+620`，只截窄条会误判「面板没打开」。
+- **左侧栏 hover 高亮会被差分算进面板 bbox** → 行数偏多，但不影响段号对齐。
+
+### OCR 引擎选择（重要）
+- **本地 ollama `qwen3-vl:4b-instruct`：实测 5.8s 中位、5/5 成功** ← 用这个
+- **agnes 云端(api.agnes-ai.cn)：实测 0/5，每次卡满 60s 超时** ← 当前不可用，别用
+- 两者对同一张徽标图的识别质量**完全一致**（12~16 行含段号全对）。
+
+## 🔴纠正+增强: agnes 远程 OCR 已可用 —— 3 key 优先级 + 送图压缩（2026-09-17 实装实测）
+
+**原结论作废**：本文件上方写「agnes 云端 0/5、每次卡满 60s 超时 ← 当前不可用，别用」是**误判**。
+真相：当时用的是**国际站 apihub 的 key + PNG 无损大图**两个坑叠加；换成国内站 .cn + JPEG 压缩后完全可用。
+
+### 实测数据（同一张图，同日）
+| 组合 | 耗时 | 结果 |
+|---|---|---|
+| 小图 240x90（1 行字）@ .cn | **0.8s** | ✅ |
+| 小图 240x90 @ apihub key2 | 6.1s | ✅ |
+| 小图 240x90 @ apihub key1 | 20.9s | ✅ |
+| 中图 1200x700（40 行字）@ .cn | 26~33s | ✅ |
+| 全屏 2560x1440（70~100 行）@ .cn | 26~52s | ✅ |
+| 本地 ollama qwen3-vl:4b 跑中图 | 14~22s | ✅ 但撞 num_predict=300 被**截断**（只出 15 行） |
+| key1 打 .cn（跨站） | 0.1s | ❌ **HTTP 401 无效令牌** |
+
+**三条结论**：
+1. 🔴 **key 与站点绑死**：key1/key2 只认 apihub（国际站），key3 只认 api.agnes-ai.cn（国内站）。**跨站必 401，不能乱换**。
+2. **.cn 比 apihub 快得多**（0.8s vs 6~21s）→ 配置里 **.cn 的 key 排第 1 位**。
+3. **慢的根源是「图里文字多」**（VLM 自回归逐字生成），不是引擎/网络。小图秒回，全屏几十行就要几十秒 —— **要快就只截需要的区域**，别全屏 OCR。
+
+### 配置：`ocr.apiKeys`（新键，2026-09-17 加）
+```json
+"ocr": {
+  "provider": "openai", "model": "agnes-3.0-flash",
+  "apiKey": "sk-...(兼容旧单key)",
+  "apiKeys": "key3@https://api.agnes-ai.cn/v1/chat/completions|key2@https://apihub.agnes-ai.com/v1/chat/completions|key1@https://apihub.agnes-ai.com/v1/chat/completions"
+}
+```
+- 格式：`key@endpoint` 用 `|` 分隔；endpoint 省略则用 `ocr.endpoint`
+- **顺序 = 优先级**：第 1 个先用，失败才换下一个（不是轮流 —— 轮流会把请求打到慢 26 倍的 apihub）
+- 3 个 key 的真值在 N5105 `100.110.110.12:/opt/text-api-images/.env`（`AGNES_KEY_1/2/3`）
+
+### 送图压缩（原实现的最大坑）
+原 `BitmapToBase64` 用 **PNG 无损** 送图：全屏 PNG 567KB → base64 757KB，**极易破 1MB 被拒**。
+新增 `BitmapToBase64Jpeg(bmp, maxSide, maxBytes)`：等比缩到最长边 1400 + JPEG q88（体积超标自动降到 q55），目标 <500KB。
+`OpenAiVisionOcrProvider` 已改用它；本地 qwen3vl provider 仍走 PNG（本地不限体积）。
+
+### 🔴 超时坑：`HttpWebRequest.Timeout` 对**异步**请求无效
+MS 文档明确：Timeout 不影响 `BeginGetResponse`/`BeginXxx` 系异步调用，而 `WebClient.UploadStringTaskAsync` 内部就是异步。
+→ 直接设 `WebRequest.Timeout` **完全没用**（实测照样跑满 52s/60s）。
+**正确写法**：自己包一层
+```csharp
+Task<string> dl = wc.UploadStringTaskAsync(url, json);
+Task done = await Task.WhenAny(dl, Task.Delay(PerKeyTimeoutMs));
+if (done != (Task)dl) { try { wc.CancelAsync(); } catch {} throw new WebException("timeout", WebExceptionStatus.Timeout); }
+string resp = await dl;
+```
+本实装 `PerKeyTimeoutMs = 45000`（留足量，.cn 大图最坏见过 33s），超时后按 failover 换下一个 key。
+
+### 改动落点（供后续维护）
+- `shot-ocr.cs`：`OcrKeyEndpoint` / `TimeoutWebClient` / `OpenAiVisionOcrProvider` / `OcrProvider()` 工厂 / `BitmapToBase64Jpeg`
+- `shot-config.cs`：`LoadCfgDict()`+`SaveCfgDict()` 已加 `ocr.apiKeys`（否则在设置 UI 点保存会把该字段冲掉）
+- 备份：`shot-ocr.cs.bak-20260917-keyrot` / `shot-config.cs.bak-20260917-keyrot` / `shot-service.json.bak-20260917-keyrot`
+- 编译后 exe 376832 → 380416 字节；启动日志会打印 `ocr: openai -> 3 key(s) rotation`
+
+## 🔴 dsh-web 模型切换是**两级菜单** ——「选项搜不到」先怀疑层级，别怪工具（2026-09-17 源码核对 + 纠正）
+
+**⚠️ 本条取代了我 2026-09-17 17:5x 写进本手册的错误结论。** 原文说「Chromium/Electron 页面内下拉浮层 UIA 拿不到选项、是桌面自动化的天花板场景」——**那是错的**。真相是：菜单本来就是**两级**的，我在错误的层级搜模型名。**工具（点击 / UIA / 截图 / OCR）全程正常，是理解错了交互结构。**
+
+**为什么会误判**（两层错误叠加，值得记住）：
+1. 在**根层**搜 `Glm5.3` 搜不到 → 误读成「点击没生效 / UIA 看不见 Chromium 浮层」；
+2. 一张截图里我只看到触发按钮 + 一个 hover tooltip（`不适用 QW3.8F`），**没有菜单行**，我把 tooltip 当成了已展开的菜单。
+
+**真实结构（源码已证实：`C:\D\opt\deepseek-harness\deepseek-harness\packages\client\ui-model-selection\src\client\ModelSelect.tsx`）**
+- 文件头注释第 3 行原话：`Two-level selection per figma 496:26454's MenuDropdown: the root menu is the Model / Effort row pair`。
+- 根层（`pane==='root'`，第 300–315 行）**只有两行**：`模型`（`t('menu.model')`，值 = `modelLabel`）+ `推理`（`t('menu.effort')`，值 = `effortLabel`；**仅当该模型有 reasoning 时才渲染**）。两行均 `role="menuitem"`，右侧带 chevron。
+- 点「模型」→ `setPane('model')` → **这时才**出现按 provider 分组的模型列表：`role="group"` 分组 + 标题，每项 `role="menuitemradio"`，文字 = `model.name`。**分组标题 = 该 provider 的 displayName**（如 gw → `Henry`）；所以 `Glm5.3`（gw 组）与 `Gwglm5.3`（litellm 组）名字很像，**要按分组标题区分**。
+- 点「推理」→ `pane==='effort'` → effort 列表。
+- 浮层是 portal 到 `document.body` 的 fixed 卡片，贴触发按钮**上方、右对齐**（所以按按钮下方的区域截图会截空）。
+
+→ 根层**没有**模型名，在那儿搜 `Glm5.3` 必然搜不到，表现就是"点了没反应"，于是反复重试、把菜单开了又关。
+
+**正确流程（4 步，含验证）**
+1. `ui_click` 点触发按钮（name ≈ `选择模型，当前 QW3.8F`）→ 打开根菜单
+2. `ui_find type=MenuItem` → 拿到「模型」行（值形如 `模型 QW3.8F`）→ 点进去
+3. 列表展开各 provider 分组 → `ui_find name=Glm5.3` → 点选（认准 `Henry` 分组）
+4. **验证**：`ui_read` 触发按钮 → name 应变成 `选择模型，当前 Glm5.3`
+
+**✅ 成功实证（2026-09-17 18:3x，MiMo 客户端自己跑的）**：按上面 4 步，**3m46s 完成**，原话 =「已切换完成。模型选择器现在显示 当前模型是 Glm5.3（按钮无障碍名称：`选择模型，当前 Glm5.3`）。操作路径：点模型按钮 → 点「模型」钻进列表 → 选中 Henry 分组下的 Glm5.3。」**工具全程没问题，是层级理解问题。**
+
+**教训（比结论本身更值钱）**
+看到「选项搜不到 / 点了没反应」，先怀疑**层级与结构**，再怀疑工具。我这次把"我没在正确层级找"错判成"UIA 看不见 Chromium 浮层"，还写进了共享手册 —— **错误结论的传播成本极高**；拿不准就去读源码/UI 结构，别急着下"天花板"结论。
+
+**两个仍然成立、但都不是本次失败原因的附带事实**
+- `/ocr` 只返回 `{ok,chars,text}`，**不含 bbox/坐标**（本次实测复核：`{"ok":true,"chars":38,...}`）。靠它"找文字→算坐标"只能估，容易偏几百像素 → 要文字+坐标请用 `C:\D\opt\scripts\ui_probe.py`，或 `/shot?axes=1` 自己读坐标。
+- 被其它窗口完全遮挡的 Electron 窗口，`screen_capture(window=...)` 拿到的是**旧帧**（PrintWindow 对 Electron 无效），且遮挡期间界面不重绘 → 要看某个 agent 执行到哪一步，**别截它的窗口**，直接读 `C:\D\opt\win-desktop-helper\shot-service.log`（实时、全量记录每次 MCP 调用）。

@@ -57,7 +57,35 @@ partial class ShotService
         }
     }
 
-    // 翻译 provider 工厂: 配了百度 appid/key 用百度, 否则本地 LLM (零 key)
+    // 远程 OpenAI 兼容翻译 provider (agnes 官方 / litellm 网关 / 任何 OpenAI 兼容 chat 服务)
+    // 与 local 共用 endpoint/model/apiKey 三个配置键, 只换请求格式 (messages vs prompt)
+    class OpenAiTranslateProvider : ITranslateProvider
+    {
+        readonly string ep, model, apiKey;
+        public OpenAiTranslateProvider(string e, string m, string k) { ep = e; model = m; apiKey = k; }
+        public async Task<string> TranslateAsync(string text, string to)
+        {
+            string lang = (to == "en") ? "English" : "Chinese";
+            string prompt = "Translate the following text into " + lang + ". Output ONLY the translation, no explanation, no quotes.\n\n" + text;
+            string json = "{\"model\":" + EscapeJson(model) +
+                ",\"messages\":[{\"role\":\"user\",\"content\":" + EscapeJson(prompt) + "}]," +
+                "\"max_tokens\":4096,\"temperature\":0,\"stream\":false}";
+            using (var wc = new WebClient())
+            {
+                wc.Encoding = Encoding.UTF8; // OpenAI 兼容响应可能不带 charset, 不显式设会中文乱码
+                wc.Headers[HttpRequestHeader.ContentType] = "application/json";
+                wc.Headers[HttpRequestHeader.Accept] = "application/json";
+                if (!string.IsNullOrEmpty(apiKey)) wc.Headers[HttpRequestHeader.Authorization] = "Bearer " + apiKey;
+                string resp = await wc.UploadStringTaskAsync(ep, json);
+                string content = OpenAiContent(resp);
+                if (content.Length == 0 && resp.IndexOf("\"error\"", StringComparison.Ordinal) >= 0)
+                    throw new Exception("remote translate error: " + resp.Substring(0, Math.Min(300, resp.Length)));
+                return content.Trim();
+            }
+        }
+    }
+
+    // 翻译 provider 工厂: baidu=百度; openai=远程 OpenAI 兼容; local=本机 Ollama (零 key)
     static ITranslateProvider TranslateProvider()
     {
         string p = Cfg("translate.provider", "local");
@@ -68,6 +96,15 @@ partial class ShotService
             if (!string.IsNullOrEmpty(id) && !string.IsNullOrEmpty(key))
                 return new BaiduTranslateProvider(id, key);
             Log("translate: baidu selected but appid/key missing -> fallback local LLM");
+        }
+        if (p == "openai")
+        {
+            string rep = Cfg("translate.endpoint", "");
+            string rmodel = Cfg("translate.model", "agnes-3.0-flash");
+            string rak = Cfg("translate.apiKey", "");
+            if (!string.IsNullOrEmpty(rep) && !string.IsNullOrEmpty(rak))
+                return new OpenAiTranslateProvider(rep, rmodel, rak);
+            Log("translate: openai selected but endpoint/apiKey missing -> fallback local LLM");
         }
         string ep = Cfg("translate.endpoint", "http://127.0.0.1:11434/api/generate");
         string model = Cfg("translate.model", "qwen3-vl:4b-instruct");

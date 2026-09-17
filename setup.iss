@@ -3,7 +3,7 @@
 [Setup]
 AppId={{FE6F68E9-0CEB-450B-B438-49BFDF5FFB15}
 AppName=Win Desktop Helper
-AppVersion=0.0.20
+AppVersion=0.0.22
 AppPublisher=oadank
 AppPublisherURL=https://github.com/oadank/win-desktop-helper
 DefaultDirName={localappdata}\Programs\win-desktop-helper
@@ -12,7 +12,7 @@ UninstallDisplayIcon={app}\icon.ico
 Compression=lzma2
 SolidCompression=yes
 OutputDir=release
-OutputBaseFilename=win-desktop-helper-setup-0.0.20
+OutputBaseFilename=win-desktop-helper-setup-0.0.22
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -32,7 +32,9 @@ Source: "SKILL.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "shot-service.json"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
+; onlyifdoesntexist = 升级不覆盖已存在的配置
+; uninsneveruninstall = 卸载时保留配置 (2026-09-12 修: 原缺此标志, 卸载重装=配置归零)
+Source: "shot-service.json"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "shot-service"; ValueData: """{app}\shot-service.exe"""; Flags: uninsdeletevalue; Tasks: autostart
@@ -71,8 +73,10 @@ var
 begin
   ExePath := ExpandConstant('{app}') + '\shot-service.exe';
   User := ExpandConstant('{username}');
+  // /rl highest 必须有: shot-service.exe 的清单是 requireAdministrator, 任务不勾"最高权限"时
+  // schtasks /Run 直接返回 ERROR_ELEVATION_REQUIRED(0x800702E4) —— 任务永远拉不起来(2026-09-12 实测定位)
   Result := Exec('schtasks.exe',
-    '/create /tn "dsh-shot-helper" /tr "' + ExePath + '" /sc once /st 00:00 /it /ru "' + User + '" /f',
+    '/create /tn "dsh-shot-helper" /tr "' + ExePath + '" /sc once /st 00:00 /it /rl highest /ru "' + User + '" /f',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 

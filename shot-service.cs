@@ -42,7 +42,7 @@ using System.Windows.Forms;
 public partial class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.20";
+    const string APP_VERSION = "0.0.22";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
@@ -214,6 +214,100 @@ public partial class ShotService
         }
     }
 
+    // ---- 坐标轴叠印 (AI 定位专用, 2026-09-17 老大方案) ----
+    // 目的: 截图叠加屏幕绝对坐标网格, AI 看图直接读出目标元素坐标, 不用图像处理算 bbox、不用盲估。
+    // 关键: 标的是**屏幕绝对坐标**(r.X/r.Y 偏移已加回), 读出的数字可直接喂 mouse_click。
+    // 默认关闭, 只有显式传 axes=1 才叠 —— 人手动截图/日常用不受影响。
+    static string DoShotAxes(Rectangle r)
+    {
+        using (Bitmap bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb))
+        {
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(r.X, r.Y, 0, 0, new Size(r.Width, r.Height));
+                DrawAxes(g, r);
+            }
+            string name = "shot_axes_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
+            string path = Path.Combine(ShotDir, name);
+            bmp.Save(path, ImageFormat.Png);
+            return path;
+        }
+    }
+
+    // 网格线密度(2026-09-17 按老大"准确率优先"调密):
+    //   AXES_MINOR = 细网格间距(20px, 提高读数精度)
+    //   AXES_MAJOR = 主网格/数字标注间距(100px)
+    //   实际: 20px 细线 + 100px 主线上带数字; 交点画小十字便于 AI 对齐
+    const int AXES_MINOR = 20;
+    const int AXES_MAJOR = 100;
+
+    static void DrawAxes(Graphics g, Rectangle r)
+    {
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+
+        // 细网格: 1px 淡青线(透明度低, 不挡内容)
+        using (Pen penMinor = new Pen(Color.FromArgb(55, 0, 190, 255), 1f))
+        // 主网格: 稍明显的青线
+        using (Pen penMajor = new Pen(Color.FromArgb(125, 0, 160, 255), 1f))
+        // 刻度数字: 亮黄字 + 纯黑实底(保证任何底图上都清晰可读)
+        using (Font fnt = new Font("Consolas", 11f, FontStyle.Bold, GraphicsUnit.Pixel))
+        using (Brush brText = new SolidBrush(Color.FromArgb(255, 255, 235, 0)))
+        using (Brush brBg = new SolidBrush(Color.FromArgb(215, 0, 0, 0)))
+        {
+            // ---- 竖线(X方向): 屏幕绝对 x = r.X + i ----
+            for (int i = 0; i <= r.Width; i += AXES_MINOR)
+            {
+                int ax = r.X + i;                     // 屏幕绝对坐标
+                bool major = (ax % AXES_MAJOR == 0);
+                g.DrawLine(major ? penMajor : penMinor, i, 0, i, r.Height);
+                if (major)
+                {
+                    string s = ax.ToString();
+                    SizeF sz = g.MeasureString(s, fnt);
+                    // 数字标在顶部(贴边, 不压内容) —— 每个主网格都标, AI 直接读数不推断
+                    g.FillRectangle(brBg, i + 1, 1, sz.Width + 2, sz.Height + 1);
+                    g.DrawString(s, fnt, brText, i + 2, 1);
+                    // 底部再标一次(截区域下半部分时也能就近读到)
+                    g.FillRectangle(brBg, i + 1, r.Height - sz.Height - 2, sz.Width + 2, sz.Height + 1);
+                    g.DrawString(s, fnt, brText, i + 2, r.Height - sz.Height - 1);
+                }
+            }
+            // ---- 横线(Y方向): 屏幕绝对 y = r.Y + j ----
+            for (int j = 0; j <= r.Height; j += AXES_MINOR)
+            {
+                int ay = r.Y + j;
+                bool major = (ay % AXES_MAJOR == 0);
+                g.DrawLine(major ? penMajor : penMinor, 0, j, r.Width, j);
+                if (major)
+                {
+                    string s = ay.ToString();
+                    SizeF sz = g.MeasureString(s, fnt);
+                    // 数字标在左侧(贴边)
+                    g.FillRectangle(brBg, 1, j + 1, sz.Width + 2, sz.Height + 1);
+                    g.DrawString(s, fnt, brText, 2, j + 1);
+                    // 右侧再标一次
+                    g.FillRectangle(brBg, r.Width - sz.Width - 3, j + 1, sz.Width + 2, sz.Height + 1);
+                    g.DrawString(s, fnt, brText, r.Width - sz.Width - 2, j + 1);
+                }
+            }
+            // ---- 主网格交点画小十字(便于 AI 精确对齐读数, 不遮挡内容) ----
+            using (Pen penCross = new Pen(Color.FromArgb(160, 255, 0, 255), 1f))
+            {
+                for (int i = 0; i <= r.Width; i += AXES_MINOR)
+                {
+                    if ((r.X + i) % AXES_MAJOR != 0) continue;
+                    for (int j = 0; j <= r.Height; j += AXES_MINOR)
+                    {
+                        if ((r.Y + j) % AXES_MAJOR != 0) continue;
+                        g.DrawLine(penCross, i - 3, j, i + 3, j);   // 横 7px
+                        g.DrawLine(penCross, i, j - 3, i, j + 3);   // 竖 7px
+                    }
+                }
+            }
+        }
+    }
+
     // 窗口截图: PrintWindow+PW_RENDERFULLCONTENT 让窗口自绘进 DC (能拍到 DirectComposition/D2D 内容,
     // CopyFromScreen 拍不到 — 实测 Win11 记事本正文区黑屏)。中心区若全黑(某些应用 PrintWindow 黑屏)回退 CopyFromScreen
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -375,6 +469,12 @@ public partial class ShotService
     // 服务启动后后台预热 Ollama OCR 模型 (X2: 冷启动首包慢导致调用方"第一次必超时")
     static void OcrWarmup()
     {
+        // 远程 provider (openai/agnes) 没有本地模型可预热: 预热请求是 Ollama 私有格式, 打过去只会 400
+        if (Cfg("ocr.provider", "qwen3vl") == "openai")
+        {
+            Log("ocr warmup skip: remote provider (无本地模型可预热)");
+            return;
+        }
         Thread th = new Thread(new ThreadStart(delegate
         {
             try
@@ -1959,13 +2059,15 @@ public partial class ShotService
                     }
                     if (!handled && code == 200)
                     {
-                        string fp = DoShot(r);
+                        bool useAxes = q.ContainsKey("axes") && q["axes"] == "1";
+                        string fp = useAxes ? DoShotAxes(r) : DoShot(r);
                         FileInfo fi = new FileInfo(fp);
                         Interlocked.Increment(ref ShotCount);
                         // url 字段: 供 DSH 助手消息用 Markdown 图片语法渲染 (http 绝对地址才显示)
                         string imgUrl = "http://127.0.0.1:" + PORT + "/img/" + Uri.EscapeDataString(Path.GetFileName(fp));
                         body = "{\"ok\":true,\"file\":\"" + JsonEscape(fp) + "\",\"url\":\"" + imgUrl + "\",\"width\":" + r.Width + ",\"height\":" + r.Height +
-                               ",\"bytes\":" + fi.Length + ",\"region\":{\"x\":" + r.X + ",\"y\":" + r.Y + ",\"w\":" + r.Width + ",\"h\":" + r.Height + "}}";
+                               ",\"bytes\":" + fi.Length + ",\"region\":{\"x\":" + r.X + ",\"y\":" + r.Y + ",\"w\":" + r.Width + ",\"h\":" + r.Height + "}" +
+                               (useAxes ? ",\"axes\":true" : "") + "}";
                     }
                 }
                 else if (path == "/mouse/move")
@@ -3120,9 +3222,9 @@ public partial class ShotService
                         if (h == IntPtr.Zero) return McpText("{\"ok\":false,\"error\":\"window not found\"}", true);
                         RECT rc; GetWindowRect(h, out rc); r = new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top);
                     }
-                    string fp = DoShot(r);
+                    string fp = McpParam(a, "axes") == "1" ? DoShotAxes(r) : DoShot(r);
                     FileInfo fi = new FileInfo(fp);
-                    return McpText("{\"ok\":true,\"file\":\"" + JsonEscape(fp) + "\",\"width\":" + r.Width + ",\"height\":" + r.Height + ",\"bytes\":" + fi.Length + "}", false);
+                    return McpText("{\"ok\":true,\"file\":\"" + JsonEscape(fp) + "\",\"width\":" + r.Width + ",\"height\":" + r.Height + ",\"bytes\":" + fi.Length + (McpParam(a, "axes") == "1" ? ",\"axes\":true,\"origin\":{\"x\":" + r.X + ",\"y\":" + r.Y + "}" : "") + "}", false);
                 }
                 case "window_info":
                 {
