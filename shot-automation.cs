@@ -807,18 +807,77 @@ partial class ShotService
         for (int i = kids.Count - 1; i >= 0; i--) stack.Push(kids[i]);
     }
 
+    // ===== UIA 熔断与进程策略 (P1-2 / 抄 web-access B8: 隔离粒度按进程, 不再全服务连坐) =====
+    // 旧写法: 全局攒够 3 个泄漏线程就拒绝一切 /ui/* —— 一个 Electron 窗口超时, 微信记事本跟着一起死,
+    // 唯一出路是重启 exe。现改为按进程记账: 肇事进程自己进小黑屋, 别的窗口照常用; 另设全局兜底防无上限泄漏。
+    static readonly Dictionary<string, int> uiaLeakedByProc = new Dictionary<string, int>();
+    static int uiaLeakedTotal = 0;
+    const int LEAK_LIMIT_PER_PROC = 2;   // 同一进程攒够 2 个泄漏线程 → 只拒绝该进程的新 ui 调用
+    const int LEAK_LIMIT_TOTAL = 8;      // 全局兜底: 累计 8 个说明已经不是个别应用的问题
+
+    // 已知"UIA 一调必挂/必超时"的应用: 拦在入口, 省下那 8 秒, 也不再让它把别人拖进熔断。
+    // 依据 = 手册 D8 实测 (2026-09-18): WorkBuddy 主窗口一次 ui_find(name=) 就把全服务打到 "UIA fused: 3 leaked worker threads"。
+    static readonly Dictionary<string, string> UiaBan = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "workbuddy", "手册 D8 实测: 主窗口 UIA 必超时, 一次 ui_find 就把全服务拖进熔断" }
+    };
+
+    // 从 query 里解析目标进程名 (零 UIA 调用, 纯 Win32, 不会因为解析本身挂死)
+    static string UiProcNameOf(Dictionary<string, string> q)
+    {
+        try
+        {
+            string hs = UiResolveHwnd(q);
+            if (hs == null || hs == "") return "";
+            long hv = 0; if (!long.TryParse(hs, out hv) || hv <= 0) return "";
+            IntPtr h = new IntPtr(hv);
+            if (!IsWindow(h)) return "";
+            uint tp = 0; GetWindowThreadProcessId(h, out tp);
+            if (tp == 0) return "";
+            return System.Diagnostics.Process.GetProcessById((int)tp).ProcessName ?? "";
+        }
+        catch { }
+        return "";
+    }
+
+    // 入口守卫: 返回 null = 放行; 返回 JSON = 直接当结果发回 (含指路, 不静默失败)
+    static string UiGuard(string toolName, Dictionary<string, string> q)
+    {
+        string proc = UiProcNameOf(q);
+        if (proc != "")
+        {
+            string why;
+            if (UiaBan.TryGetValue(proc, out why))
+                return "{\"ok\":false,\"blocked_by_policy\":true,\"severity\":\"self_heal\",\"process\":\"" + JsonEscape(proc) +
+                       "\",\"error\":\"" + JsonEscape(proc) + " 的 UIA 已被本服务按实测结论禁用 (" + why + ") —— 这次调用没有发出, 不会拖慢服务, 也不会把别的窗口带进熔断。" +
+                       "改走: (1) screen_capture 截图+读图定位; (2) mouse_click 点控件中心; (3) 窗口点不动/看不见用 app_restore 或 tray_click 恢复; (4) 确认可解除限制就删掉 shot-automation.cs 里 UiaBan 表中的这一行\"}";
+            int leaked;
+            lock (uiaLeakedByProc) { uiaLeakedByProc.TryGetValue(proc, out leaked); }
+            if (leaked >= LEAK_LIMIT_PER_PROC)
+                return "{\"ok\":false,\"fused_for_process\":true,\"severity\":\"self_heal\",\"process\":\"" + JsonEscape(proc) +
+                       "\",\"leaked\":" + leaked + ",\"error\":\"" + JsonEscape(proc) + " 已有 " + leaked + " 个 UIA 超时线程未退出, 本进程的 /ui/* 暂时拒绝 (其它窗口不受影响)。" +
+                       "降级: screen_capture 截图+坐标操作, 或 app_restore 恢复该应用后再试; 该应用恢复 UIA 能力前不要重复重试\"}";
+        }
+        if (uiaLeakedTotal >= LEAK_LIMIT_TOTAL)
+            return "{\"ok\":false,\"fused_global\":true,\"severity\":\"need_user\",\"leaked\":" + uiaLeakedTotal +
+                   ",\"error\":\"累计 " + uiaLeakedTotal + " 个 UIA 泄漏线程, 已超过全局上限 —— 这已经不是单个应用的问题。" +
+                   "need_user: 请让用户重启托盘上的 Win Desktop Helper (托盘菜单退出后重新运行), 期间改用截图+坐标路线\"}";
+        return null;
+    }
+
     // UIA 调用硬超时: 超时返回降级提示 (后台线程 IsBackground, 进程退出不受影响)
     static readonly List<string> uiaLeaked = new List<string>(); // 超时未死线程登记 (tool@时间), /diag/threads 可查
     static int uiaLeakedCount { get { lock (uiaLeaked) return uiaLeaked.Count; } }
 
     static string UiCall(string toolName, Func<string> fn, int ms)
     {
-        // E1 熔断: UIA COM 调用无法强杀, 泄漏线程会自旋烧 CPU — 攒够 3 个就拒绝一切新 ui 调用直到服务重启
-        if (uiaLeakedCount >= 3)
-        {
-            Log("ui call fused: " + uiaLeakedCount + " leaked threads");
-            return "{\"ok\":false,\"error\":\"UIA fused: " + uiaLeakedCount + " leaked worker threads (大DOM 超时不可杀)。请重启 shot-service.exe; 期间改用 /shot 截图+坐标操作\",\"leaked\":" + uiaLeakedCount + "}";
-        }
+        return UiCall(toolName, fn, ms, null);   // 无 q 的旧调用: 不做进程策略, 仍受全局上限保护
+    }
+
+    static string UiCall(string toolName, Func<string> fn, int ms, Dictionary<string, string> q)
+    {
+        string denied = q == null ? null : UiGuard(toolName, q);
+        if (denied != null) { Log("ui guard deny " + toolName); return denied; }
         string outp = null;
         Thread th = new Thread(new ThreadStart(delegate
         {
@@ -829,9 +888,20 @@ partial class ShotService
         th.Start();
         if (!th.Join(ms))
         {
+            string proc = q == null ? "" : UiProcNameOf(q);
+            if (proc == "") proc = "unknown";
             lock (uiaLeaked) uiaLeaked.Add(toolName + "@" + DateTime.Now.ToString("HH:mm:ss"));
-            Log("uia timeout " + toolName + " >" + ms + "ms (大DOM?), leaked thread now " + uiaLeakedCount);
-            return "{\"ok\":false,\"error\":\"UIA timeout " + ms + "ms - 疑似大DOM(Electron/聊天应用)。降级: /shot 截图+坐标操作, 或更小 max, 或 ui_find 精确 name\"}";
+            lock (uiaLeakedByProc)
+            {
+                int c; uiaLeakedByProc.TryGetValue(proc, out c);
+                uiaLeakedByProc[proc] = c + 1;
+            }
+            uiaLeakedTotal++;
+            int myc; lock (uiaLeakedByProc) uiaLeakedByProc.TryGetValue(proc, out myc);
+            Log("uia timeout " + toolName + " >" + ms + "ms proc=" + proc + " procLeaked=" + myc + " totalLeaked=" + uiaLeakedTotal);
+            return "{\"ok\":false,\"severity\":\"self_heal\",\"leaked_for_process\":" + myc + ",\"leaked_total\":" + uiaLeakedTotal +
+                   ",\"error\":\"UIA timeout " + ms + "ms - 疑似大DOM(Electron/聊天应用)。降级: screen_capture 截图+坐标操作, 或更小 max, 或 ui_find 精确 name。" +
+                   (myc >= LEAK_LIMIT_PER_PROC ? "该进程已攒 " + myc + " 个超时线程, 后续 /ui/* 会被直接拦下(不再白等 8 秒)" : "") + "\"}";
         }
         return outp ?? "{\"ok\":false,\"error\":\"uia internal\"}";
     }
@@ -1205,31 +1275,218 @@ partial class ShotService
         return false;
     }
 
-    // 点击后校验"预期内容是否真的出现" —— 防"点了界面也变了, 但变得不对"
-    // 实测事故: AI 点会话列表项报 ok 且 verify.changed=true, 但界面根本没进那个会话
-    static string ExpectCheckJson(string expect, int pid, int waitMs)
+    // ===== "结果即证据"就绪等待原语 (P0-4 / 抄 web-access B1: 盯到真看见为止, 不等一秒就下结论) =====
+    // 旧写法致命伤: expect 是 Sleep(900) 后扫一次 —— 慢渲染(Electron 切页/聊天应用进会话)必然误判 found:false,
+    // 而 Agent 看到"没找到"的典型反应是回头再点一次 —— 正好撞上手册 :746 严禁的连点事故。
+    // 现在: ① 快路径走 UIA 服务端精确名过滤(不遍历) ② 命中不了再限成本模糊扫 ③ 未命中就轮询到超时, 回报耗时与采样数。
+    static int PidOfQuery(Dictionary<string, string> q)
     {
-        if (string.IsNullOrEmpty(expect)) return "";
-        Thread.Sleep(waitMs > 0 ? waitMs : 900);
         try
         {
-            var root = System.Windows.Automation.AutomationElement.RootElement;
-            var list = WalkLimited(root, 800);
-            foreach (var e in list)
+            string hs = UiResolveHwnd(q);
+            if (hs == null) return 0;
+            long hv = 0; if (!long.TryParse(hs, out hv) || hv <= 0) return 0;
+            IntPtr h = new IntPtr(hv);
+            if (!IsWindow(h)) return 0;
+            uint tp = 0; GetWindowThreadProcessId(h, out tp);
+            return (int)tp;
+        }
+        catch { }
+        return 0;
+    }
+
+    // 进程名解析有成本, 按 pid 缓存"是否属于 UIA 禁用应用"
+    static readonly Dictionary<int, bool> banPidCache = new Dictionary<int, bool>();
+    static bool PidBanned(int p)
+    {
+        if (p <= 0) return false;
+        bool cached; if (banPidCache.TryGetValue(p, out cached)) return cached;
+        string nm = "";
+        try { nm = System.Diagnostics.Process.GetProcessById(p).ProcessName ?? ""; } catch { }
+        bool banned = nm.Length > 0 && UiaBan.ContainsKey(nm);
+        banPidCache[p] = banned;
+        return banned;
+    }
+
+    // 在指定进程(0=全部)的顶层窗口里找目标文字。返回命中的元素 Name, 没找到返回 null。
+    // 两条硬约束 (2026-09-19 实测教训: 不带窗口定位时它去扫全盘, 撞上 Electron 大 DOM 必然超时):
+    //   ① 一律跳过 UIA 禁用应用的窗口 —— 否则 wait_for 会绕过 UiaBan 白烧 8 秒
+    //   ② 每个窗口限量扫描 + 单窗耗时上限, 超了直接放弃这一窗, 成本有界
+    static int ScanTreeForText_bannedSkipped = 0;
+    static string ScanTreeForText(int pid, string expect, int maxPerWindow, int perWindowBudgetMs)
+    {
+        ScanTreeForText_bannedSkipped = 0;
+        try
+        {
+            var wc = pid > 0
+                ? (System.Windows.Automation.Condition)new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ProcessIdProperty, pid)
+                : (System.Windows.Automation.Condition)System.Windows.Automation.Condition.TrueCondition;
+            var wins = System.Windows.Automation.AutomationElement.RootElement.FindAll(System.Windows.Automation.TreeScope.Children, wc);
+            foreach (System.Windows.Automation.AutomationElement w in wins)
             {
+                int ep = pid > 0 ? pid : PidOf(w);
+                if (PidBanned(ep)) { ScanTreeForText_bannedSkipped++; continue; }
+                DateTime w0 = DateTime.Now;
                 try
                 {
-                    if (pid > 0 && PidOf(e) != pid) continue;
-                    string n = e.Current.Name ?? "";
-                    if (n.Length == 0) continue;
-                    if (n.IndexOf(expect, StringComparison.OrdinalIgnoreCase) >= 0)
-                        return ",\"expect\":{\"found\":true,\"text\":\"" + JsonEscape(expect) + "\",\"matched\":\"" + JsonEscape(n.Length > 60 ? n.Substring(0, 60) : n) + "\"}";
+                    var hit = w.FindFirst(System.Windows.Automation.TreeScope.Subtree,
+                        new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, expect));
+                    if (hit != null) { string n = hit.Current.Name ?? ""; if (n.Length > 0) return n; }
                 }
                 catch { }
+                // 精确查已把本窗预算用完就不再模糊扫 —— 成本必须有界, 否则一个慢窗口拖死整轮
+                if ((DateTime.Now - w0).TotalMilliseconds > perWindowBudgetMs) continue;
+                foreach (System.Windows.Automation.AutomationElement e in WalkLimited(w, maxPerWindow))
+                {
+                    string n;
+                    try { n = e.Current.Name ?? ""; } catch { continue; }
+                    if (n.Length == 0) continue;
+                    if (n.IndexOf(expect, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return n;
+                }
             }
         }
         catch { }
-        return ",\"expect\":{\"found\":false,\"text\":\"" + JsonEscape(expect) + "\",\"hint\":\"点完没找到预期内容 — 大概率没点到或点了没生效。重新采样, 别硬往下走\"}";
+        return null;
+    }
+
+    static string Clip60(string s)
+    {
+        if (s == null) return "";
+        return s.Length > 60 ? s.Substring(0, 60) : s;
+    }
+
+    // 核心等待循环。返回一个完整 JSON 对象字符串。hit 通过 out 告诉调用方成没成。
+    static string WaitResultJson(string expect, int pid, int timeoutMs, int pollMs, bool disappear, out bool hit)
+    {
+        if (timeoutMs <= 0) timeoutMs = 8000;
+        if (timeoutMs > 60000) timeoutMs = 60000;   // 内部硬上限; 路由层另把 /wait_for 压在 25s(上游 MCP 调用预算 30s, 给更久只会先被掐)
+        if (pollMs <= 0) pollMs = 400;
+        DateTime t0 = DateTime.Now;
+        int samples = 0;
+        string matched = null;
+        hit = false;
+        while (true)
+        {
+            samples++;
+            matched = ScanTreeForText(pid, expect, 250, 1200);
+            bool present = matched != null;
+            if (present != disappear) { hit = true; break; }   // disappear=1 时"没找到"才是达成
+            double left = (DateTime.Now - t0).TotalMilliseconds;
+            if (left + pollMs > timeoutMs) break;
+            Thread.Sleep(pollMs);
+        }
+        int waited = (int)(DateTime.Now - t0).TotalMilliseconds;
+        string mode = disappear ? "disappear" : "appear";
+        if (hit)
+            return "{\"ok\":true,\"satisfied\":true,\"mode\":\"" + mode + "\",\"text\":\"" + JsonEscape(expect) + "\"" +
+                   (matched == null ? "" : ",\"matched\":\"" + JsonEscape(Clip60(matched)) + "\"") +
+                   ",\"waitedMs\":" + waited + ",\"samples\":" + samples + "}";
+        return "{\"ok\":false,\"satisfied\":false,\"severity\":\"self_heal\",\"mode\":\"" + mode + "\",\"text\":\"" + JsonEscape(expect) + "\"" +
+               ",\"waitedMs\":" + waited + ",\"samples\":" + samples + ",\"pid\":" + pid +
+               ",\"hint\":\"等了 " + waited + "ms 采样 " + samples + " 次仍没看到" + (disappear ? "目标消失" : "目标内容") +
+               "。三种可能: (1) 上一步操作确实没生效 — 重新采样看界面真实状态, 别原样重试; (2) 目标文字写错了/在别的窗口 — 用 list_apps 确认 hwnd 再指定; " +
+               "(3) 该应用 UIA 读不到内容(Electron 画布渲染/终端类) — 改走 screen_capture + ocr_image 判断\"}";
+    }
+
+    // GET /wait_for?text=..&hwnd=..&timeout=..&poll=..&disappear=0|1  (等"内容"出现, 与 /win/wait 等"窗口出现"互补)
+    static string WaitFor(Dictionary<string, string> q)
+    {
+        try
+        {
+            string expect = q.ContainsKey("text") ? q["text"] : "";
+            if (string.IsNullOrEmpty(expect))
+                return "{\"ok\":false,\"severity\":\"self_heal\",\"error\":\"缺少要等的文字: text=目标内容(子串匹配); 可选 hwnd=/title= 限定窗口, timeout=毫秒(默认8000,上限60000), poll=毫秒(默认400), disappear=1 改成等它消失\"}";
+            int pid = PidOfQuery(q);
+            // 2026-09-19 实测: 不带定位时 pid=0 → 遍历桌面全部顶层窗口 → 撞 Electron 大 DOM 必超时并白记泄漏线程。
+            // 所以定位是硬性要求, 不再"贴心地"帮你扫全盘 —— 那种默认行为比报错更坏。
+            bool hasLoc = (q.ContainsKey("hwnd") && q["hwnd"] != "") || (q.ContainsKey("title") && q["title"] != "");
+            if (pid <= 0)
+                return hasLoc
+                    ? "{\"ok\":false,\"severity\":\"self_heal\",\"error\":\"窗口没定位到 — 传了 hwnd/title 但解析不出进程。桌面是共享的, 句柄会变: 重新 list_apps 按 process= 取当前 hwnd 再来\"}"
+                    : "{\"ok\":false,\"severity\":\"self_heal\",\"error\":\"必须带窗口定位: hwnd=(推荐, 从 list_apps 现取) 或 title=关键词。不带定位会遍历桌面全部顶层窗口, 撞上 Electron 大 DOM 必然超时, 还白记一个泄漏线程(2026-09-19 实测踩过, 见 patterns/self.md)\"}";
+            int timeout = 0, poll = 0;
+            if (q.ContainsKey("timeout")) int.TryParse(q["timeout"], out timeout);
+            if (q.ContainsKey("poll")) int.TryParse(q["poll"], out poll);
+            bool disappear = q.ContainsKey("disappear") && (q["disappear"] == "1" || q["disappear"].ToLowerInvariant() == "true");
+            bool hit;
+            string r = WaitResultJson(expect, pid, timeout, poll, disappear, out hit);
+            Log("[wait_for] \"" + (expect.Length > 30 ? expect.Substring(0, 30) : expect) + "\" pid=" + pid + " satisfied=" + hit);
+            return r;
+        }
+        catch (Exception ex)
+        {
+            return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.GetType().Name + ": " + ex.Message) + "\"}";
+        }
+    }
+
+    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint ms, out IntPtr lpbk);
+
+    // GET /win/state?hwnd=|title= —— 零副作用窗口状态断言 (抄 web-access B4: 探测动作本身不许改状态)
+    // 治的病: 手册里写着"验证窗口状态请用 screen_capture 裁一个像素" —— 那是拿截图(重、还落盘)当断言用。
+    // 这里不 activate、不改焦点、不落盘、**完全不碰 UIA**(所以 Electron 冻结窗也能秒回)。
+    // 诚实标注: responsive 只测"窗口线程还理不理消息"，测不出 Electron 渲染层已死(那种黑屏请看截图字节数那条判据)。
+    static string WindowState(Dictionary<string, string> q)
+    {
+        try
+        {
+            string hs = UiResolveHwnd(q);
+            if (hs == null)
+                return "{\"ok\":false,\"severity\":\"self_heal\",\"error\":\"窗口没找到 — 先 list_apps 按 process= 取当前 hwnd(桌面是共享的, 上一轮的句柄可能已失效)\"}";
+            long hv = 0;
+            if (!long.TryParse(hs, out hv) || hv <= 0)
+                return "{\"ok\":false,\"severity\":\"self_heal\",\"error\":\"hwnd 非法: " + JsonEscape(hs) + "\"}";
+            IntPtr h = new IntPtr(hv);
+            if (!IsWindow(h))
+                return "{\"ok\":false,\"stale_handle\":true,\"severity\":\"self_heal\",\"hwnd\":" + hv +
+                       ",\"error\":\"这个句柄已经不存在了 — 窗口被关或被重建(Electron/多进程应用常见)。重新 list_apps 采样, 别拿旧句柄重试\"}";
+            RECT r; bool haveRect = GetWindowRect(h, out r);
+            bool iconic = IsIconic(h);
+            int style = GetWindowLong(h, -16);   // GWL_STYLE
+            int ex = GetWindowLong(h, -20);      // GWL_EXSTYLE
+            bool front = GetForegroundWindow() == h;
+            IntPtr ignored;
+            bool responsive = SendMessageTimeout(h, 0x0000 /*WM_NULL*/, IntPtr.Zero, IntPtr.Zero, 0x0002 /*SMTO_ABORTIFHUNG*/, 1000, out ignored) != IntPtr.Zero;
+            uint tp = 0; GetWindowThreadProcessId(h, out tp);
+            string proc = "";
+            try { if (tp > 0) proc = System.Diagnostics.Process.GetProcessById((int)tp).ProcessName ?? ""; } catch { }
+            string title = "";
+            try { var sb = new StringBuilder(512); GetWindowTextW(h, sb, 512); title = sb.ToString(); } catch { }
+            return "{\"ok\":true,\"hwnd\":" + hv + ",\"pid\":" + tp + ",\"process\":\"" + JsonEscape(proc) +
+                   "\",\"title\":\"" + JsonEscape(title) + "\"" +
+                   ",\"visible\":" + (IsWindowVisible(h) ? "true" : "false") +
+                   ",\"minimized\":" + (iconic ? "true" : "false") +
+                   ",\"maximized\":" + ((style & 0x0002) != 0 ? "true" : "false") +
+                   ",\"foreground\":" + (front ? "true" : "false") +
+                   ",\"responsive\":" + (responsive ? "true" : "false") +
+                   ",\"style\":{\"layered\":" + ((ex & 0x00080000) != 0 ? "true" : "false") +
+                   ",\"transparent\":" + ((ex & 0x00000020) != 0 ? "true" : "false") +
+                   ",\"noactivate\":" + ((ex & 0x08000000) != 0 ? "true" : "false") +
+                   ",\"toolwindow\":" + ((ex & 0x00000080) != 0 ? "true" : "false") + "}" +
+                   (haveRect ? ",\"rect\":{\"x\":" + r.Left + ",\"y\":" + r.Top + ",\"w\":" + (r.Right - r.Left) + ",\"h\":" + (r.Bottom - r.Top) + "}" : "") +
+                   ",\"note\":\"本调用零副作用: 没有激活、没有改焦点、没有落盘、没有走 UIA\"}";
+        }
+        catch (Exception ex2)
+        {
+            return "{\"ok\":false,\"error\":\"" + JsonEscape(ex2.GetType().Name + ": " + ex2.Message) + "\"}";
+        }
+    }
+
+    // 点击后校验"预期内容是否真的出现" —— 防"点了界面也变了, 但变得不对"
+    // 实测事故: AI 点会话列表项报 ok 且 verify.changed=true, 但界面根本没进那个会话
+    // 返回以逗号开头的片段, 直接拼进 ui_click 的返回 JSON 里。expect_timeout= 可调(默认 2500ms, 上限 7000ms
+    // —— ui_click 外层 UiCall 预算 8s, 得给点击本身和 verify 留出时间)。
+    static string ExpectCheckJson(string expect, int pid, int timeoutMs)
+    {
+        if (string.IsNullOrEmpty(expect)) return "";
+        int tmo = timeoutMs > 0 ? timeoutMs : 2500;
+        if (tmo > 7000) tmo = 7000;
+        bool hit;
+        string full = WaitResultJson(expect, pid, tmo, 300, false, out hit);
+        int ob = full.IndexOf('{');
+        int cb = full.LastIndexOf('}');
+        if (ob < 0 || cb <= ob) return "";
+        return ",\"expect\":{" + full.Substring(ob + 1, cb - ob - 1) + "}";
     }
 
     // ui_click 包装: 点完按 expect= 校验预期内容是否出现, 结果并进返回 JSON
@@ -1257,7 +1514,12 @@ partial class ShotService
         }
         int k2 = r.LastIndexOf('}');
         if (k2 < 0) return r;
-        return r.Substring(0, k2) + ExpectCheckJson(exp, pid, 900) + "}";
+        int eto = 0;
+        if (q.ContainsKey("expect_timeout")) int.TryParse(q["expect_timeout"], out eto);
+        string expJson = ExpectCheckJson(exp, pid, eto);
+        // 轮询本身可能把耗时顶到 UiCall 预算边缘, 回报给 Agent 好判断"是内容没来还是我等得不够"
+        if (expJson.Length > 0 && eto > 7000) expJson = expJson + ",\"expect_timeout_clamped\":7000";
+        return r.Substring(0, k2) + expJson + "}";
     }
 
     static string UiClickInner(Dictionary<string, string> q)

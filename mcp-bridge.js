@@ -320,6 +320,34 @@ const TOOLS = [
       required: ['value']
     }
   },
+  // ---- 就绪等待 / 零副作用断言 (抄 web-access B1/B4) ----
+  {
+    name: 'wait_for',
+    description: '【等"内容"出现/消失的首选】在服务端轮询目标窗口, 直到出现指定文字(或 disappear=1 时直到它消失)才返回, 只回结论+耗时+采样次数, 不把每棵 UIA 树灌回上下文。与 win_manage(action=wait) 的区别: 那个只等"窗口存在", 这个等"窗口里的内容到位"。⚠ 关键用法: 点击/导航后不要 sleep 固定秒数再截图判断 —— 慢渲染(Electron 切页、聊天进会话)会误判失败并诱发重复点击; 用本工具等到看见为止。text=目标文字(子串匹配, 别写整句长文本), hwnd=从 list_apps 取(推荐, 桌面共享句柄会变), timeout=毫秒(默认8000, 上限25000), poll=毫秒(默认400), disappear=1 改为等消失。返回 satisfied/waitedMs/samples; 没等到会附三种可能原因(操作没生效/文字写错或窗口不对/该应用 UIA 读不到内容需改走截图+OCR), 按它判断而不是原样重试',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        text: { type: 'string', description: '要等的文字(子串匹配)' },
+        hwnd: { type: 'number', description: '限定窗口句柄(推荐, list_apps 取)' },
+        title: { type: 'string', description: '按标题关键词定位窗口(可能误匹配, 优先用 hwnd)' },
+        timeout: { type: 'number', description: '最长等待毫秒, 默认 8000, 上限 25000' },
+        poll: { type: 'number', description: '轮询间隔毫秒, 默认 400' },
+        disappear: { type: 'number', description: '1=改成等这段文字消失(如加载中/转圈提示消失)' }
+      },
+      required: ['text']
+    }
+  },
+  {
+    name: 'window_state',
+    description: '【零副作用状态断言】一次调用拿准窗口真实状态: {visible,minimized,maximized,foreground,responsive,rect,pid,process,title,style(含 layered/transparent/noactivate/toolwindow)}。不激活、不改焦点、不落盘、完全不碰 UIA —— 因此 Electron 冻结窗也能秒回。替代"截图裁一个像素来验证窗口状态"的土办法(那是拿重活当断言, 还会产生文件)。判据说明: responsive=false 表示窗口线程已不理会消息(真卡死); 但 Electron 渲染层黑屏时 responsive 仍可能为 true, 那种情况按手册"截图字节数"判据(黑屏约 22KB vs 正常 300~400KB)。句柄失效会返回 stale_handle=true 并要你重新 list_apps 采样, 不会让你拿旧句柄白重试',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        hwnd: { type: 'number', description: '窗口句柄(推荐)' },
+        title: { type: 'string', description: '标题关键词(可能误伤, 建议同时给 process 或先用 list_apps)' }
+      }
+    }
+  },
   // ---- 录屏 ----
   {
     name: 'record_start',
@@ -423,23 +451,27 @@ const TOOLS = [
   // ---- SKILL 手册 (强制闸门的唯一入口, 必须暴露给客户端, 否则死锁) ----
   {
     name: 'get_skill',
-    description: '【必须先调用】获取本服务 SKILL 操作手册（铁律/避坑/黄金路径）。本服务强制闸门: 首次调用任何工具前必须先读本 SKILL, 否则一律报错。默认返回核心版(约 3K 字, 够用); 需要历史考古/完整坑表用 detail=\"full\"; 只想查某个主题用 topic=\"关键词\"(按标题匹配抽段, 例 topic=\"分屏\" / \"冻结\" / \"D6\")。踩坑必须用 update_skill 写回共享手册, 不要只写进自己的记忆。',
+    description: '【必须先调用】取本服务操作手册。强制闸门: 首次调用任何工具前必须先读一次, **读一次管一整轮会话**(不是每轮重读, 别浪费 token)。2026-09-19 起手册已瘦身: 主文件只剩策略与铁律(约 4.8K 字), 具体经验按应用拆成小册子。用法: 不带参数=主手册(开工必读); app="WorkBuddy"/"douyin"/"ocr"/"win-z"=直达该应用小册子(推荐, 比翻主手册准); topic="关键词"=在主手册+历史+全部分片里搜段落(**无命中就什么都不返回, 不会灌整本**); detail="full"=主手册+完整历史考古(28K 字, 只在真要查旧 bug 时用)。踩坑必须 update_skill 写回, 不要只记自己记忆。',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
-        detail: { type: 'string', description: 'full = 返回核心 + 完整历史档案(SKILL-HISTORY.md, 含已修 bug 考古/完整坑表); 不给 = 只返回核心' },
-        topic: { type: 'string', description: '按标题关键字抽取相关段落(如 分屏/冻结/录屏/D6/任务栏), 找不到就回退返回核心版' }
+        detail: { type: 'string', description: 'full = 主手册 + 完整历史档案(贵, 慎用); 不给 = 只回主手册' },
+        topic: { type: 'string', description: '按标题关键字抽段(如 分屏/冻结/黑屏/熔断); 无命中返回提示而非整本' },
+        app: { type: 'string', description: '直达某应用小册子, 如 WorkBuddy / douyin / mimo / ocr / win-z / edge-cdp / electron-tray / build' }
       }
     }
   },
   {
     name: 'update_skill',
-    description: '【踩坑必写】把新踩的坑写回共享 SKILL.md（全体 agent 共享, 下次 get_skill 立即生效）。title=小节标题, entry=markdown 正文',
+    description: '【踩坑必写】把新经验写回共享经验库(全体 agent 下次读即生效)。🔴 必须带 app=：给了就写到 patterns/<app>.md(该应用专项), 不给才写主手册(主手册只放通用纪律, 塞胖了所有人每会话多烧 token)。title=小节标题, entry=markdown 正文, supersedes=本条推翻了哪条旧经验(标题原文, 会打出"维护时删旧条"警告), as_of=日期(默认今天)。拿不准的结论请写"未验证", 别当定论写。',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
         title: { type: 'string' },
-        entry: { type: 'string' }
+        entry: { type: 'string' },
+        app: { type: 'string', description: '归属应用(如 WorkBuddy/notepad/douyin), 会自动落到对应小册子' },
+        supersedes: { type: 'string', description: '本条推翻了哪条旧经验的标题 —— 防止手册里堆互相矛盾的段落' },
+        as_of: { type: 'string', description: '结论日期 YYYY-MM-DD, 默认今天' }
       },
       required: ['title', 'entry']
     }
@@ -463,7 +495,28 @@ const TOOLS = [
 
 function send(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
 
-function httpGet(url) {
+// 超时链路单一真源 (P0-1): 服务端每个端点自己的耗时上限必须 <= 本表 <= DSH toolCallTimeoutMs。
+// 原来 httpGet 硬编码 30s, 而 longshot 默认 120s / ocr_image 默认 60s —— 长活儿在服务端
+// 明明干得完, 桥这边先掐线, Agent 拿到的是 timeout 而不是结果。现按工具声明分别给预算。
+// 单位 ms。key = 工具名, 缺省 DEFAULT_TIMEOUT_MS。
+const DEFAULT_TIMEOUT_MS = 30000;
+const TOOL_TIMEOUT = {
+  longshot: 150000,          // 服务端默认 timeout_ms=120000, 留 30s 余量
+  ocr_image: 130000,         // 服务端 wait 默认 60000, 大图可传 120000
+  wait_for: 33000,           // 服务端刻意把 timeout 压在 25s: DSH 侧 toolCallTimeoutMs=30s, 桥给更久也只会先被上游掐
+  window_state: 8000,        // 纯 Win32 不该慢, 慢了就是出问题了
+  ui_tree: 20000, ui_find: 20000, ui_readall: 20000, ui_read: 20000,
+  ui_click: 30000,           // 内含 verify(500ms)+expect 轮询(默认 2.5s, 可传 expect_timeout)
+  ui_set: 20000, ui_select: 20000,
+  record_stop: 25000,        // Stop 走 Join(4s)+关 stdin+WaitForExit(15s)
+  app_run: 40000, app_restore: 40000,   // 服务端 wait 可到 8s+ 且要等窗口稳定
+  win_manage: 25000,         // action=wait 的 timeout 参数上限 20s
+  tray_click: 25000,         // Win+B 键盘流双向扫 80 步
+  screen_capture: 20000, pin_image: 15000,
+  keyboard_type: 20000,      // ≤2000 字符逐字发送
+};
+function httpGet(url, timeoutMs) {
+  const tmo = timeoutMs || DEFAULT_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const http = require('http');
     const req = http.get(url, (res) => {
@@ -475,7 +528,7 @@ function httpGet(url) {
       });
     });
     req.on('error', reject);
-    req.setTimeout(30000, () => { req.destroy(new Error('helper request timeout')); });
+    req.setTimeout(tmo, () => { req.destroy(new Error('helper request timeout after ' + tmo + 'ms')); });
   });
 }
 
@@ -650,6 +703,22 @@ function buildUrl(name, a) {
       qs.push('value=' + enc(String(a.value)));
       return { path: '/ui/set', qs };
     }
+    case 'wait_for': {
+      let qs = [];
+      qs.push('text=' + enc(String(a.text)));
+      if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
+      if (a.title) qs.push('title=' + enc(a.title));
+      if (a.timeout) qs.push('timeout=' + a.timeout);
+      if (a.poll) qs.push('poll=' + a.poll);
+      if (a.disappear) qs.push('disappear=' + a.disappear);
+      return { path: '/wait_for', qs };
+    }
+    case 'window_state': {
+      let qs = [];
+      if (a.hwnd !== undefined) qs.push('hwnd=' + a.hwnd);
+      else if (a.title) qs.push('title=' + enc(a.title));
+      return { path: '/win/state', qs };
+    }
     case 'record_start': {
       let qs = [];
       if (a.x !== undefined) qs = qs.concat(['x=' + a.x, 'y=' + a.y, 'w=' + a.w, 'h=' + a.h]);
@@ -706,17 +775,134 @@ function buildUrl(name, a) {
   }
 }
 
+// ===== 参数校验：TOOLS[].inputSchema 是唯一真源，校验/提示/超时全从它派生 (抄 web-access A3) =====
+// 治的病：以前参数名写错不报错 —— keyboard_press 把 keys 写成 key，bridge 照样拼出
+// keys=undefined 发给服务端，Agent 收到"成功"，实际一下也没按。静默假成功是这里最贵的债。
+const TOOL_INDEX = {};
+for (const t of TOOLS) TOOL_INDEX[t.name] = t;
+
+function editDistance(a, b) {
+  if (a === b) return 0;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// did_you_mean：编辑距离足够近才建议，否则宁可不提（瞎建议比不建议更坑）
+function suggestKey(k, keys) {
+  const lim = Math.max(2, Math.floor(k.length / 3));
+  let best = null, bestD = Infinity;
+  for (const c of keys) {
+    const d = editDistance(k.toLowerCase(), c.toLowerCase());
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return best && bestD <= lim ? best : null;
+}
+
+// 从 schema 现造一条正确调用示例 —— 报错时把饭喂到嘴边，不让 Agent 自己猜
+function makeExample(name) {
+  const tool = TOOL_INDEX[name];
+  const props = (tool && tool.inputSchema && tool.inputSchema.properties) || {};
+  const req = (tool && tool.inputSchema && tool.inputSchema.required) || Object.keys(props).slice(0, 2);
+  const sample = {};
+  for (const k of req) {
+    const p = props[k] || {};
+    if (Array.isArray(p.enum)) sample[k] = p.enum[0];
+    else if (p.type === 'number') sample[k] = k === 'delta' ? -3 : 0;
+    else if (p.type === 'string') sample[k] = '…';
+    else sample[k] = true;
+  }
+  return name + '(' + Object.keys(sample).map(k => k + '=' + JSON.stringify(sample[k])).join(', ') + ')';
+}
+
+function typeOk(declared, v) {
+  if (v === null || v === undefined) return true;
+  switch (declared) {
+    case 'number': return typeof v === 'number' ? !Number.isNaN(v) : (typeof v === 'string' && v.trim() !== '' && !Number.isNaN(Number(v)));
+    case 'string': return typeof v === 'string' || typeof v === 'number';
+    case 'boolean': return typeof v === 'boolean';
+    default: return true;
+  }
+}
+
+// 返回 null = 通过；返回字符串 = 要回给 Agent 的完整报错文本（含正确写法）
+function validateArgs(name, args) {
+  const tool = TOOL_INDEX[name];
+  if (!tool) return 'unknown tool: ' + name;
+  const schema = tool.inputSchema || {};
+  const props = schema.properties || {};
+  const required = schema.required || [];
+  const a = (args && typeof args === 'object') ? args : {};
+  const keys = Object.keys(props);
+  const problems = [];
+
+  for (const k of Object.keys(a)) {
+    if (k in props) continue;
+    const s = suggestKey(k, keys);
+    problems.push('未知参数 "' + k + '"' + (s ? '，你是不是想写 "' + s + '"？' : '，本工具不认识它'));
+  }
+  for (const k of required) {
+    if (a[k] === undefined || a[k] === null || a[k] === '') problems.push('缺少必填参数 "' + k + '"');
+  }
+  for (const k of Object.keys(a)) {
+    const p = props[k];
+    if (!p || !(k in props)) continue;
+    if (p.type && !typeOk(p.type, a[k])) problems.push('参数 "' + k + '" 类型应为 ' + p.type + '，实际收到 ' + JSON.stringify(a[k]));
+    if (Array.isArray(p.enum) && a[k] !== undefined && p.enum.indexOf(a[k]) < 0) {
+      const s = suggestKey(String(a[k]), p.enum);
+      problems.push('参数 "' + k + '" 只能是 ' + p.enum.join('|') + '，收到 ' + JSON.stringify(a[k]) + (s ? '（想写 "' + s + '"？）' : ''));
+    }
+  }
+  if (!problems.length) return null;
+  return '参数不合法，本次调用已被拦下，什么都没执行:\n  - ' + problems.join('\n  - ') +
+    '\n正确写法: ' + makeExample(name) +
+    '\n本工具全部可用参数: ' + (keys.join(', ') || '（无参数）') +
+    '\n别用同样的调用重试 —— 照上面改参数名再发一次。';
+}
+
+// 桥侧等待预算 = 声明预算；Agent 自己传了更长的超时就把预算抬到它要的值（服务端会自己裁）
+function toolTimeout(name, args) {
+  let budget = TOOL_TIMEOUT[name] || DEFAULT_TIMEOUT_MS;
+  for (const k of ['timeout_ms', 'timeout', 'wait']) {
+    const v = Number(args && args[k]);
+    if (v > 0) budget = Math.max(budget, v + 8000);
+  }
+  return Math.min(budget, 200000);
+}
+
 async function callTool(name, args) {
   // SKILL 工具：返回 SKILL.md 全文（同目录，缺文件时回退内嵌简版）
   if (name === 'get_skill') {
     guideRead = true;
     const _fs2 = require('fs'), _path2 = require('path');
-    let _hist = '';
-    try { _hist = _fs2.readFileSync(_path2.join(__dirname, 'SKILL-HISTORY.md'), 'utf8'); } catch (e) { }
-    let core = '';
-    try { core = _fs2.readFileSync(_path2.join(__dirname, 'SKILL.md'), 'utf8'); } catch (e) { }
+    const rd = (p) => { try { return _fs2.readFileSync(_path2.join(__dirname, p), 'utf8'); } catch (e) { return ''; } };
+    let _hist = rd('SKILL-HISTORY.md');
+    let core = rd('SKILL.md');
+    if (!core) core = '【SKILL.md 缺失】兜底简版纪律: 点前先定位并确认前台 / 语义优先坐标兜底 / 中文用剪贴板粘贴 / 每次操作后验证 / 敏感操作先问用户。';
+    // 2026-09-19 瘦身: 主手册只留策略与铁律, 细节按应用拆在下列目录的小册子里(经验真源), 按需取而不是每会话灌一整本
+    const SHARD_DIRS = ['patterns', 'dev', 'scripts-doc', 'docs-moved'];
+    const shards = [];
+    for (const d of SHARD_DIRS) {
+      try { for (const f of _fs2.readdirSync(_path2.join(__dirname, d))) if (/\.md$/i.test(f)) shards.push(d + '/' + f); } catch (e) { }
+    }
+    const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]/g, '');
     const full = core + '\n\n================ 以下为完整历史档案 ================\n\n' + _hist;
-    // 按主题抽取: 从两个文件里按标题关键字匹配段落
+    // 按应用直达小册子 (抄 web-access 的 site-patterns/{domain}.md: 经验按对象分片)
+    if (args && args.app) {
+      const want = norm(args.app);
+      const hits = shards.filter((p) => { const b = norm(_path2.basename(p, '.md')); return b && (b.includes(want) || want.includes(b)); });
+      if (!hits.length)
+        return { content: [{ type: 'text', text: '没有 app="' + args.app + '" 对应的小册子。\n现有分片: ' + (shards.join('  ') || '(空)') + '\n\n—— 主手册(先按它的索引表判断该翻哪本) ——\n\n' + core }] };
+      guideRead = true;
+      return { content: [{ type: 'text', text: '(app="' + args.app + '" 命中 ' + hits.length + ' 本: ' + hits.join(', ') + ')\n\n' + hits.map((p) => '======== ' + p + ' ========\n' + rd(p)).join('\n\n') }] };
+    }
+    // 按主题抽取: 主手册 + 历史档案 + **全部分片** 一起搜
     if (args && args.topic) {
       const kw = String(args.topic);
       const pick = (md) => {
@@ -734,55 +920,111 @@ async function callTool(name, args) {
         if (taking) out.push(buf.join('\n'));
         return out;
       };
-      const hits = pick(core).concat(pick(_hist)).filter(s => s.trim());
-      if (hits.length) guideRead = true;
-      const body = hits.length ? hits.join('\n\n---\n\n') : core;
-      const tip = hits.length
-        ? '(get_skill topic=\"' + kw + '\" 命中 ' + hits.length + ' 段)'
-        : '(topic=\"' + kw + '\" 无匹配, 已返回核心版; 换个关键词或 detail=\"full\" 取全部)';
-      return { content: [{ type: 'text', text: tip + '\n\n' + body }] };
+      let hits = pick(core).concat(pick(_hist));
+      for (const p of shards) hits = hits.concat(pick(rd(p)));
+      hits = hits.filter((s) => s.trim());
+      // 标题没命中就再搜正文(取命中行 ±2 行) —— 否则像"熔断"这种只出现在正文的关键字永远抽不到, 抽段能力名不副实
+      if (!hits.length) {
+        const pickBody = (md, label) => {
+          const ls = md.split('\n'), o = [];
+          for (let i = 0; i < ls.length; i++) {
+            if (/^#{1,6}\s/.test(ls[i])) continue;
+            if (ls[i].indexOf(kw) < 0) continue;
+            const a = Math.max(0, i - 2), b = Math.min(ls.length - 1, i + 3);
+            o.push('（' + label + ' · 正文命中 @第' + (i + 1) + '行）\n' + ls.slice(a, b + 1).join('\n'));
+            i = b;
+          }
+          return o;
+        };
+        hits = pickBody(core, 'SKILL.md').concat(pickBody(_hist, 'SKILL-HISTORY.md'));
+        for (const p of shards) hits = hits.concat(pickBody(rd(p), p));
+        hits = hits.filter((s) => s.trim()).slice(0, 12);   // 正文命中可能很多, 封顶 12 段防倒灌
+      }
+      if (hits.length) {
+        guideRead = true;
+        return { content: [{ type: 'text', text: '(get_skill topic="' + kw + '" 命中 ' + hits.length + ' 段)\n\n' + hits.join('\n\n---\n\n') }] };
+      }
+      // 关键改动: 无命中**不再回退整份主手册**(旧版实测一次灌回 42,912 字, 抽不到反而更贵)
+      return { content: [{ type: 'text', text: 'topic="' + kw + '" 在主手册、历史档案和全部分片里都没命中 —— 所以什么都不返回, 不再拿整本手册充数。\n可以试: ① get_skill(app=应用名) 直达小册子 ② 按主手册索引表 read 对应 .md ③ 确实要考古才用 detail="full"\n\n现有分片: ' + (shards.join('  ') || '(空)') }], isError: true, severity: 'self_heal' };
     }
     if (args && args.detail === 'full') {
       guideRead = true;
       return { content: [{ type: 'text', text: full }] };
     }
-    let text = '';
-    try { text = _fs2.readFileSync(_path2.join(__dirname, 'SKILL.md'), 'utf8'); }
-    catch (e) {
-      text = '【Win Desktop Helper SKILL·简版】\n' +
-             '1. 点任何东西前先 window_info/active_window 定位并确认前台；\n' +
-             '2. 语义优先: ui_tree → ui_click/ui_set/ui_read, 坐标点击是兜底；\n' +
-             '3. keyboard_type 发给当前前台窗口，输入前必须 active_window 确认目标；\n' +
-             '4. 大段文本用 clipboard_set + keyboard_press ctrl+v (比逐字打字快且稳)；\n' +
-             '5. 操作后立即 screen_capture/文件系统验证；\n' +
-             '6. 删除/发送等敏感操作先经用户对话确认；\n' +
-             '7. 点不动/找不到时先 active_window+全屏截图看真实状态，别盲试。\n' +
-             '（完整版见仓库 SKILL.md）';
-    }
-    return { content: [{ type: 'text', text: text + '\n\n—— 请遵守以上 SKILL 纪律。执行中若踩坑，务必用 update_skill 写回共享 SKILL.md（全体 agent 共享），不要只写进自己的记忆。' }] };
+    guideRead = true;
+    return { content: [{ type: 'text', text: core + '\n\n—— 请遵守以上纪律。踩到坑用 update_skill 写回, **务必带 app= 落到对应小册子**, 别把主手册重新写胖。' }] };
   }
-  // 写回工具：踩坑经验 append 进共享 SKILL.md（全体 agent 可见）
+  // 写回工具：默认落到**对应应用的小册子**，不再无差别往主手册尾部堆
+  // 病根记录: 旧实现只有 appendFileSync 一条路, 谁踩坑都往 SKILL.md 尾部追加, 写错了只能再加一节说"上节作废"
+  //          —— 四万字手册和 15 处「纠正/推翻」标记就是这么长出来的。
   if (name === 'update_skill') {
     const fs = require('fs'), path = require('path');
-    const file = path.join(__dirname, 'SKILL.md');
+    const mainFile = path.join(__dirname, 'SKILL.md');
+    const rawApp = args.app ? String(args.app).trim() : '';
+    const slug = rawApp.toLowerCase().replace(/[^a-z0-9]/g, '');
+    let file = mainFile, note = '';
     try {
-      const entry = '\n## ' + (args.title || '经验补充') + '\n\n' + (args.entry || '') + '\n';
+      if (slug) {
+        fs.mkdirSync(path.join(__dirname, 'patterns'), { recursive: true });
+        file = path.join(__dirname, 'patterns', slug + '.md');
+        if (!fs.existsSync(file))
+          fs.writeFileSync(file, '<!-- ' + rawApp + ' 专项经验册(由 update_skill 自动建)。写经验请标日期, 拿不准的写"未验证"。 -->\n# ' + rawApp + ' 专项经验\n\n', 'utf8');
+        note = '已按 app="' + rawApp + '" 归入小册子';
+      } else {
+        note = '⚠️ 未指定 app=，本次写进了主手册。主手册只该放**通用纪律**，专项坑请下次带 app=应用名 写到 patterns/ 下，否则它又会涨回四万字';
+      }
+      const _d = new Date();
+      // 用本地日期: toISOString 取 UTC 会把"今天"写成昨天, 而手册日期正是判断结论新旧的唯一依据
+      const stamp = args.as_of ? String(args.as_of) : (_d.getFullYear() + '-' + String(_d.getMonth() + 1).padStart(2, '0') + '-' + String(_d.getDate()).padStart(2, '0'));
+      const sup = String(args.supersedes || '').trim();
+      const supOk = sup.length > 3 && !/^(无|没有|新坑|无此条|none|null|n\/a|\(.*\))$/i.test(sup);
+      const supLine = supOk
+        ? '> ⚠️ 本条推翻「' + sup + '」（' + stamp + '）—— 维护时**删掉旧条**，别留两段互相矛盾的话让后来人自己猜。\n\n'
+        : (args.supersedes ? '<!-- supersedes 内容像占位文字("' + sup + '"), 未生成推翻标记; 要真推翻请传旧条标题原文 -->\n\n' : '');
+      const entry = '\n## ' + (args.title || '经验补充') + '\n\n' + supLine +
+        '_记录日期: ' + stamp + (rawApp ? ' · 应用: ' + rawApp : ' · 通用') + '_\n\n' + (args.entry || '') + '\n';
       fs.appendFileSync(file, entry, 'utf8');
-      return { content: [{ type: 'text', text: '已写入共享 SKILL.md: ' + file + '（下次任何 agent 调用 get_skill 即可读到新经验）' }] };
-    } catch (e) { return { isError: true, content: [{ type: 'text', text: '写入失败: ' + e.message }] }; }
+      let warn = '';
+      try {
+        const sz = fs.readFileSync(mainFile, 'utf8').length;
+        if (sz > 9000) warn = '\n【体积守卫】主手册已有 ' + sz + ' 字(瘦身目标 ≤9000)。请把细节移去 patterns/ 小册子, 只在这份里留一行指路 —— 四万字就是这么攒起来的。';
+      } catch (e) { }
+      return { content: [{ type: 'text', text: '已写入: ' + file + '\n' + note + '。下次任何 agent 用 get_skill(app=…) 即可读到。' + warn }] };
+    } catch (e) { return { isError: true, severity: 'self_heal', content: [{ type: 'text', text: '写入失败: ' + e.message }] }; }
+  }
+  // 参数校验排在闸门之前：写错参数这种事当场就该说清，不该先逼 Agent 白读四万字手册再告诉它。
+  const bad = validateArgs(name, args);
+  if (bad) {
+    return { isError: true, severity: 'self_heal', content: [{ type: 'text', text: guideRead ? bad : bad + '\n（另：本服务要求首次操作前先调用 get_skill 读手册，改完参数顺手把它调了）' }] };
   }
   // 强制闸门：所有工具（含观察类）首次调用前必须先读 SKILL
   if (!guideRead) {
     return { isError: true, content: [{ type: 'text', text: '⚠️ 本服务强制要求：首次操作前必须先调用 get_skill（该工具已在工具清单中, 直接调用即可, 无参数）获取 SKILL 操作手册与安全纪律（点前定位 / 语义优先 / 输入前确认前台 / 操作后验证 / 敏感操作确认）。请先调用 get_skill，再重试本工具。踩坑后请用 update_skill 把经验写回共享 SKILL.md。' }] };
   }
   const u = buildUrl(name, args);
-  if (!u) return { isError: true, content: [{ type: 'text', text: 'unknown tool: ' + name }] };
+  if (!u) return { isError: true, content: [{ type: 'text', text: 'unknown tool: ' + name + '（不在本服务工具清单里，先 tools/list 核对名字）' }] };
   const url = `http://${HOST}:${PORT}${u.path}${u.qs.length ? '?' + u.qs.join('&') : ''}`;
   try {
-    const r = await httpGet(url);
+    const r = await httpGet(url, toolTimeout(name, args));
     return { content: [{ type: 'text', text: JSON.stringify(r) }], isError: !r.ok };
   } catch (e) {
-    return { isError: true, content: [{ type: 'text', text: 'helper unreachable (' + e.message + ') — 请确认 win-desktop-helper 已运行 (127.0.0.1:18800)' }] };
+    // 失败分三态 (抄 web-access 退出码协议): self_heal=Agent 能自己救 / need_user=得叫人 / dead_end=到此为止
+    const msg = String(e.message || e);
+    if (/timeout/i.test(msg)) {
+      return { isError: true, severity: 'self_heal', content: [{ type: 'text', text:
+        '桥侧等待超时 (' + msg + ') —— 注意这不代表服务端没干完，可能只是它比桥等得久。\n' +
+        '本次请求: ' + url.replace(/([?&](text|value|entry|expect|name|title)=)[^&]*/g, '$1…') + '\n' +
+        'self_heal 处理顺序: (1) 用 /health 或该资源的 status 工具确认活儿是否已经干完（长截图/录屏产物已落盘就别重跑）; ' +
+        '(2) 确实没干完就把本工具的超时参数调小、目标范围缩小后重试一次; ' +
+        '(3) 同一调用连续两次超时就不再重试，向用户报告并附本条错误。' }] };
+    }
+    if (/ECONNREFUSED|helper unreachable|socket hang up|connect/i.test(msg)) {
+      return { isError: true, severity: 'need_user', content: [{ type: 'text', text:
+        '连不上桌面助手 (127.0.0.1:' + PORT + '): ' + msg + '\n' +
+        'need_user —— 这不是参数问题，重试同一个调用没用。请告诉用户：桌面助手程序（托盘上的 Win Desktop Helper）没在运行或正在重启，' +
+        '需要用户在托盘菜单里恢复；恢复后 GET http://127.0.0.1:' + PORT + '/health 能回 json 即可继续。' }] };
+    }
+    return { isError: true, severity: 'dead_end', content: [{ type: 'text', text: 'helper request failed: ' + msg }] };
   }
 }
 

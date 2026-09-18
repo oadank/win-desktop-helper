@@ -1855,10 +1855,18 @@ public partial class ShotService
                 }
                 else if (path == "/health")
                 {
+                    // 抄 web-access B2: /health 要暴露内部账本, Agent 才能判断"现有实例可直接复用, 别重启"。
+                    // exePath/logPath 必须给 —— 手册记过两次「看错 log(仓库根那份是旧的, 真跑的是 AppData 副本)
+                    // 得出完全相反的结论」, 这两字段就是治那个的。
                     body = "{\"ok\":true,\"pid\":" + Process.GetCurrentProcess().Id + ",\"session\":" + MySession +
                            ",\"shots\":" + ShotCount + ",\"uptimeSec\":" + (int)(DateTime.Now - StartTime).TotalSeconds +
                            ",\"elevated\":" + (IsElevated() ? "true" : "false") +
-                           ",\"version\":\"" + APP_VERSION + "\",\"build\":\"" + BuildStamp() + "\"}";
+                           ",\"version\":\"" + APP_VERSION + "\",\"build\":\"" + BuildStamp() + "\"" +
+                           ",\"exePath\":\"" + JsonEscape(System.Windows.Forms.Application.ExecutablePath) + "\"" +
+                           ",\"logPath\":\"" + JsonEscape(LogPath) + "\"" +
+                           ",\"uia\":{\"leakedTotal\":" + uiaLeakedTotal + ",\"globalFused\":" + (uiaLeakedTotal >= LEAK_LIMIT_TOTAL ? "true" : "false") +
+                           ",\"limitPerProcess\":" + LEAK_LIMIT_PER_PROC + ",\"banned\":\"" + JsonEscape(string.Join(",", new List<string>(UiaBan.Keys).ToArray())) + "\"}" +
+                           "}";
                 }
                 else if (path == "/taskbar-volume")
                 {
@@ -2180,7 +2188,12 @@ public partial class ShotService
                 else if (path.StartsWith("/win/"))
                 {
                     string verb = path.Substring(5);
-                    if (verb == "wait")
+                    if (verb == "state")
+                    {
+                        // 零副作用状态断言: 不激活、不改焦点、不落盘、不碰 UIA —— 替掉"验证窗口状态请截一个像素"的土办法
+                        body = WindowState(q);
+                    }
+                    else if (verb == "wait")
                     {
                         int tmo = 10000;
                         if (q.ContainsKey("timeout")) { int v; if (int.TryParse(q["timeout"], out v) && v > 0) tmo = v; }
@@ -2319,13 +2332,26 @@ public partial class ShotService
                         Log("[ctrl] clipboard set " + ct.Length + " chars" + (crn ? " (CR normalized)" : ""));
                     }
                 }
-                else if (path == "/ui/tree") { body = UiCall("tree", delegate { return UiTree(q); }, 8000); Log("[ui] tree " + target); }
-                else if (path == "/ui/click") { body = UiCall("click", delegate { return UiClick(q); }, 8000); Log("[ui] click " + target); }
-                else if (path == "/ui/find") { body = UiCall("find", delegate { return UiFind(q); }, 8000); Log("[ui] find " + target); }
-                else if (path == "/ui/select") { body = UiCall("select", delegate { return UiSelect(q); }, 8000); Log("[ui] select " + target); }
-                else if (path == "/ui/set") { body = UiCall("set", delegate { return UiSet(q); }, 8000); Log("[ui] set " + target); }
-                else if (path == "/ui/read") { body = UiCall("read", delegate { return UiRead(q); }, 8000); Log("[ui] read " + target); }
-                else if (path == "/ui/readall") { body = UiCall("readall", delegate { return UiReadAll(q); }, 8000); Log("[ui] readall " + target); }
+                // UiCall 第 4 参传 q: 启用按进程隔离的熔断记账 + UIA 应用策略拦截 (P1-2)
+                else if (path == "/ui/tree") { body = UiCall("tree", delegate { return UiTree(q); }, 8000, q); Log("[ui] tree " + target); }
+                // click 预算 8s -> 13s: 内含 verify(500ms) + expect 轮询(默认 2.5s, expect_timeout 最高 7s), 8s 会把轮询掐在半路
+                else if (path == "/ui/click") { body = UiCall("click", delegate { return UiClick(q); }, 13000, q); Log("[ui] click " + target); }
+                else if (path == "/ui/find") { body = UiCall("find", delegate { return UiFind(q); }, 8000, q); Log("[ui] find " + target); }
+                else if (path == "/ui/select") { body = UiCall("select", delegate { return UiSelect(q); }, 8000, q); Log("[ui] select " + target); }
+                else if (path == "/ui/set") { body = UiCall("set", delegate { return UiSet(q); }, 8000, q); Log("[ui] set " + target); }
+                else if (path == "/ui/read") { body = UiCall("read", delegate { return UiRead(q); }, 8000, q); Log("[ui] read " + target); }
+                else if (path == "/ui/readall") { body = UiCall("readall", delegate { return UiReadAll(q); }, 8000, q); Log("[ui] readall " + target); }
+                else if (path == "/wait_for")
+                {
+                    // 等"内容出现/消失"。与 /win/wait(只等窗口出现)互补 —— "结果即证据"的服务端原语:
+                    // Agent 一次调用拿到结论, 不必自己 sleep+轮询把整棵 UIA 树反复灌进上下文。
+                    // 上限 25s 是刻意压的: DSH 侧 MCP toolCallTimeoutMs 现为 30s, 给到 60s 只会让调用先被上游掐死。
+                    int wft = 8000; if (q.ContainsKey("timeout")) { int vwf; if (int.TryParse(q["timeout"], out vwf) && vwf > 0) wft = vwf; }
+                    if (wft > 25000) wft = 25000;
+                    q["timeout"] = wft.ToString();
+                    body = UiCall("wait_for", delegate { return WaitFor(q); }, wft + 4000, q);
+                    Log("[wait_for] " + target + " budget=" + wft + "ms");
+                }
                 else if (path == "/record/start")
                 {
                     int rx = 0, ry = 0, rw = 0, rh = 0, rf = 10;

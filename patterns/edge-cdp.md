@@ -1,0 +1,12 @@
+<!-- 由 SKILL.md 瘦身拆分(2026-09-19): 内容原文逐字搬移未改写。主手册见 ../SKILL.md, 瘦身前全文见 ../SKILL-ARCHIVE-20260919.md -->
+
+## 划词 CDP 直读链 (方案D, 2026-09-11 实装, v0.0.20 已发)
+
+- 原理: Electron 应用带 `--remote-debugging-port` 启动 → helper 按前台进程名查表(MiMo=9222/WorkBuddy=**9229**/ZCode=9224, shot-pick.cs pickCdpApps) → ws 连 page/iframe target evaluate `getSelection` 直读真选区(毫秒级, 零UIA零按键零剪贴板, base64 往返避转义)。空才落回 UIA→剪贴板链。浏览器仍归 Edge 扩展, 终端红线不变。读表达式含三盲区补丁: 输入框走 activeElement.selectionStart、同进程 iframe 走 contentDocument 穿透、空后 80ms 重扫。
+- 启动参数固化在快捷方式(桌面\软件\ + 开始菜单)与 WorkBuddy HKCU Run 键。**自动更新器会重写 Run 键/裸拉起丢参数(实锤)**: 应用更新后划词 Electron 失效 → 先 `curl 127.0.0.1:<port>/json/version` 验口, 丢了补参数重启。
+- `/json/list` 不止 page: ZCode 挂 4 个 worker target(无 getSelection 且可能不回包)。**必须按 "type" 字段过滤**(worker 的 ws 路径同为 /devtools/page/, URL 滤不掉)+350ms 全局预算+失败 target 60s 惩罚缓存。教训: 未过滤时 5 targets 烧 6.6s, pickBusy 锁占死吞光后续双击=成功率腰斩。
+- 双击"一次出一不出"根因(实锤): 09-07"点空白=收起浮元素"规则把双击第一下整口吞掉且不记锚点。修法 dismiss+chain: 收起后该点击照样进双击判定。泛训: 悬浮球交互状态机分支互相咬合, 新规则先问"它吃了谁"。
+- 区域截图热键是候选表先抢先得 `[Win+Shift+A→Ctrl+Shift+S→Win+Shift+S]`(shot-service.cs HotkeyRegister 区), 实例间漂移坑肌肉记忆 → **配置显式钉死 `capture.hotkeyRegion`**(本机 repo+安装目录均已钉 Ctrl+Shift+S)。
+- 发版四件套同步 bump: shot-service.cs `APP_VERSION` 常量 + AssemblyInfo.cs + setup.iss(AppVersion/OutputBaseFilename)。**打包必须走 _pkg 隔离目录**(仓库根 shot-service.json 有真 key, 在仓库根跑 ISCC=泄密; 打包前对 pkg 文件扫 key 串自检)。坑: PS5.1 读无 BOM UTF-8 中文注释 .ps1=引号炸解析(脚本写纯 ASCII); Git Bash 会把 `/VERYSILENT` 路径化成垃圾参数(Inno 弹 GUI, 用 PowerShell Start-Process 传参); Inno6 的 CurStepChanged 必须 procedure 不是 function。
+- 🔴 **CDP 端口必须用 bind 金标准测, 别信 netstat**(2026-09-12 事故): WorkBuddy 原钉 9223, 但 9223 被一个**已死进程(PID 206272)的孤儿 socket** 长期占着 —— netstat 显示 `LISTENING`、tasklist 却查不到那个 PID, 杀不掉。WorkBuddy 每次带 `--remote-debugging-port=9223` 都**静默绑定失败** → CDP 直读 100% 失败(日志 `pick cdp: /json/list fail port=9223 ... (app 没带调试口启动?)`) → 每次拖选都落到剪贴板兜底注入全局 Ctrl+C → **打断用户自己的复制**(老大实测"复制很难成功")。测法: `python -c "import socket;s=socket.socket();s.bind(('127.0.0.1',9223))"`, 报 10048 才是真占用。处置: **换端口**(现用 9229) —— 三处必须同步改: ① `shot-pick.cs` 的 `pickCdpApps` 表 ② 桌面快捷方式 `桌面\软件\WorkBuddy.lnk` 参数 ③ `HKCU\...\Run` 的 `WorkBuddy.WorkBuddy` 值(会被自动更新器重写成裸路径丢掉参数)。
+- 🔴 **剪贴板兜底必须加"CDP 类应用禁注入"硬闸**(2026-09-12 实装): `PickViaClipboard(IntPtr fgAt)` 开头 `if (PickCdpPort(fgAt) != 0) return "";` —— 名单里的 Electron 应用(WorkBuddy/ZCode/MiMo)**绝不注入全局 Ctrl+C、绝不碰修饰键**; CDP 挂了也只放弃取词(日志 `pick: clip chain skipped — CDP app, never inject Ctrl+C`)。配套的"用户正按着修饰键就让路"闸(`PickAnyModifierDown`)单独用**不够**: 实测 12 次兜底只拦 1 次 —— 用户按 Ctrl 的时刻通常比 helper 的检测时机晚, 所以必须有 CDP 类禁注入这道硬闸兜底。
