@@ -94,3 +94,24 @@ string resp = await dl;
 3. 判据：VLM 幻觉的共性是**给出一个像样但完全不相干的英文词组**，且常带「中部/顶部」前缀；对不上字数（本例应为 14 字符）就是幻觉。
 
 **附带坑（DSH 侧）**：`mcp__visionqa__look` 在 DSH 里**三次全 `Request timed out`**（服务 `vision-qa`:8091 与 `visionqa`:8092 都 Running）。`visionqa_mcp.py` 对后端用 `urlopen(timeout=900)`，而质量管线是「强提示词+审查+自审」多轮 VLM → 单张耗时超过**调用方** MCP 超时，客户端先取消，服务端晚回写就炸 `AssertionError: Request already responded to`（`C:\D\opt\vision-qa\visionqa.err.log` 里那串 anyio TaskGroup ExceptionGroup 就是它，**不代表服务挂了**）。处置：探针走 `look_image`；真要用 visionqa 就把调用方 `toolCallTimeoutMs` 提到 ≥120s，或给 `task=text` 关掉审查/自审两遍。
+
+## 探针复测(2026-09-19 WB 轮): 原图直喂的幻觉可能是"错一位数字"，比乱编词组更危险
+
+_记录日期: 2026-09-19 · 应用: ocr_
+
+同一探针图 `C:\D\opt\agents-to-feishu\team-artifacts\probe-ocr.png`（真值 `CTI-PROBE-2026`）再测：
+
+| 喂法 | 结果 | 判定 |
+|---|---|---|
+| `ocr_image`（copy 到截图目录） | `{"ok":true,"chars":14,"text":"CTI-PROBE-2026"}` | ✅ 权威 |
+| `mcp__vision__look_image(task=text)` **原图直喂** | `中部：CTI-PROBE-2023` | ❌ **错末位数字**（2026→2023），前 11 字符全对 |
+| `mcp__cti-builtin__look_image(task=text)` **裁紧+6x LANCZOS** | `CTI-PROBE-2026` | ✅ 与真值逐字一致 |
+
+**本轮新增的关键认知**：上一轮记录的幻觉共性是「给出像样但完全不相干的英文词组」——这条**不完整**。小字幻觉还有第二种形态：**把结构读对、只错一两个字符**（数字/形近字母）。这种答案**看起来极可信**，字数对、前缀对、格式对，光凭"像不像人话"完全判不出来，直接回报老大就是错数据。
+
+**所以判据升级（覆盖旧判据）**：
+1. 对字数只能筛掉乱编型，**筛不掉错字型** → 凡是把图中文字当事实回报，必须有 `ocr_image` 的 `chars` 或第二次独立投票背书，单次 `look_image(task=text)` 结果一律标"未验证"。
+2. 数字/编号/代码/ID 类内容（含年份、流水号、验证码）**必须走 ocr_image 或 6x 预处理**，禁止原图直喂。
+3. 旧姿势仍成立：`look_image(task=text)` 用前先裁紧 + ≥4x LANCZOS，并至少跑 2 次投票。
+
+截图目录铁证：`ocr_image` 只认 `C:\Users\oadan\Pictures\Screenshots\`；放 `C:\D\opt\Screenshots\` 照样 `path outside screenshots dir`（本轮实测，别自己建目录试）。

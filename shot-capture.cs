@@ -3131,6 +3131,13 @@ partial class ShotService
     // 贴图窗 (PixPin 同款): 选区图钉在桌面原位置, 左键拖动 / 滚轮缩放 / 双击关闭 / 右键深色菜单
     class PinForm : Form
     {
+        // ===== 资源台账 (P0-3, 抄 web-access 的"托管资源有人收"): 每个贴图窗都入账 =====
+        // 原则: 只记自己造的垃圾, 绝不按"目录里所有旧文件"扫射 —— 截图目录是你的资产。
+        // 默认**只记账不关窗**(不擅自把你正在看的图关掉); 要自动回收需显式配 gc.pin_ttl_ms。
+        public static readonly Dictionary<IntPtr, DateTime> Ledger = new Dictionary<IntPtr, DateTime>();
+        public static int ClosedCount = 0;   // 自然关闭数(用户双击/菜单关)
+        public static int GcClosedCount = 0; // 被回收器关掉的数量
+
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ReleaseCapture();
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
         readonly Bitmap img;
@@ -3149,6 +3156,13 @@ partial class ShotService
             BackgroundImageLayout = ImageLayout.Stretch;
             DoubleBuffered = true;
             KeyPreview = true;
+            // 句柄到手才入账; 关闭时销账并**主动释放位图**(BackgroundImage 不会被 WinForms 自动 Dispose, 原来会漏 GDI 句柄)
+            this.HandleCreated += delegate { lock (Ledger) { Ledger[this.Handle] = DateTime.Now; } };
+            this.FormClosed += delegate
+            {
+                lock (Ledger) { if (Ledger.Remove(this.Handle)) { } ClosedCount++; }
+                try { BackgroundImage = null; img.Dispose(); } catch { }
+            };
 
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.BackColor = Color.FromArgb(40, 41, 46); menu.ForeColor = DarkUI.Text;

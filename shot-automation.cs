@@ -982,7 +982,38 @@ partial class ShotService
     // 命中 ref 缓存直接复用元素对象, 不再重新遍历, 也就没有"点到隔壁"的可能。
     static Dictionary<string, System.Windows.Automation.AutomationElement> UiRefCache =
         new Dictionary<string, System.Windows.Automation.AutomationElement>();
+    static readonly Dictionary<string, DateTime> UiRefSeen = new Dictionary<string, DateTime>();
     static object UiRefLock = new object();
+    // P0-3: 旧实现这个缓存**只增不减**, 长会话能把整棵 UIA 树常驻内存(每个条目还拽着一个跨进程 RCW)。
+    const long REF_TTL_MS = 15 * 60 * 1000;   // 15 分钟没再碰过的元素引用直接丢
+    const int REF_MAX = 4000;                 // 硬上限, 防单会话无限膨胀
+    static int UiRefTrim()
+    {
+        int dropped = 0;
+        lock (UiRefLock)
+        {
+            DateTime cutoff = DateTime.Now.AddMilliseconds(-REF_TTL_MS);
+            List<string> dead = null;
+            foreach (KeyValuePair<string, DateTime> kv in UiRefSeen)
+            {
+                if (kv.Value < cutoff) { if (dead == null) dead = new List<string>(); dead.Add(kv.Key); }
+            }
+            if (dead != null)
+            {
+                for (int i = 0; i < dead.Count; i++) { UiRefCache.Remove(dead[i]); UiRefSeen.Remove(dead[i]); }
+                dropped = dead.Count;
+            }
+            if (UiRefCache.Count > REF_MAX)
+            {
+                List<KeyValuePair<string, DateTime>> ordered = new List<KeyValuePair<string, DateTime>>(UiRefSeen);
+                ordered.Sort(delegate(KeyValuePair<string, DateTime> x, KeyValuePair<string, DateTime> y) { return x.Value.CompareTo(y.Value); });
+                int need = UiRefCache.Count - REF_MAX;
+                for (int i = 0; i < ordered.Count && need > 0; i++) { UiRefCache.Remove(ordered[i].Key); UiRefSeen.Remove(ordered[i].Key); need--; dropped++; }
+            }
+        }
+        return dropped;
+    }
+    static int UiRefCount { get { lock (UiRefLock) return UiRefCache.Count; } }
 
     static string RefOf(System.Windows.Automation.AutomationElement e)
     {
@@ -994,7 +1025,7 @@ partial class ShotService
                 var sb = new System.Text.StringBuilder();
                 for (int i = 0; i < rid.Length; i++) { if (i > 0) sb.Append('.'); sb.Append(rid[i]); }
                 string r = sb.ToString();
-                lock (UiRefLock) { UiRefCache[r] = e; }
+                lock (UiRefLock) { UiRefCache[r] = e; UiRefSeen[r] = DateTime.Now; }
                 return r;
             }
         }

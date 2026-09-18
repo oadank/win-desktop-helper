@@ -501,9 +501,9 @@ function send(msg) { process.stdout.write(JSON.stringify(msg) + '\n'); }
 // 单位 ms。key = 工具名, 缺省 DEFAULT_TIMEOUT_MS。
 const DEFAULT_TIMEOUT_MS = 30000;
 const TOOL_TIMEOUT = {
-  longshot: 150000,          // 服务端默认 timeout_ms=120000, 留 30s 余量
+  longshot: 200000,          // 上游 DSH 现为 180s(见 ~/.dsh/mcp-servers.json), 桥略大让超时由上游报出; 服务端硬上限 5min, 超 180s 需分段
   ocr_image: 130000,         // 服务端 wait 默认 60000, 大图可传 120000
-  wait_for: 33000,           // 服务端刻意把 timeout 压在 25s: DSH 侧 toolCallTimeoutMs=30s, 桥给更久也只会先被上游掐
+  wait_for: 65000,           // 上游放开到 180s 后, 语义等待可用满服务端 60s 上限
   window_state: 8000,        // 纯 Win32 不该慢, 慢了就是出问题了
   ui_tree: 20000, ui_find: 20000, ui_readall: 20000, ui_read: 20000,
   ui_click: 30000,           // 内含 verify(500ms)+expect 轮询(默认 2.5s, 可传 expect_timeout)
@@ -997,9 +997,13 @@ async function callTool(name, args) {
   if (bad) {
     return { isError: true, severity: 'self_heal', content: [{ type: 'text', text: guideRead ? bad : bad + '\n（另：本服务要求首次操作前先调用 get_skill 读手册，改完参数顺手把它调了）' }] };
   }
-  // 强制闸门：所有工具（含观察类）首次调用前必须先读 SKILL
-  if (!guideRead) {
-    return { isError: true, content: [{ type: 'text', text: '⚠️ 本服务强制要求：首次操作前必须先调用 get_skill（该工具已在工具清单中, 直接调用即可, 无参数）获取 SKILL 操作手册与安全纪律（点前定位 / 语义优先 / 输入前确认前台 / 操作后验证 / 敏感操作确认）。请先调用 get_skill，再重试本工具。踩坑后请用 update_skill 把经验写回共享 SKILL.md。' }] };
+  // 强制闸门：**动手类**工具首次调用前必须先读 SKILL。
+  // 2026-09-19 分级(老大拍板 A 方案): 纯观察工具不再拦 —— 看一眼屏幕不破坏任何东西, 拦它只是逼 agent 先吐 4.8K 字手册。
+  // 仍然拦的: 一切点击/输入/窗口变更; UIA 枚举(ui_tree/ui_find 会物化整棵树, 在 Electron 上真能把服务拖挂, 必须先懂纪律);
+  //          截图与录屏(会落盘产生文件); ui_* 读控件(依赖前置定位纪律, 不放行)。
+  const GATE_EXEMPT = ['active_window', 'list_apps', 'window_info', 'monitors', 'mouse_pos', 'clipboard_get', 'clipboard_history', 'record_status'];
+  if (!guideRead && !GATE_EXEMPT.includes(name)) {
+    return { isError: true, severity: 'self_heal', content: [{ type: 'text', text: '⚠️ 本服务强制要求：动手之前必须先调用 get_skill（无参数, 现在只要 4.8K 字）获取操作手册与安全纪律（点前定位 / 语义优先 / 输入前确认前台 / 操作后验证 / 敏感操作确认）。请先调用 get_skill，再重试本工具。踩坑后用 update_skill 写回，记得带 app=。' }] };
   }
   const u = buildUrl(name, args);
   if (!u) return { isError: true, content: [{ type: 'text', text: 'unknown tool: ' + name + '（不在本服务工具清单里，先 tools/list 核对名字）' }] };

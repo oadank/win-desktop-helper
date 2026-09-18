@@ -53,6 +53,121 @@ public partial class ShotService
     static readonly string LogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shot-service.log");
     static int MySession = Process.GetCurrentProcess().SessionId;
     static int ShotCount = 0;
+
+    // ===== 资源台账与回收 (P0-3, 抄 web-access: 托管资源要有租约/回收, 健康检查要带账本) =====
+    // 边界(刻意保守): ① 截图目录是用户的资产, 本回收器**永不删**里面的文件, 只报数;
+    // ② 贴图窗**默认只记账不关窗** —— 不擅自关掉你正在看的图; 要自动回收须显式传 gc_pin_ttl_ms。
+    static System.Threading.Timer resTimer;
+    static int gcTicks = 0;
+    static int refsDropped = 0;
+    public static long PinTtlMs = 0;
+    static readonly List<string> ownedTempFiles = new List<string>();   // 只登记本服务自己写的中间文件
+    static long ownedTempBytes = 0;
+
+    static void StartResourceGc()
+    {
+        try { resTimer = new System.Threading.Timer(delegate { ResourceTick(); }, null, 20000, 60000); Log("[gc] resource ledger started"); }
+        catch (Exception ex) { Log("[gc] start fail " + ex.Message); }
+    }
+
+    static void ResourceTick()
+    {
+        try
+        {
+            gcTicks++;
+            refsDropped += UiRefTrim();
+            if (PinTtlMs > 0)
+            {
+                List<IntPtr> stale = new List<IntPtr>();
+                lock (PinForm.Ledger)
+                {
+                    foreach (KeyValuePair<IntPtr, DateTime> kv in PinForm.Ledger)
+                        if ((DateTime.Now - kv.Value).TotalMilliseconds > PinTtlMs) stale.Add(kv.Key);
+                }
+                for (int i = 0; i < stale.Count; i++)
+                {
+                    try
+                    {
+                        Control c = Control.FromHandle(stale[i]);
+                        PinForm pf = c as PinForm;
+                        if (pf != null) { pf.Close(); PinForm.GcClosedCount++; }
+                    }
+                    catch (Exception ex) { Log("[gc] close pin fail " + ex.Message); }
+                    lock (PinForm.Ledger) PinForm.Ledger.Remove(stale[i]);
+                }
+            }
+            // 自己造的中间文件超过 30 分钟才删, 且只删登记过的 —— 绝不按目录扫射
+            List<string> doomed = null;
+            lock (ownedTempFiles) { foreach (string f in ownedTempFiles) { try { if ((DateTime.Now - File.GetLastWriteTime(f)).TotalMinutes > 30) { if (doomed == null) doomed = new List<string>(); doomed.Add(f); } } catch { } } }
+            if (doomed != null)
+                for (int i = 0; i < doomed.Count; i++)
+                {
+                    try { ownedTempBytes -= new FileInfo(doomed[i]).Length; File.Delete(doomed[i]); lock (ownedTempFiles) ownedTempFiles.Remove(doomed[i]); }
+                    catch { }
+                }
+        }
+        catch (Exception ex) { Log("[gc] tick err " + ex.Message); }
+    }
+
+    static void OwnTempFile(string path)
+    {
+        try { long len = new FileInfo(path).Length; lock (ownedTempFiles) { ownedTempFiles.Add(path); ownedTempBytes += len; } } catch { }
+    }
+
+    // 供 /health 与 /diag/resources 用的账本
+    static string ResourceLedgerJson(bool detail)
+    {
+        int pins = 0; long oldestSec = 0;
+        try
+        {
+            lock (PinForm.Ledger)
+            {
+                pins = PinForm.Ledger.Count;
+                foreach (KeyValuePair<IntPtr, DateTime> kv in PinForm.Ledger)
+                { long s = (long)(DateTime.Now - kv.Value).TotalSeconds; if (s > oldestSec) oldestSec = s; }
+            }
+        }
+        catch { }
+        int shotFiles = 0; long shotBytes = 0;
+        try
+        {
+            string[] fs = Directory.GetFiles(ShotDir);
+            for (int i = 0; i < fs.Length; i++)
+            {
+                string e = fs[i].ToLowerInvariant();
+                if (e.EndsWith(".png") || e.EndsWith(".jpg") || e.EndsWith(".jpeg")) { shotFiles++; try { shotBytes += new FileInfo(fs[i]).Length; } catch { } }
+            }
+        }
+        catch { }
+        int ffm = 0;
+        try { ffm = System.Diagnostics.Process.GetProcessesByName("ffmpeg").Length; } catch { }
+        string j = "{\"pinnedWindows\":" + pins + ",\"pinOldestSec\":" + oldestSec
+                 + ",\"pinAutoClose\":\"" + (PinTtlMs > 0 ? (PinTtlMs / 1000) + "s" : "off(只记账)") + "\""
+                 + ",\"pinClosedTotal\":" + PinForm.ClosedCount + ",\"pinClosedByGc\":" + PinForm.GcClosedCount
+                 + ",\"uiaRefs\":" + UiRefCount + ",\"refsDropped\":" + refsDropped
+                 + ",\"ownedTempFiles\":" + ownedTempFiles.Count + ",\"ownedTempKB\":" + (ownedTempBytes / 1024)
+                 + ",\"shotDirFiles\":" + shotFiles + ",\"shotDirMB\":" + (shotBytes / (1024 * 1024))
+                 + ",\"shotDirProtected\":true"
+                 + ",\"ffmpegProcesses\":" + ffm + (ffm > 2 ? ",\"ffmpeg_suspect_leak\":true" : "")
+                 + ",\"gcTicks\":" + gcTicks + "}";
+        if (!detail) return j;
+        string pinsDetail = "";
+        try
+        {
+            lock (PinForm.Ledger)
+                foreach (KeyValuePair<IntPtr, DateTime> kv in PinForm.Ledger)
+                {
+                    string sep = pinsDetail == "" ? "" : ",";
+                    pinsDetail += sep + "{\"hwnd\":" + kv.Key.ToInt64() + ",\"ageSec\":" + (long)(DateTime.Now - kv.Value).TotalSeconds + "}";
+                }
+        }
+        catch { }
+        string tf = "";
+        lock (ownedTempFiles) foreach (string f in ownedTempFiles) { string sep = tf == "" ? "" : ","; tf += sep + "\"" + JsonEscape(f) + "\""; }
+        // j 自身已闭合, 明细必须插在它的 } 之前。上一版直接拼尾巴, pinLedger 掉到 detail 外面,
+        // 按 .detail.pinLedger 读就是空数组 —— 我当场被这个假空值骗了一次, 误判成"登记没生效"。
+        return j.Substring(0, j.Length - 1) + ",\"pinLedger\":[" + pinsDetail + "],\"ownedTempList\":[" + tf + "]}";
+    }
     static DateTime StartTime = DateTime.Now;
     static NotifyIcon TrayIcon;
 
@@ -1866,7 +1981,16 @@ public partial class ShotService
                            ",\"logPath\":\"" + JsonEscape(LogPath) + "\"" +
                            ",\"uia\":{\"leakedTotal\":" + uiaLeakedTotal + ",\"globalFused\":" + (uiaLeakedTotal >= LEAK_LIMIT_TOTAL ? "true" : "false") +
                            ",\"limitPerProcess\":" + LEAK_LIMIT_PER_PROC + ",\"banned\":\"" + JsonEscape(string.Join(",", new List<string>(UiaBan.Keys).ToArray())) + "\"}" +
+                           ",\"res\":" + ResourceLedgerJson(false) +
                            "}";
+                    // 回收器挂在首次 /health 上启动(省掉一处 Main 改动; /health 必然是 agent 最先打的端点之一)
+                    if (resTimer == null) StartResourceGc();
+                }
+                else if (path == "/diag/resources")
+                {
+                    // 明细账本: 每个贴图窗多久了、本服务登记了哪些自造中间文件
+                    if (q.ContainsKey("gc_pin_ttl_ms")) { long vttl; if (long.TryParse(q["gc_pin_ttl_ms"], out vttl) && vttl >= 0) PinTtlMs = vttl; }
+                    body = "{\"ok\":true,\"pid\":" + Process.GetCurrentProcess().Id + ",\"detail\":" + ResourceLedgerJson(true) + "}";
                 }
                 else if (path == "/taskbar-volume")
                 {
@@ -2345,9 +2469,9 @@ public partial class ShotService
                 {
                     // 等"内容出现/消失"。与 /win/wait(只等窗口出现)互补 —— "结果即证据"的服务端原语:
                     // Agent 一次调用拿到结论, 不必自己 sleep+轮询把整棵 UIA 树反复灌进上下文。
-                    // 上限 25s 是刻意压的: DSH 侧 MCP toolCallTimeoutMs 现为 30s, 给到 60s 只会让调用先被上游掐死。
+                    // 上限 60s 与服务端内部硬上限一致; 上游 DSH 现为 180s(~/.dsh/mcp-servers.json 2026-09-19 由 30s 放开), 足够跑满。
                     int wft = 8000; if (q.ContainsKey("timeout")) { int vwf; if (int.TryParse(q["timeout"], out vwf) && vwf > 0) wft = vwf; }
-                    if (wft > 25000) wft = 25000;
+                    if (wft > 60000) wft = 60000;
                     q["timeout"] = wft.ToString();
                     body = UiCall("wait_for", delegate { return WaitFor(q); }, wft + 4000, q);
                     Log("[wait_for] " + target + " budget=" + wft + "ms");
