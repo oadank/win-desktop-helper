@@ -3,7 +3,7 @@
 [Setup]
 AppId={{FE6F68E9-0CEB-450B-B438-49BFDF5FFB15}
 AppName=Win Desktop Helper
-AppVersion=0.0.22
+AppVersion=0.0.23
 AppPublisher=oadank
 AppPublisherURL=https://github.com/oadank/win-desktop-helper
 DefaultDirName={localappdata}\Programs\win-desktop-helper
@@ -12,7 +12,7 @@ UninstallDisplayIcon={app}\icon.ico
 Compression=lzma2
 SolidCompression=yes
 OutputDir=release
-OutputBaseFilename=win-desktop-helper-setup-0.0.22
+OutputBaseFilename=win-desktop-helper-setup-0.0.23
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -73,10 +73,13 @@ var
 begin
   ExePath := ExpandConstant('{app}') + '\shot-service.exe';
   User := ExpandConstant('{username}');
-  // /rl highest 必须有: shot-service.exe 的清单是 requireAdministrator, 任务不勾"最高权限"时
-  // schtasks /Run 直接返回 ERROR_ELEVATION_REQUIRED(0x800702E4) —— 任务永远拉不起来(2026-09-12 实测定位)
+  // /rl highest 必须有: 任务不带"最高权限"时, schtasks /Run 直接返回
+  // ERROR_ELEVATION_REQUIRED(0x800702E4) —— 任务永远拉不起来(2026-09-12 实测定位)
+  // 🔴 2026-09-18 修: 原为 /sc once /st 00:00 —— 那是一次性触发器且时间早已过去,
+  //    XML 里落成过期的 TimeTrigger ⇒ 装完永不自动启动(本机 dsh-shot-helper 就是这个症状)。
+  //    必须用 /sc onlogon: 登录时拉起, 服务常驻不动。
   Result := Exec('schtasks.exe',
-    '/create /tn "dsh-shot-helper" /tr "' + ExePath + '" /sc once /st 00:00 /it /rl highest /ru "' + User + '" /f',
+    '/create /tn "dsh-shot-helper" /tr "' + ExePath + '" /sc onlogon /it /rl highest /ru "' + User + '" /f',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
