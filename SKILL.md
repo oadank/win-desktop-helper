@@ -429,6 +429,12 @@ Electron 的 contenteditable 组件在 UIA 里就暴露成 `Edit`，**rect 零�
 
 **UIA 不可用**：`ui_tree` / `ui_find` / `ui_click` 对 WorkBuddy 主窗口（Electron 大 DOM）**全部 8s 超时**（`UIA timeout 8000ms - 疑似大DOM`）。→ 老实走截图 + 坐标，别反复试 UIA 浪费轮次。
 
+🔴 **连 `ui_find(name=...)` 也会把整个服务熔断**（2026-09-18 08:09 实测）：在 WorkBuddy 上跑一次 `ui_find(hwnd=..., name="描述任务")` 就返回 `UIA fused: 3 leaked worker threads (大DOM 超时不可杀)`，**此后所有 `/ui/*` 一律拒绝**（不是单窗口失效，是全服务级熔断；泄漏线程杀不掉，只能重启）。
+修复：`taskkill /F /IM shot-service.exe` → `schtasks /run /tn WinDesktopHelper` → `curl 127.0.0.1:18800/health` 看到新 pid + `elevated:true` 即恢复（实测 5 秒内起来）。
+**结论：WorkBuddy 主窗口上任何 `/ui/*` 都不要调，一次都别试。**
+
+补充实测（2026-09-18 08:1x）：MiMo 客户端**可以**用 `ui_find(type="Edit")` 拿输入框精确 rect（见 D7），但那是熔断之前的事；熔断当场就再也用不了。所以给 Electron 客户端贴长文时，**优先一次就用 ui_find 拿准 rect，别先试错**。
+
 **左侧导航（竖排；面板一滚动坐标就漂，每次先截图确认）**：
 ```
 WorkBuddy 5.5.6                                  ← 面板标题
