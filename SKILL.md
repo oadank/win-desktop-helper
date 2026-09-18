@@ -188,9 +188,9 @@
 > 改完 .cs 让它生效，必须走完这一串；顺序错一步就静默失败。
 
 1. **先查真实运行路径，别以为只有一份**
-   - `Get-Process shot-service | Select-Object Path,SessionId` + `schtasks /query /tn dsh-shot-helper /xml`
-   - **2026-09-18 实测现状**：两个启动器任务（`dsh-shot-helper` / `WinDesktopHelper`）**都指向 AppData** `C:\Users\oadan\AppData\Local\Programs\win-desktop-helper\shot-service.exe`；实际跑的进程路径 = AppData，`elevated:true` + `session:1`。
-     ⚠️ 旧述「真正跑的是仓库根、AppData 只是引导器」**已过时** —— 那是双任务指向不同副本时期的说法，两者现已统一指向 AppData。
+   - `Get-Process shot-service | Select-Object Path,SessionId` + `schtasks /query /tn WinDesktopHelper /xml`
+   - **2026-09-18 实测现状**：`HKCU\...\Run\shot-service` 与计划任务 `WinDesktopHelper` **都指向 AppData** `C:\Users\oadan\AppData\Local\Programs\win-desktop-helper\shot-service.exe`；实际跑的进程路径 = AppData，`elevated:true` + `session:1`。
+     ⚠️ 旧述「真正跑的是仓库根、AppData 只是引导器」**已过时** —— 那是双任务指向不同副本时期的说法，现已统一。
    - **改完 copy 到两个位置**（仓库根 + AppData），两份保持同 md5。
 2. **先停进程**：`Stop-Process -Name shot-service -Force`
    - 不停 = exe 被运行中的进程锁住 = csc 报 `CS0016 无法写入输出文件`；不捕获编译输出就会误判成"脚本没执行"（本次就栽在这，白折腾半小时）。
@@ -291,23 +291,18 @@ schtasks /Run /TN wdh_build_once
 
 **其余不变**：改前先停进程（`Stop-Process -Name shot-service -Force`，否则 exe 被锁 → CS0016）；直接调 csc 会被安全策略拦（"compiles arbitrary C# code"）是预期的，别浪费时间；装完记得清理临时 cmd 与计划任务。
 
-## 🔴 安装器建自启任务：`/sc once /st 00:00` = 任务永不触发（2026-09-18 定位并修复，v0.0.23）
+## 自启机制（2026-09-18 定稿）
 
-`setup.iss` 的 `CreateHelperTask()` 旧写法：
-```
-schtasks /create /tn "dsh-shot-helper" /tr "<exe>" /sc once /st 00:00 /it /rl highest /ru "<user>" /f
-```
-**`/sc once` 是一次性触发，`/st 00:00` 那个时刻早过了 → 任务永远不会自己跑**。schtasks 自己都会警告：「因为 /ST 早于当前的时间，任务可能无法运行」。
-后果：**任何机器装完这个包，服务都不会自动启动** —— 能装上、起不来，自助更新装了新版也白装（等于废掉「其他电脑自动更新」）。
+**就两条，都在，不需要安装器建计划任务**：
 
-正确写法（实测生成 `LogonTrigger` + `RunLevel=HighestAvailable`）：
-```
-schtasks /create /tn "dsh-shot-helper" /tr "<exe>" /sc onlogon /it /rl highest /ru "<user>" /f
-```
+| # | 机制 | 谁写的 | 说明 |
+|---|---|---|---|
+| ① | `HKCU\...\Run\shot-service` | 安装器 `[Registry]` 段（`Tasks: autostart`，默认勾选） | 登录时拉起；普通权限实例自己走 schtasks 提权接手 |
+| ② | 计划任务 `WinDesktopHelper` | **程序自注册**（源码 `TaskCreate`：`/sc ONLOGON /rl HIGHEST`） | 提权常驻。`/RL HIGHEST` 不能少 —— 缺了 `/Run` 直接返回 `0x800702E4` ERROR_ELEVATION_REQUIRED |
 
-**为什么长期没被发现**：`shot-service.exe` 源码里还硬编码注册了第二个任务 `WinDesktopHelper`（带 HighestAvailable、指向正确）—— **两个任务干同一件事，一个坏一个好，坏的躺着没人发现**。现已统一：两个任务都指向 AppData 同一份 exe，消除两份 exe 互抢端口的隐患。
+**重启/拉起就用**：`schtasks /run /tn WinDesktopHelper` → `curl 127.0.0.1:18800/health` 看 `elevated:true` + `session:1`。
 
-> 对照实测（2026-09-18）：`/rl highest` 本身工作正常，两种写法都生成 `RunLevel=HighestAvailable` —— **病根只有 `/sc once` 一条**。本机那台 `dsh-shot-helper` 之所以**还额外缺** RunLevel，是因为它是更早版本安装器建的（那时参数里没有 `/rl highest`）；缺了它 `schtasks /Run` 直接返回 `0x800702E4` ERROR_ELEVATION_REQUIRED。
+> **历史（已终结，别再引入）**：安装器曾创建第三个任务 `dsh-shot-helper`，与 ② 职责完全重复，且旧参数 `/sc once /st 00:00` 是一次性且时刻已过的触发器 ⇒ **永不启动**（schtasks 自己都警告「/ST 早于当前的时间」）。**2026-09-18 起该任务已从本机删除，`setup.iss` 的 `CreateHelperTask()` 也一并移除** —— 安装器不再创建任何计划任务。
 
 ## 🔴纠正: 账号菜单行数一直不变——是我截图裁掉了顶部(2026-09-17 老大纠正)
 

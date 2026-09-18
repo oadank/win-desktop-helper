@@ -63,28 +63,15 @@ begin
   Result := '';
 end;
 
-// 计划任务: schtasks.exe 直调(Unicode)，路径/用户名用 ExpandConstant 展开。
-// 旧写法 cmd /c schtasks ... /ru {username}：中文账号(如 阿丹)会被 cmd OEM 码页解成乱码。
-function CreateHelperTask(): Boolean;
-var
-  ResultCode: Integer;
-  ExePath: String;
-  User: String;
-begin
-  ExePath := ExpandConstant('{app}') + '\shot-service.exe';
-  User := ExpandConstant('{username}');
-  // /rl highest 必须有: 任务不带"最高权限"时, schtasks /Run 直接返回
-  // ERROR_ELEVATION_REQUIRED(0x800702E4) —— 任务永远拉不起来(2026-09-12 实测定位)
-  // 🔴 2026-09-18 修: 原为 /sc once /st 00:00 —— 那是一次性触发器且时间早已过去,
-  //    XML 里落成过期的 TimeTrigger ⇒ 装完永不自动启动(本机 dsh-shot-helper 就是这个症状)。
-  //    必须用 /sc onlogon: 登录时拉起, 服务常驻不动。
-  Result := Exec('schtasks.exe',
-    '/create /tn "dsh-shot-helper" /tr "' + ExePath + '" /sc onlogon /it /rl highest /ru "' + User + '" /f',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-end;
+// 计划任务: 安装器不再创建任何任务。
+// 自启由两条机制负责, 都不需要安装器介入:
+//   ① [Registry] 段的 HKCU\...\Run\shot-service
+//   ② 程序自注册的 WinDesktopHelper (源码 TaskCreate: /sc ONLOGON /rl HIGHEST)
+// 历史: 安装器曾创建 dsh-shot-helper —— 与 ② 职责完全重复, 且旧参数
+//   (/sc once /st 00:00) 是一次性且时刻已过的触发器 ⇒ 永不启动。2026-09-18 起
+//   本机任务已删除, 安装器也不再创建。
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssPostInstall then
-    CreateHelperTask();
+  // 保留回调(预留). 这里过去调 CreateHelperTask(), 已移除.
 end;
