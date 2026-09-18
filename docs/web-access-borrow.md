@@ -151,3 +151,25 @@
 
 1. **B3 单实例仲裁**：初判"缺口"，翻源码 `shot-service.cs:2717-2748` 后确认**已有且比它讲究**（普通实例不接管管理员实例），已就地标注，不列入改造。
 2. **C6 手册抽取能力**：初判"我们有 `topic=`，持平"，**判错**。`topic=` 无命中回退整份全文 + 闸门每轮重置，实际比它的 `match-site.mjs` 差一档，已提到 P1-1。
+
+---
+
+## 实施状态（2026-09-19 第 3 轮收尾，全部结论均为实测）
+
+| 项 | 状态 | 实测证据 |
+|---|---|---|
+| P0-1 超时链路对齐 | 🟡 桥侧完成，**上游未对齐** | 桥按工具单配预算(长截图150s/OCR130s)已生效；但 `C:\Users\oadan\.dsh\mcp-servers.json` 的 `toolCallTimeoutMs` 仍是 30000 —— 经 DSH 调用长活**仍会被上游掐断**。改它需重启 dsh-web(会断当前会话)，待老大点头。故 wait_for 的 timeout 刻意压在 25s。 |
+| P0-2a 未知参数硬错 | ✅ 完成 | `textz` → '未知参数，你是不是想写 "text"'；另缺必填/类型错全在发出前拦下 |
+| P0-2b 工具清单单一真源 | ❌ 未动 | C# 内嵌 `McpToolsJson`(~33 工具, 疑似 JSON 已坏)仍是第二真源，双路径别名 `maximize→max` 仍在 |
+| P0-3 资源租约与回收 | ❌ 未动 | 贴图窗/临时截图/ffmpeg 子进程/UiRefCache 驱逐/`/health` 资源账本 全无 |
+| P0-4 就绪轮询 + wait_for + window_state | ✅ 完成并上线 | 正向 `回收站` 84ms/1采样；负向 1625ms/**4采样**；不带定位 14ms 拒(旧版 7s 超时+白烧线程)；测后 `uia.leakedTotal=0` |
+| P1-1 手册瘦身 + 按应用拆册 + uiPolicy 进服务端 | ✅ 完成 | 主手册 43,535→4,736 字；get_skill 默认 42,912→**4,803 字(降 88.8%)**；13 个分片；update_skill 支持 app/supersedes/体积守卫；UiaBan 使 WorkBuddy **13ms** 拦下 |
+| P1-2 熔断按进程隔离 | ✅ 完成(部分) | 按进程 2 次上限 + 全局 8 兜底已实测；**线程池上限**未做(每连接一线程) |
+| P1-3 OCR 坐标/暴露 find_text | ❌ 未动 | |
+| P2 端口鉴权 / 明文 key / 危险动作闸门 / 结构化观测 / 环境自检 | ❌ 未动 | 仅 `/health` 提前给出了 logPath/exePath/uia 账本 |
+
+**本轮追加实测推翻的旧结论(已同步进 openmem pinned 种子)**：① "get_skill 闸门每轮重置" 错，实为每会话一次；② "csc 被安全策略拦，必须 explorer.exe 绕道" 错，pwsh 内直接编译 exit=0；③ 计划任务真名 `WinDesktopHelper`，非 `dsh-shot-helper`。
+
+**下一步顺序**：P0-2b 单一真源 → P0-3 资源租约 → 与老大确认是否改 DSH `toolCallTimeoutMs` 并择机重启 → P1-3 OCR → P2。
+
+git: `3a49cd3`(瘦身前快照) → `c88818b` → `2a8600f`；回退分支 `pre-refactor-20260919`；运行目录留 `shot-service.exe.bak-<时间戳>`。
