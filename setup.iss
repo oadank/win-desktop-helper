@@ -29,6 +29,8 @@ Name: "autostart"; Description: "开机自动启动（托盘常驻）"; GroupDes
 Source: "shot-service.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "mcp-bridge.js"; DestDir: "{app}"; Flags: ignoreversion
 Source: "SKILL.md"; DestDir: "{app}"; Flags: ignoreversion
+; [2026-09-22] 随包带"工具合并对照册"：主手册顶部的指路会引到它，不带的话新装环境按旧工具名调用必报 unknown tool
+Source: "patterns\tool-merge-20260922.md"; DestDir: "{app}\patterns"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion

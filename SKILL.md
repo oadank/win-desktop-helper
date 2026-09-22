@@ -5,6 +5,26 @@
 > 2. 踩了坑**必须** `update_skill` 写回，不许只记在自己记忆里 —— 写的时候带 `app=WorkBuddy` 这类归属，落到对应小册子，别往本文件堆。
 > 3. 别拿瞎猜的 `topic=` 关键字抽段（无命中会把整份吐回来）。想精准取内容：`read` 对应小册子文件，路径见下面索引表。
 
+## ⚠️ 2026-09-22 工具已合并：42 个 → 12 个（带 action 参数）
+
+本手册正文里的旧工具名（`list_apps`/`window_state`/`ui_click`/`mouse_click`/`screen_capture`…）**已不存在**，一律换成新工具名 + `action` 调用，否则报 `unknown tool/action`。
+完整对照表与调用示例：`get_skill(app=tool-merge-20260922)`，或直接读 `patterns/tool-merge-20260922.md`。
+
+| 新工具 | action 取值 |
+|---|---|
+| `window` | active / list / info / monitors / state / manage（manage 里再带 verb/pos/…） |
+| `mouse` | move / click / down / up / drag / pos / scroll |
+| `keyboard` | type / press / hold |
+| `clipboard` | get / set / history |
+| `capture` | shot / longshot / pin / ocr |
+| `ui` | tree / find / click / read / readall / set / select |
+| `record` | start / stop / status |
+| `app` | run / runas / restore / tray |
+| `desk_skill` | get / update（原 get_skill / update_skill） |
+| `wait_for` / `pick_config` / `taskbar_volume` | 单动作，action 可省 |
+
+闸门按 **(工具, action)** 判只读：`window(state/list/info/active/monitors)`、`mouse(pos)`、`clipboard(get/history)`、`record(status)`、`desk_skill(get)` 免读手册；其余动手类必须先 `desk_skill(action="get")`。
+
 ## 黄金路径：先判应用类型，再选方案
 
 ```
