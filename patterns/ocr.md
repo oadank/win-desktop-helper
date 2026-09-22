@@ -115,3 +115,25 @@ _记录日期: 2026-09-19 · 应用: ocr_
 3. 旧姿势仍成立：`look_image(task=text)` 用前先裁紧 + ≥4x LANCZOS，并至少跑 2 次投票。
 
 截图目录铁证：`ocr_image` 只认 `C:\Users\oadan\Pictures\Screenshots\`；放 `C:\D\opt\Screenshots\` 照样 `path outside screenshots dir`（本轮实测，别自己建目录试）。
+
+## 探针三测(2026-09-19 MiMo 轮): 原图直喂是"掷骰子"，会偶发读对 —— 比稳定错更危险
+
+_记录日期: 2026-09-19 · 应用: ocr_
+
+同一探针图 `C:\D\opt\agents-to-feishu\team-artifacts\probe-ocr.png`（真值 `CTI-PROBE-2026`，14 字符）第三轮复测：
+
+| 喂法 | 入口 | 结果 |
+|---|---|---|
+| `ocr_image`（copy 到 `C:\Users\oadan\Pictures\Screenshots\`，用完删） | win-desktop-helper | `{"ok":true,"chars":14,"text":"CTI-PROBE-2026"}` ✅ |
+| **裁紧+6x LANCZOS** 后 `look_image(task=text)` | cti-builtin | `CTI-PROBE-2026` ✅（累计连续 4 次稳定读对） |
+| **原图直喂** `look_image(task=text)` | cti-builtin | `CTI-PROBE-2026` ⚠️ **本次居然读对了** |
+
+**关键修正（推翻前两轮的隐含假设）**：原图直喂**不是稳定错**。同一张图、同一工具、同一参数，三轮观测到三种结果 —— 4 次全乱编 / 错末位一位数字 / 一次全对。这不是矛盾，是**采样随机性**。
+
+**为什么这条最重要**：稳定错的工具会被立刻弃用；偶发读对的工具会被信任，然后在下一次把错数据当事实交出去。"刚试过是准的" **不构成**下次可直接原图直喂的理由。
+
+**所以把"读对了"当证据前，先确认它属于下面哪一种**：
+1. 有 `ocr_image` 的 `chars` 对得上 → 可信；
+2. 跨喂法 **≥2 次独立投票一致**（直喂 + 6x 放大；两次同入口重复不算独立）→ 可信；
+3. 只有一次单读，无论多有把握 → 标"未验证"，禁止写进结论或回报老大。数字/编号/年份/ID/验证码类**必须**走 1 或 2。
+
