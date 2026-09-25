@@ -16,6 +16,29 @@ let guideRead = false; // 强制闸门: 首次操作前必须先读 get_skill
 // 工具定义（名称/说明/参数 —— 与 HTTP API 一一对应）
 const TOOLS = [
   {
+    "name": "cdp",
+    "description": "Chromium/Electron 桌面应用「界面元素直读」(走它自带的远程调试端口 CDP)——不截图不 OCR，直接拿到按钮的名字/class/矩形，毫秒级。action=scan 扫哪些应用开了通道；targets 列某端口的页面；elements 出一张元素表(穿透影子根 shadowRoot —— WorkBuddy 的「Buddy加油站」菜单就在影子根里，普通查询只读到空字符串，这才是过去只能靠 OCR 的真原因)；eval 跑自定义只读 JS；click 页面内合成点击(需 allowClick=1)。本机已知端口: 9223=WorkBuddy, 9222=MiMo 桌面端。🔴 分工铁律: 读一切用本工具；**开外部浮层(账号菜单之类)必须用 mouse 工具真点物理坐标**，合成事件打不开它。坐标换算: 屏幕 = 窗口原点 + 页面坐标 × dpr(返回值带 dpr，配合 window 工具取窗口原点)。",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": { "type": "string", "description": "scan|targets|elements|eval|click" },
+        "port": { "type": "number", "description": "调试端口(9223=WorkBuddy)；scan 可省略" },
+        "target": { "type": "number", "description": "第几个 page(默认 0；应用开多窗时先 targets 看清)" },
+        "match": { "type": "string", "description": "elements 用：只回名字含这段文字的元素(子串，不区分大小写)" },
+        "selector": { "type": "string", "description": "elements 用：CSS 选择器收窄(如 .fuel-btn)" },
+        "expr": { "type": "string", "description": "eval 用：JS 表达式，回结构化值(默认只读，含写特征需 allowWrite=1)" },
+        "x": { "type": "number", "description": "click 用：页面坐标(非屏幕坐标)" },
+        "y": { "type": "number", "description": "click 用：页面坐标" },
+        "limit": { "type": "number", "description": "elements 最多回几条(默认 60，防炸上下文)" },
+        "timeout": { "type": "number", "description": "毫秒，默认 8000，上限 25000" },
+        "allowWrite": { "type": "number", "description": "eval 跑含写特征的 JS 时必须 1" },
+        "allowClick": { "type": "number", "description": "click 时必须 1" }
+      },
+      "required": ["action"]
+    }
+  },
+  {
     "name": "window",
     "description": "窗口观察与管理总入口。action=active 取当前前台窗口{title,process,rect}；list 列全部可见窗口(hwnd/pid/process/title/front/rect, Z序)；info 按 title/process 查窗口；monitors 列显示器；state 读窗口真实状态(visible/minimized/maximized/foreground/responsive/rect, 零副作用, Electron 冻结窗也能回)；manage 做窗口操作(置前/最大化/最小化/还原/关闭/移动/半屏贴靠/等窗口出现)。定位永远先 list/info/state 再动手, 模糊匹配会误伤(建议带 process)。",
     "inputSchema": {
@@ -599,7 +622,7 @@ function httpGet(url, timeoutMs) {
 }
 
 // ===== 2026-09-22 工具合并层(42 -> 12): action -> 旧工具名, 旧映射整体保留在 buildUrlLegacy =====
-const DEFAULT_ACTION = { wait_for: 'wait', pick_config: 'get', taskbar_volume: 'get' };
+const DEFAULT_ACTION = { wait_for: 'wait', pick_config: 'get', taskbar_volume: 'get', cdp: 'targets' };
 const MERGE = {
   window: { active: 'active_window', list: 'list_apps', info: 'window_info', monitors: 'monitors', state: 'window_state', manage: 'win_manage' },
   mouse: { move: 'mouse_move', click: 'mouse_click', down: 'mouse_down', up: 'mouse_up', drag: 'mouse_drag', pos: 'mouse_pos', scroll: 'mouse_scroll' },
@@ -1103,11 +1126,115 @@ async function callTool(name, args) {
     if (n === 'clipboard') return act === 'get' || act === 'history';
     if (n === 'record') return act === 'status';
     if (n === 'desk_skill') return act === 'get';
+    if (n === 'cdp') return ['scan', 'targets', 'elements', 'eval'].includes(act);   // click 不放行：真改界面
     if (n === 'pick_config' || n === 'taskbar_volume') return true;
     return false;   // capture/ui/keyboard/app 一律先读手册
   };
   if (!guideRead && !isReadOnlyCall(name, args)) {
     return { isError: true, severity: 'self_heal', content: [{ type: 'text', text: '⚠️ 本服务强制要求：动手之前必须先调用 desk_skill(action="get")（无参数, 现在只要 4.8K 字）获取操作手册与安全纪律（点前定位 / 语义优先 / 输入前确认前台 / 操作后验证 / 敏感操作确认）。请先调用 desk_skill(action="get")，再重试本工具。踩坑后用 update_skill 写回，记得带 app=。' }] };
+  }
+// ===== cdp: Chromium/Electron 界面元素直读（不截图不 OCR，走应用自带的远程调试端口） =====
+  if (name === 'cdp') {
+    const a = args || {};
+    const act = String(a.action || 'targets');
+    const tmo = Math.min(25000, Math.max(1000, Number(a.timeout) || 8000));
+    const wrap = (o) => ({ content: [{ type: 'text', text: typeof o === 'string' ? o : JSON.stringify(o) }] });
+    const bad = (m, sev) => ({ isError: true, severity: sev || 'self_heal', content: [{ type: 'text', text: m }] });
+    const cdpCmd = (wsUrl, method, params) => new Promise((res, rej) => {
+      let ws; try { ws = new WebSocket(wsUrl); } catch (e) { return rej(e); }
+      let done = false;
+      const fin = (fn, arg) => { if (done) return; done = true; clearTimeout(t); try { ws.close(); } catch (e) {} fn(arg); };
+      const t = setTimeout(() => fin(rej, new Error('CDP 无回包(' + tmo + 'ms) —— 若你刚发过 Runtime.enable，事件流会淹掉回包；换 target 再试')), tmo);
+      ws.onopen = () => { try { ws.send(JSON.stringify({ id: 1, method, params: params || {} })); } catch (e) { fin(rej, e); } };
+      ws.onmessage = (ev) => { let m; try { m = JSON.parse(String(ev.data)); } catch (e) { return; }
+        if (m.id !== 1) return;
+        if (m.error) return fin(rej, new Error(method + ': ' + (m.error.message || JSON.stringify(m.error))));
+        fin(res, m.result); };
+      ws.onerror = (e) => fin(rej, new Error('WebSocket 错误: ' + ((e && e.message) || '连不上该端口')));
+    });
+    const evalIn = async (p, idx, expr) => {
+      const list = await httpGet('http://127.0.0.1:' + p + '/json', tmo);
+      const pages = (Array.isArray(list) ? list : []).filter((x) => x && x.webSocketDebuggerUrl && x.type === 'page');
+      if (!pages.length) throw new Error('端口 ' + p + ' 上没有可调试页面（应用没开远程调试端口，或只有扩展后台页）');
+      const one = pages[Math.max(0, Math.min(pages.length - 1, Number(idx) || 0))];
+      const r = await cdpCmd(one.webSocketDebuggerUrl, 'Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
+      if (r && r.exceptionDetails) throw new Error('页面 JS 抛错: ' + ((r.exceptionDetails.exception && r.exceptionDetails.exception.message) || r.exceptionDetails.text));
+      return { value: r && r.result ? r.result.value : null, pages: pages.length, page: (one.title || one.url || '').slice(0, 60) };
+    };
+    try {
+      if (act === 'scan') {
+        const cand = [9222, 9223, 9224, 9225, 9229, 9333, 21222, 5500];
+        const found = [];
+        const one = async (p) => { try { const v = await httpGet('http://127.0.0.1:' + p + '/json/version', 1500);
+          const l = await httpGet('http://127.0.0.1:' + p + '/json', 1500);
+          found.push({ port: p, browser: v.Browser || v.product || '', pages: (Array.isArray(l) ? l : []).filter((x) => x && x.type === 'page').length }); } catch (e) {} };
+        await Promise.all(cand.map(one));
+        return wrap({ ok: true, listening: found, hint: found.length ? '对其中某个端口用 action=elements 出元素表' : '没扫到开调试端口的应用；已知: WorkBuddy=9223, MiMo 桌面端=9222' });
+      }
+      if (!Number(a.port)) return bad('cdp action=' + act + ' 需要 port（如 9223=WorkBuddy）。不知道哪个端口就先 action=scan 扫一遍。');
+      if (act === 'targets') {
+        const l = await httpGet('http://127.0.0.1:' + a.port + '/json', tmo);
+        return wrap({ ok: true, port: Number(a.port), pages: (Array.isArray(l) ? l : []).map((x, i) => ({ i, type: x.type, title: (x.title || '').slice(0, 60), url: (x.url || '').slice(0, 80) })) });
+      }
+      if (act === 'elements' || act === 'eval') {
+        const preset = act === 'elements';
+        const limit = Math.min(300, Math.max(5, Number(a.limit) || 60));
+        let expr;
+        if (preset) {
+          const mt = JSON.stringify(String(a.match || '')); const sl = JSON.stringify(String(a.selector || ''));
+          expr = "(() => { const dpr = devicePixelRatio || 1, mt = " + mt + ".toLowerCase(), sel = " + sl + "; const out = []; const seen = new Set();" +
+            " const walk = (root, d) => { if (!root || !root.querySelectorAll || d > 9) return; for (const e of root.querySelectorAll(sel || '*')) {" +
+            " const r = e.getBoundingClientRect(); if (r.width > 3 && r.height > 3) {" +
+            " const own = [...e.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent.trim()).join(' ');" +
+            " const nm = (own || e.getAttribute('aria-label') || e.getAttribute('title') || '').trim().replace(/\\s+/g,' ');" +
+            " const cls = String((e.className && e.className.baseVal !== undefined) ? e.className.baseVal : (e.className || ''));" +
+            " const label = nm || (/^(path|use|svg|img)$/i.test(e.tagName) ? cls.slice(0,24) : '');" +
+            " const k = label + '|' + cls + '|' + Math.round(r.x) + ',' + Math.round(r.y);" +
+            " if (label && label.length <= 40 && !seen.has(k)) { seen.add(k);" +
+            " if (!mt || label.toLowerCase().indexOf(mt) >= 0 || cls.toLowerCase().indexOf(mt) >= 0) {" +
+            " out.push({ name: label, tag: e.tagName + (e.getAttribute('role') ? '[role=' + e.getAttribute('role') + ']' : ''), cls: cls.slice(0,36)," +
+            " x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)," +
+            " px: Math.round((r.x + r.width/2) * dpr), py: Math.round((r.y + r.height/2) * dpr) }); if (out.length > " + limit + ") return; } } }" +
+            " if (e.shadowRoot) walk(e.shadowRoot, d + 1); } }; walk(document, 0);" +
+            " return JSON.stringify({ dpr: dpr, viewport: innerWidth + 'x' + innerHeight, count: out.length, items: out.slice(0, " + limit + ") }); })()"
+        } else {
+          expr = String(a.expr || '');
+          if (!expr.trim()) return bad('action=eval 需要 expr（一段 JS 表达式，要 return 值就写成 (() => {...})() 形式）。');
+          const WRITE = /(dispatchEvent|\.click\s*\(|innerHTML|outerHTML|insertAdjacent|removeChild|appendChild|localStorage|sessionStorage|document\.cookie|location\s*=|location\.(assign|replace|reload)|fetch\s*\(|XMLHttpRequest|new WebSocket|Runtime\.enable|Page\.navigate|Input\.dispatch|Network\.|Target\.|document\.write|\.submit\s*\(|\.focus\s*\(|execCommand|navigator\.(clipboard|permissions|geolocation)|window\.open|eval\s*\(|new Function)/i;
+          if (WRITE.test(expr) && Number(a.allowWrite) !== 1) {
+            return bad('🔴 这段 JS 含**改界面/发请求**的特征，默认拦下（cdp 能执行任意 JS = 能改这个应用的一切）。' +
+              '确认要跑就带 allowWrite=1 重试；只是想看界面就改用 action=elements，或把 expr 换成只读查询（读 rect / innerText / class）。', 'need_user');
+          }
+        }
+        const r = await evalIn(Number(a.port), a.target, expr);
+        let v = r.value;
+        if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) {} }
+        const note = preset ? 'px/py = 窗口内物理坐标（页面坐标 × dpr）；屏幕绝对坐标 = 窗口原点 + px/py，用 window 工具取原点。' : '';
+        if (preset && v && Array.isArray(v.items)) {
+          const dropped = Math.max(0, (v.count || 0) - v.items.length);
+          return wrap({ ok: true, port: Number(a.port), page: r.page, dpr: v.dpr, viewport: v.viewport, matched: v.items.length, truncated: dropped, items: v.items, note: note + (dropped ? '（还有 ' + dropped + ' 条被 limit 截掉，加 match/selector 收窄）' : '') });
+        }
+        return wrap({ ok: true, port: Number(a.port), page: r.page, value: v, note });
+      }
+      if (act === 'click') {
+        if (Number(a.allowClick) !== 1) return bad('action=click 会真改这个应用的界面，必须显式带 allowClick=1（并且这是敏感操作，先跟用户确认落点）。');
+        const x = Number(a.x), y = Number(a.y);
+        if (!isFinite(x) || !isFinite(y)) return bad('click 需要页面坐标 x、y（来自 elements 的 x + w/2、y + h/2，**不是** px/py 那套物理坐标）。');
+        const list = await httpGet('http://127.0.0.1:' + a.port + '/json', tmo);
+        const pages = (Array.isArray(list) ? list : []).filter((p) => p && p.webSocketDebuggerUrl && p.type === 'page');
+        if (!pages.length) return bad('端口 ' + a.port + ' 上没有可调试页面');
+        const one = pages[Math.max(0, Math.min(pages.length - 1, Number(a.target) || 0))];
+        for (const ev of [{ type: 'mouseMoved', x, y, button: 'none' }, { type: 'mousePressed', x, y, button: 'left', clickCount: 1, buttons: 1 }, { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, buttons: 0 }]) {
+          await cdpCmd(one.webSocketDebuggerUrl, 'Input.dispatchMouseEvent', ev);
+        }
+        return wrap({ ok: true, port: Number(a.port), page: (one.title || one.url || '').slice(0, 60), clicked: { x, y }, warn: '合成点击只对**页面内部**元素有效；外部浮层（如 WorkBuddy 账号菜单）不吃这套 —— 那要用 mouse 工具点物理坐标。点完请再 elements 回读验证，别当已生效。' });
+      }
+      return bad('cdp action 只认 scan|targets|elements|eval|click，收到 ' + act);
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      if (/ECONNREFUSED|connect|socket|ENOENT|404/i.test(m)) return bad('连不上端口 ' + (a.port || '?') + ': ' + m + ' —— 该应用没开调试端口（或端口不对）。先 action=scan。', 'dead_end');
+      return bad('cdp ' + act + ' 失败: ' + m);
+    }
   }
   const u = buildUrl(name, args);
   if (!u) return { isError: true, content: [{ type: 'text', text: 'unknown tool/action: ' + name + (args && args.action ? ' action=' + args.action : '') + '（先 tools/list 核对工具名与 action 取值）' }] };
