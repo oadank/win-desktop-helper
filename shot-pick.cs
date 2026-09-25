@@ -876,7 +876,7 @@ partial class ShotService
             d["volume.reverse"] = Cfg("volume.reverse", "0");
             d["pick.enabled"] = pickEnabled.ToString();
             d["pick.askEndpoint"] = askEndpoint.Length > 0 ? askEndpoint : Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
-            d["pick.askKey"] = askKey.Length > 0 ? askKey : Cfg("pick.askKey", "sk-200418");
+            d["pick.askKey"] = askKey.Length > 0 ? askKey : Cfg("pick.askKey", "") /* [2026-09-25] 主密钥不得硬编码：本仓库是 PUBLIC，历史上那版等于把 litellm 网关主密钥公开。现在只从 shot-service.json 读，缺省为空（设置页/划词面板自行填） */;
             d["pick.askModel"] = askModel.Length > 0 ? askModel : Cfg("pick.askModel", "GwV4F");
             // 附加提示词: 允许显式清空(传空格再 trim 为空)—— 与其余"空=不改"约定不同, 用前导 '|' 表示"清空为默认"
             if (askPrompt == "|") d["pick.askPrompt"] = "";
@@ -1341,7 +1341,7 @@ partial class ShotService
             try
             {
                 string ep = Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
-                string key = Cfg("pick.askKey", "sk-200418");
+                string key = Cfg("pick.askKey", "") /* [2026-09-25] 主密钥不得硬编码：本仓库是 PUBLIC，历史上那版等于把 litellm 网关主密钥公开。现在只从 shot-service.json 读，缺省为空（设置页/划词面板自行填） */;
                 string model = Cfg("pick.askModel", "GwV4F");
                 // 提示词三层累加(2026-09-07 老大定稿): 内置人设(写死) + 用户偏好(设置, 可空) + 本次要求(弹框, 可空)
                 // 冲突仲裁写进人设: 本次要求 > 用户偏好 > 基础规则; 偏好为空/无意义直接忽略 —— 谁乱填都不会把 AI 带偏

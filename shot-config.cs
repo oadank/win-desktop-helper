@@ -107,7 +107,7 @@ partial class ShotService
         d["volume.reverse"] = Cfg("volume.reverse", "0");
         d["pick.enabled"] = Cfg("pick.enabled", "1");
         d["pick.askEndpoint"] = Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
-        d["pick.askKey"] = Cfg("pick.askKey", "sk-200418");
+        d["pick.askKey"] = Cfg("pick.askKey", "") /* [2026-09-25] 主密钥不得硬编码：本仓库是 PUBLIC，历史上那版等于把 litellm 网关主密钥公开。现在只从 shot-service.json 读，缺省为空（设置页/划词面板自行填） */;
         d["pick.askModel"] = Cfg("pick.askModel", "GwV4F");
         d["pick.askPrompt"] = Cfg("pick.askPrompt", "");
 
