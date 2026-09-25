@@ -75,3 +75,61 @@ WorkBuddy 5.5.6                                  ← 面板标题
 
 ■ 泛训
 **「点击没生效」先怀疑自己的时序（等够没）和连点，再怀疑系统。** 我这次把「我等太短截到旧画面」错判成「explorer 透明浮窗挡住落点」，还写进共享手册 —— 错结论会毒到所有 agent。先实测复核，再下结论。
+
+## WorkBuddy 自带网页调试通道（9223），可 1ms 读出整张可点元素表 —— 桌面自动化不必 OCR
+
+_记录日期: 2026-09-26 · 应用: WorkBuddy_
+
+2026-09-26 老大批准"只读探测"后当场实测（纯读，未点任何按钮）：
+
+■ 事实
+- WorkBuddy 主进程启动参数里**自带** `--remote-debugging-port=9223`（Electron 37.10.3 / Chrome 138，公司 Tencent）。
+- `GET http://127.0.0.1:9223/json` → 1 个 page target（app.asar 里的渲染页）；拿它的 webSocketDebuggerUrl 连上，发一条 `Runtime.evaluate`：
+  用 `button,[role=button],[role=menuitem],a[href],input,textarea,[class*=btn]` 过滤可见元素，
+  **页面内 JS 耗时 1ms，一次拿到 81 个可点元素**，每条含 标签/role/可见名字/x,y/宽。
+  样本：`BUTTON/tab「新建任务」@12,92 宽240`、`BUTTON/tab「定时任务」@12,220`、`DIV/button「agents-to-feishu 15天前」@12,359`。
+- 对比：buddy_checkin 领积分一次 claimed 全程 **17 次串行本地 VLM OCR ≈ 112 秒**（见 openmem `0cf11a3b`）。
+  **同一件事换成读元素表 = 1 毫秒级、零截图、零认字。**
+
+■ 结论（纠正两条旧账）
+1. 手册铁律 8 说 workbuddy 在 UIA 入口直接拦 —— 那是**走系统无障碍**这一条路的结论。WorkBuddy 有**更好的第三条路：CDP 直读 DOM**，与本机 `patterns/edge-cdp.md`（划词悬浮球 CDP 直读链）同一族，别只记"UIA 不通就退回截图+坐标"。
+2. 桌面自动化提速的正确顺序：**① CDP 读元素表（能读到就根本不 OCR）→ ② 读不到（原生菜单/系统弹窗）才截图+OCR → ③ 决策模型只负责在元素表里做 N 选 1**（点哪个/是不是已领取/要不要重试）。
+
+■ 探测姿势与坑（实测踩到）
+- 托盘唤回 `app(action=tray,name=WorkBuddy)` 本次返回 `via=relaunch`（**把应用重启了**，不是置前）→ 之前用 `window(list)` 采到的 hwnd 立刻变死句柄。
+  我拿旧句柄 328806 去问 UIA，得到 `IsWindow=False` + `FromHandle=null`，**差点据此下"UIA 完全看不到这扇窗"的错误结论**。
+  纪律：**唤窗/重启后必须重新采句柄**；`FromHandle` 返回 null 先怀疑句柄死了，不是应用不给树。
+- 用 `AutomationElement.RootElement.FindAll(Children, ProcessId=某PID)` 数 WorkBuddy 窗口会得 0 —— Electron 的窗口常挂在**别的子进程**上（`Get-Process.WorkBuddy.MainWindowHandle` 也可能全 0）。按 pid 过滤找不到 ≠ 窗口不存在，用 `window(list, process=WorkBuddy)` 拿真句柄。
+- CDP 是**能改界面**的通道（可发任意 JS）。默认只用 `Runtime.evaluate` 读；任何 click/输入都算敏感操作，先问老大。
+
+## 领积分链路端到端跑通：CDP 选择器全表 + 加油站入口藏在影子根里 + 外部浮层只认真鼠标
+
+_记录日期: 2026-09-26 · 应用: WorkBuddy_
+
+2026-09-26 续（老大批准端到端实测：纯读 + 3 次点击，每步当场回读验证）。**上一条说"1ms 读出 81 个可点元素"只是第一步，这条给出能跑完整个领积分流程的完整链路与选择器。**
+
+■ 已验证的选择器（WorkBuddy 5.6.2，视口 1024x1104，dpr=1.25，窗口贴左在 0,0）
+| 目标 | 选择器 | 读到的文字 | 页面框 | 换算屏幕坐标 |
+|---|---|---|---|---|
+| 头像 | `BUTTON.user-menu-trigger` | 「阿丹」 | 12,1048 164x44 | (45,1338) ← 对上历史真值 (44,1338) |
+| 账号菜单容器 | `.user-menu-items` | — | 13,542 318x433 | — |
+| **加油站入口** | `DIV.fuel-menu-entry` | 「Buddy加油站」 | 19,630 306x44 | (215,816) ← 对上历史真值 (146,**816**) |
+| **状态兼按钮** | `BUTTON.fuel-btn` | 「今日已领」/「立即领取」 | 24,997 101x29 | (93,1264) |
+| 期数 | `DIV.fuel-period` | 「Buddy加油站·9期」 | 24,969 92x17 | (88,1222) |
+| 说明 | `DIV.fuel-caption` | 「每日可领通用积分」 | 40,907 180x17 | (163,1144) |
+| **关闭** | `BUTTON.fuel-close`（`aria-label=关闭`） | — | 222,822 16x16 | (288,1038) |
+
+🔴 **判状态一个字段就够**：`document.querySelector('.fuel-btn').innerText` —— 等于「今日已领」= 已完成；含「立即领取」= 该点。**现在脚本为此花的整轮面板 OCR 可以删。**
+
+■ 三条硬限制（不写进代码必翻车）
+1. **加油站入口在影子根里**：`.wb-slot--menu-signin` 的 `innerText` 是**空串**，内容在 `e.shadowRoot`。**遍历必须递归 shadowRoot**（实测递归后立刻读到「Buddy加油站」）。**这才是过去只能靠 OCR 的真原因，不是坐标、也不是 UIA。**
+2. **外部浮层不吃合成事件**：`Input.dispatchMouseEvent` 点头像，轮询 8 秒菜单不出来；**必须操作系统真鼠标点物理坐标** (45,1338) 一次开（只点一次，别连点——沿用 09-19 那条）。**页面内部**元素的合成点击有效：面板 `×` 就是这么关掉的（回读 `.fuel-close` 已从 DOM 消失）。⇒ **分工：开外部浮层用真鼠标，读一切 + 点页面内元素用 9223 通道。**
+3. 坐标换算 `屏幕 = 窗口原点 + 页面坐标 × devicePixelRatio`；本机 dpr=1.25。
+
+■ 工具姿势坑（本轮新踩）
+- **别发 `Runtime.enable`**：事件流会淹掉 `Runtime.evaluate` 的回包，表现为"读不到回包"，极易误判成"页面卡死/这应用不配合"。（上一轮我那句 `1+1` 通、`typeof document` 无回包，就是被这个挤掉的。）
+- **托盘唤回 `app(tray)` 两次都返回 `via=relaunch`（＝重启 WorkBuddy）**：旧句柄当场失效，`FromHandle=null` 属正常；唤窗后用 `window(list, process=WorkBuddy)` **重采句柄**，别拿旧的判生死。
+- **别全文搜「加油站」定位菜单项**：左侧栏堆着同名会话「每天领 Buddy加油站积分…」，本轮第一轮就误点开会话页。正解：**只认"点开后新出现的元素"（前后快照做差集）**，或直接用 `.fuel-menu-entry` 选择器。
+- 现成可抄的两个探针：`C:\Users\oadan\.dsh\tmp\wb-cdp-probe.ps1`（通用只读 evaluate）、`wb-panel-close.ps1`（扫→点→回读验证）。
+- 🔴 方案与改造清单真源：`C:\D\opt\scripts\docs\cdp-desktop-elements.md`；记忆卡 `e3a5c8a4`（能力卡·CDP 直读界面）、领积分卡 `0cf11a3b`、决策模型卡 `e79315f9` 第 8 条。
+- 本轮**没用决策模型**：所有目标都有精确文字，字符串判断即可。它只配管三处模糊（多候选都像 / 状态语义未枚举 / 连续失败要不要放弃），**不许做成唯一通路**。
