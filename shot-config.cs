@@ -71,7 +71,7 @@ partial class ShotService
         sb.Append("  },\n");
         // 标注参数节 (PixPin MarkBar 同款跨会话记忆); 调用方没塞 mark 键时回读现值, 不丢
         Func<string, string, string> MK = (k, def) => d.ContainsKey("mark." + k) ? d["mark." + k] : Cfg("mark." + k, def);
-        sb.Append("  \"mark\": { \"width\": " + J(MK("width", "3")) + ", \"arrowStyle\": " + J(MK("arrowStyle", "")) + ", \"color\": " + J(MK("color", "")) +
+        sb.Append("  \"mark\": { \"width\": " + J(MK("width", "3")) + ", \"arrowStart\": " + J(MK("arrowStart", "0")) + ", \"arrowEnd\": " + J(MK("arrowEnd", "2")) + ", \"smooth\": " + J(MK("smooth", "0")) + ", \"dash\": " + J(MK("dash", "0")) + ", \"callout\": " + J(MK("callout", "0")) + ", \"arrowStyle\": " + J(MK("arrowStyle", "")) + ", \"color\": " + J(MK("color", "")) +
                   ", \"fontPt\": " + J(MK("fontPt", "")) + ", \"fontFamily\": " + J(MK("fontFamily", "")) + ", \"seqFmt\": " + J(MK("seqFmt", "1")) + " }\n");
         sb.Append("}\n");
         File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
@@ -80,7 +80,7 @@ partial class ShotService
 
     // 标注参数持久化 (PixPin MarkBar 同款): 工具条上改的线宽/箭头样式/颜色/字号/字体/序号格式, 写 shot-service.json mark 节, 下次截图自动恢复
     // 其余配置节原值回填, 不碰设置中心保存的东西
-    static void SaveMarkCfg(float width, int arrowStyle, Color color, int fontPt, string fontFamily, string seqFmt)
+    static void SaveMarkCfg(float width, int startType, int endType, bool smooth, int dash, bool callout, int shape, bool fill, Color color, int fontPt, string fontFamily, string seqFmt)
     {
         try
         {
@@ -102,7 +102,14 @@ partial class ShotService
             d["pick.askModel"] = Cfg("pick.askModel", "GwV4F");
             d["pick.askPrompt"] = Cfg("pick.askPrompt", "");
             d["mark.width"] = ((double)width).ToString(System.Globalization.CultureInfo.InvariantCulture);
-            d["mark.arrowStyle"] = arrowStyle.ToString();
+            d["mark.arrowStart"] = startType.ToString();
+            d["mark.arrowEnd"] = endType.ToString();
+            d["mark.smooth"] = smooth ? "1" : "0";
+            d["mark.dash"] = dash.ToString();
+            d["mark.callout"] = callout ? "1" : "0";
+            d["mark.shape"] = shape.ToString(); // 0=PixPin头型 4=细尾实心 5=细尾空心
+            d["mark.fill"] = fill ? "1" : "0";   // 折线闭合填充
+            d["mark.arrowStyle"] = callout ? "3" : (shape == 4 ? "4" : shape == 5 ? "5" : endType.ToString()); // 旧键兼容 (mark.arrowStyle)
             d["mark.color"] = color.ToArgb().ToString();
             d["mark.fontPt"] = fontPt.ToString();
             d["mark.fontFamily"] = fontFamily == null ? "" : fontFamily;
@@ -131,6 +138,61 @@ partial class ShotService
     }
 
     // ==================== 设置中心 (左分类列表 + 右页) ====================
+    // 设置窗快捷键录制: KeyEventArgs → "Ctrl+Alt+S" 式字符串; 非法 (无修饰键/主键不认识) 返回 null
+    static string HkComboFrom(KeyEventArgs e)
+    {
+        string mod = "";
+        if (e.Control) mod += "Ctrl+";
+        if (e.Alt) mod += "Alt+";
+        if (e.Shift) mod += "Shift+";
+        if (e.KeyCode == Keys.LWin || e.KeyCode == Keys.RWin) mod += "Win+";
+        if (mod.Length == 0) return null;
+        string main = HkKeyName(e.KeyCode);
+        if (main == null) return null;
+        string combo = mod + main;
+        if (HotkeyParse(combo) == null) return null; // 必须过服务端同一套解析, 保证录了就能注册
+        return combo;
+    }
+
+    static string HkKeyName(Keys k)
+    {
+        if (k >= Keys.A && k <= Keys.Z) return ((char)('A' + (k - Keys.A))).ToString();
+        if (k >= Keys.D0 && k <= Keys.D9) return ((char)('0' + (k - Keys.D0))).ToString();
+        if (k >= Keys.F1 && k <= Keys.F24) return "F" + (int)(k - Keys.F1 + 1);
+        switch (k)
+        {
+            case Keys.Space: return "Space";
+            case Keys.Enter: return "Enter";
+            case Keys.Tab: return "Tab";
+            case Keys.Insert: return "Insert";
+            case Keys.Home: return "Home";
+            case Keys.End: return "End";
+            case Keys.PageUp: return "PageUp";
+            case Keys.PageDown: return "PageDown";
+            case Keys.Left: return "Left";
+            case Keys.Right: return "Right";
+            case Keys.Up: return "Up";
+            case Keys.Down: return "Down";
+            case Keys.PrintScreen: return "PrintScreen";
+            default: return null;
+        }
+    }
+
+    // 热键三值即时落盘 (录制成功/取消恢复用; 只动这三个键, 不动其它配置)
+    static void SaveHotkeyCfg(string region, string full, string pin)
+    {
+        try
+        {
+            var d = LoadCfgDict();
+            d["capture.hotkeyRegion"] = region == null ? "" : region.Trim();
+            d["capture.hotkeyFull"] = full == null ? "" : full.Trim();
+            d["capture.hotkeyPin"] = pin == null ? "" : pin.Trim();
+            SaveCfgDict(d);
+            Log("hotkey cfg saved: region=" + d["capture.hotkeyRegion"] + " full=" + d["capture.hotkeyFull"] + " pin=" + d["capture.hotkeyPin"]);
+        }
+        catch (Exception ex) { Log("hotkey cfg save err: " + ex.Message); }
+    }
+
     static void ShowSettingsForm()
     {
         string cfgPath = ConfigPath();
@@ -140,6 +202,7 @@ partial class ShotService
         d["capture.hotkeyRegion"] = Cfg("capture.hotkeyRegion", "");
         d["capture.hotkeyFull"] = Cfg("capture.hotkeyFull", "");
         d["capture.hotkeyPin"] = Cfg("capture.hotkeyPin", "");
+        d["capture.uiDetect"] = Cfg("capture.uiDetect", "0"); // 0=检测元素 1=仅窗口 2=不检测 (新键: 老配置里没有, 必须先补默认值, 否则索引取不到直接崩设置窗)
         d["clipboard.enabled"] = Cfg("clipboard.enabled", "1");
         d["clipboard.max"] = Cfg("clipboard.max", "50");
         d["clipboard.ignoreApps"] = Cfg("clipboard.ignoreApps", "keepass,keepassxc,1password,bitwarden,lastpass,dashlane,enpass,roboform,keeper");
@@ -297,8 +360,10 @@ partial class ShotService
         syncTrPanel();
 
         // 测试区 (内置英文示例, 结果写界面)
+        // 排版事故修复: AutoSize 的长示例文本会一路铺到「测试」按钮底下 (用户截图实测重叠), 改限宽+省略号
         Label demoLabel = new Label(); demoLabel.Text = "示例: The quick brown fox jumps over the lazy dog.";
-        demoLabel.Left = LX; demoLabel.Top = 262; demoLabel.AutoSize = true;
+        demoLabel.AutoSize = false; demoLabel.AutoEllipsis = true;
+        demoLabel.SetBounds(LX, 262, PW - LX * 2 - 112, 18); // 右侧留出「测试」按钮 (348 起) 的位置
         demoLabel.ForeColor = cDim; demoLabel.Font = new Font("Consolas", 9f); pgTr.Controls.Add(demoLabel);
         Button test = new Button(); test.Text = "测试"; test.FlatStyle = FlatStyle.Flat; test.FlatAppearance.BorderSize = 0;
         test.BackColor = cBtn; test.ForeColor = cText; test.Font = new Font("Microsoft YaHei UI", 9.5f);
@@ -309,6 +374,29 @@ partial class ShotService
         testResult.Font = new Font("Microsoft YaHei UI", 9f);
         testResult.Text = "（点「测试」后, 上面这句英文翻译成中文的结果显示在这里）";
         pgTr.Controls.Add(testResult);
+
+        // ---- 排版自检: 打开设置时两两比对同页控件矩形, 重叠就写日志 (AutoSSize 文本实际宽度只有显示后才知道, 静态看代码看不住) ----
+        f.Shown += (s, e) =>
+        {
+            try
+            {
+                foreach (Control pg in new Control[] { pgTr, pgOcr, pgCap, pgClip, pgVol, pgPick })
+                {
+                    var cs = new System.Collections.Generic.List<Control>();
+                    foreach (Control c in pg.Controls) cs.Add(c);
+                    for (int i = 0; i < cs.Count; i++)
+                        for (int j = i + 1; j < cs.Count; j++)
+                        {
+                            if (cs[i] is Panel || cs[j] is Panel) continue; // 容器包住子控件属正常
+                            Rectangle it = Rectangle.Intersect(cs[i].Bounds, cs[j].Bounds);
+                            if (it.Width > 2 && it.Height > 2)
+                                Log("settings layout overlap [" + pg.Name + "]: '" + cs[i].Text + "' @" + cs[i].Bounds +
+                                    "  x  '" + cs[j].Text + "' @" + cs[j].Bounds);
+                        }
+                }
+            }
+            catch { }
+        };
 
 
         // ==================== 页 2: OCR ====================
@@ -357,17 +445,71 @@ partial class ShotService
         TextBox capDir = mkT(pgCap); capDir.Left = FX; capDir.Top = 11; capDir.Width = FW; capDir.Text = d["capture.dir"];
         mkDim(pgCap, "留空 = 图片库\\Screenshots (每用户各自目录)。支持环境变量如 %USERPROFILE%\\Pictures\\Shots", LX, 40);
         mkDim(pgCap, "当前生效: " + ShotDir, LX, 60);
-        mkL(pgCap, "区域截图热键:", LX, 92);
-        TextBox hkRegion = mkT(pgCap); hkRegion.Left = FX; hkRegion.Top = 89; hkRegion.Width = 200; hkRegion.Text = d["capture.hotkeyRegion"];
-        mkDim(pgCap, "留空 = 默认降级链", FX + 208, 92);
-        mkL(pgCap, "全屏截图热键:", LX, 126);
-        TextBox hkFull = mkT(pgCap); hkFull.Left = FX; hkFull.Top = 123; hkFull.Width = 200; hkFull.Text = d["capture.hotkeyFull"];
-        mkDim(pgCap, "留空 = 默认降级链", FX + 208, 126);
-        mkL(pgCap, "贴图热键:", LX, 160);
-        TextBox hkPin = mkT(pgCap); hkPin.Left = FX; hkPin.Top = 157; hkPin.Width = 200; hkPin.Text = d["capture.hotkeyPin"];
-        mkDim(pgCap, "留空 = 默认降级链", FX + 208, 160);
-        mkDim(pgCap, "热键格式: Ctrl+Alt+S / Win+Shift+A / F9 等, 修改保存后重启生效", LX, 190);
-        mkDim(pgCap, "截图后: 双击选区=复制 · 中键点选区=贴图 · 右键=重新框选 · Esc=退出", LX, 212);
+        // ---- 快捷键录制器 (PixPin 同款按键捕获, 取代手输文本框: 用户实测"输入框改快捷键是笑话") ----
+        string hkRegionVal = d["capture.hotkeyRegion"], hkFullVal = d["capture.hotkeyFull"], hkPinVal = d["capture.hotkeyPin"];
+        string hkRegionInit = hkRegionVal, hkFullInit = hkFullVal, hkPinInit = hkPinVal; // 取消设置时恢复原值
+        int hkRec = 0; // 0=未录制 1=区域 2=全屏 3=贴图
+        Button[] hkRecBtns = new Button[3];
+        Action hkApplyNow = () => { ApplyShotHotkeys(hkRegionVal, hkFullVal, hkPinVal); }; // 录制结束即刻生效 (不用等保存)
+        Action hkSaveNow = () => { SaveHotkeyCfg(hkRegionVal, hkFullVal, hkPinVal); };     // 录制成功即刻落盘
+        Action hkStopRec = () =>
+        {
+            if (hkRec != 0)
+            {
+                int i = hkRec; hkRec = 0;
+                string v = i == 1 ? hkRegionVal : i == 2 ? hkFullVal : hkPinVal;
+                hkRecBtns[i - 1].Text = v.Trim().Length > 0 ? v.Trim() : "(未设置 · 走默认降级链)";
+                hkRecBtns[i - 1].BackColor = cField;
+            }
+        };
+        Action<Panel, string, int, int> mkHkRec = (p, label, y, idx) =>
+        {
+            mkL(p, label, LX, y + 3);
+            Button b = new Button();
+            b.Left = FX; b.Top = y; b.Width = 200; b.Height = 24;
+            b.FlatStyle = FlatStyle.Flat; b.FlatAppearance.BorderColor = Color.FromArgb(70, 73, 82); b.FlatAppearance.BorderSize = 1;
+            b.BackColor = cField; b.ForeColor = cText; b.Font = new Font("Microsoft YaHei UI", 9.5f);
+            b.TextAlign = ContentAlignment.MiddleLeft; b.Padding = new Padding(6, 0, 0, 0); b.Cursor = Cursors.Hand;
+            hkRecBtns[idx - 1] = b;
+            string v0 = idx == 1 ? hkRegionVal : idx == 2 ? hkFullVal : hkPinVal;
+            b.Text = v0.Trim().Length > 0 ? v0.Trim() : "(未设置 · 走默认降级链)";
+            b.Click += (s, e) =>
+            {
+                if (hkRec == idx) { hkStopRec(); hkApplyNow(); return; } // 录制中再点 = 取消 (恢复原值)
+                hkStopRec();
+                hkRec = idx;
+                b.Text = "请按下快捷键…";
+                b.BackColor = Color.FromArgb(48, 66, 104); // 录制中高亮
+                UnregisterShotHotkeys(); // 先注销全部热键: 否则按下去直接触发动作而非被录制 (用户实测事故)
+            };
+            p.Controls.Add(b);
+        };
+        mkHkRec(pgCap, "区域截图热键:", 89, 1);
+        mkHkRec(pgCap, "全屏截图热键:", 123, 2);
+        mkHkRec(pgCap, "贴图热键:", 157, 3);
+        mkDim(pgCap, "点按左侧框 → 直接按组合键即录制 (如 Ctrl+Alt+S) · Esc=取消 · 退格=清空(走默认降级链)", LX, 190);
+        mkDim(pgCap, "保存后立即生效 (被别的软件占用会自动降级并提示)", LX, 208);
+        mkDim(pgCap, "截图后: 双击选区=复制 · 中键点选区=贴图 · 右键=重新框选 · Esc=退出", LX, 226);
+        // ---- UI 元素检测档位 (PixPin「配置-截图-UI 检测」同款三档) ----
+        mkL(pgCap, "UI 元素检测:", LX, 252);
+        ComboBox uiDet = new ComboBox(); uiDet.Left = FX; uiDet.Top = 249; uiDet.Width = FW; uiDet.DropDownStyle = ComboBoxStyle.DropDownList;
+        uiDet.FlatStyle = FlatStyle.Flat; uiDet.BackColor = cField; uiDet.ForeColor = cText;
+        uiDet.Font = new Font("Microsoft YaHei UI", 9.5f);
+        uiDet.Items.AddRange(new object[] { "检测元素 · 能认按钮/输入框等小控件（默认）", "仅窗口 · 只认整个窗口", "不检测 · 完全手动框选" });
+        uiDet.DrawMode = DrawMode.OwnerDrawFixed; uiDet.ItemHeight = 22;
+        uiDet.DrawItem += (s, e) =>
+        {
+            e.DrawBackground();
+            bool sel3 = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            using (SolidBrush b = new SolidBrush(sel3 ? cAccent : cField)) e.Graphics.FillRectangle(b, e.Bounds);
+            if (e.Index >= 0)
+                TextRenderer.DrawText(e.Graphics, uiDet.Items[e.Index].ToString(), uiDet.Font, e.Bounds, cText, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+        };
+        int ud0 = 0; string uds; if (d.TryGetValue("capture.uiDetect", out uds)) int.TryParse(uds, out ud0);
+        if (ud0 < 0 || ud0 > 2) ud0 = 0;
+        uiDet.SelectedIndex = ud0;
+        pgCap.Controls.Add(uiDet);
+        mkDim(pgCap, "检测元素时: 滚鼠标滚轮可在父子层级间切换（上滚放大到父级 / 下滚缩小到子级）", LX, 276);
 
         // ==================== 页 4: 剪贴板 ====================
         CheckBox clipEn = mkC(pgClip); clipEn.Text = "启用剪贴板历史 (自动记录复制的文本)"; clipEn.Left = LX; clipEn.Top = 14; clipEn.AutoSize = true;
@@ -436,8 +578,39 @@ partial class ShotService
         save.Click += (s, e) => { f.DialogResult = DialogResult.OK; f.Close(); };
         cancel.Click += (s, e) => { f.DialogResult = DialogResult.Cancel; f.Close(); };
 
-        // Esc = 取消
-        f.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) { f.DialogResult = DialogResult.Cancel; f.Close(); } };
+        // Esc = 取消; 录制中所有按键交给录制器 (吞掉, 不关窗不触发按钮)
+        f.FormClosed += (s, e) =>
+        {
+            // 取消设置: 热键恢复进设置前的值 (录制成功时已即刻生效+落盘, 这里对称恢复)
+            if (f.DialogResult != DialogResult.OK)
+            {
+                hkRegionVal = hkRegionInit; hkFullVal = hkFullInit; hkPinVal = hkPinInit;
+                ApplyShotHotkeys(hkRegionInit, hkFullInit, hkPinInit);
+                SaveHotkeyCfg(hkRegionInit, hkFullInit, hkPinInit);
+            }
+        };
+        f.KeyDown += (s, e) =>
+        {
+            if (hkRec != 0)
+            {
+                e.Handled = true; e.SuppressKeyPress = true;
+                int idx = hkRec;
+                if (e.KeyCode == Keys.Escape) { hkStopRec(); hkApplyNow(); return; } // 取消录制: 恢复原值
+                if (e.KeyCode == Keys.Back || e.KeyCode == Keys.Delete)
+                {
+                    if (idx == 1) hkRegionVal = ""; else if (idx == 2) hkFullVal = ""; else hkPinVal = "";
+                    hkStopRec(); hkApplyNow(); hkSaveNow(); return; // 清空: 即刻生效+落盘
+                }
+                if (e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.ShiftKey || e.KeyCode == Keys.Menu ||
+                    e.KeyCode == Keys.LWin || e.KeyCode == Keys.RWin) return; // 修饰键单独按下: 继续等主键
+                string combo = HkComboFrom(e);
+                if (combo == null) { hkRecBtns[idx - 1].Text = "需带 Ctrl/Shift/Alt + 一个按键…"; return; }
+                if (idx == 1) hkRegionVal = combo; else if (idx == 2) hkFullVal = combo; else hkPinVal = combo;
+                hkStopRec(); hkApplyNow(); hkSaveNow(); // 录制成功: 即刻生效+落盘 (不用等保存, 防流程再被冲断)
+                return;
+            }
+            if (e.KeyCode == Keys.Escape) { f.DialogResult = DialogResult.Cancel; f.Close(); }
+        };
 
         // ---- 测试: 内置英文示例 -> 翻译成中文, 结果写界面 (零弹窗) ----
         test.Click += (s, e) =>
@@ -494,6 +667,7 @@ partial class ShotService
 
         if (f.ShowDialog() == DialogResult.OK)
         {
+            string oldHkR = d["capture.hotkeyRegion"], oldHkF = d["capture.hotkeyFull"], oldHkP = d["capture.hotkeyPin"];
             d["translate.provider"] = (prov.SelectedIndex == 1) ? "baidu" : (prov.SelectedIndex == 2 ? "openai" : "local");
             d["translate.to"] = to.Text.Trim();
             d["translate.endpoint"] = ep.Text.Trim();
@@ -506,9 +680,9 @@ partial class ShotService
             d["ocr.model"] = ocrModel.Text.Trim();
             d["ocr.apiKey"] = ocrAk.Text.Trim().Length > 0 ? ocrAk.Text.Trim() : loadedOcrKey;
             d["capture.dir"] = capDir.Text.Trim();
-            d["capture.hotkeyRegion"] = hkRegion.Text.Trim();
-            d["capture.hotkeyFull"] = hkFull.Text.Trim();
-            d["capture.hotkeyPin"] = hkPin.Text.Trim();
+            d["capture.hotkeyRegion"] = hkRegionVal.Trim();
+            d["capture.hotkeyFull"] = hkFullVal.Trim();
+            d["capture.hotkeyPin"] = hkPinVal.Trim();
             d["clipboard.enabled"] = clipEn.Checked ? "1" : "0";
             int cmv; d["clipboard.max"] = (int.TryParse(clipMaxT.Text.Trim(), out cmv) && cmv >= 5 && cmv <= 500) ? cmv.ToString() : "50";
             d["clipboard.ignoreApps"] = clipIgT.Text.Trim();
@@ -521,6 +695,7 @@ partial class ShotService
             // 密钥留空 = 不修改已存值 (和翻译页同款逻辑)
             d["pick.askKey"] = pkKey.Text.Trim().Length > 0 ? pkKey.Text.Trim() : loadedPickKey;
             d["pick.askPrompt"] = pkPrompt.Text.Trim();
+            d["capture.uiDetect"] = uiDet.SelectedIndex.ToString(); // 0=检测元素 1=仅窗口 2=不检测 (下次开遮罩即生效)
             try
             {
                 SaveCfgDict(d);
@@ -545,6 +720,20 @@ partial class ShotService
                     if (ShotDir != defDir) ShotDir = defDir;
                 }
                 TrayNotify("设置已保存", "音量/剪贴板/截图目录已即时生效；热键修改重启后生效");
+                // 热键改动即时重注册 (无需重启服务; 被占用自动降级并提示)
+                if (d["capture.hotkeyRegion"] != oldHkR || d["capture.hotkeyFull"] != oldHkF || d["capture.hotkeyPin"] != oldHkP)
+                {
+                    ReapplyShotHotkeys();
+                    string bad = "";
+                    if (d["capture.hotkeyRegion"].Trim().Length > 0 && HotkeyParse(d["capture.hotkeyRegion"]) == null) bad += "区域截图 ";
+                    if (d["capture.hotkeyFull"].Trim().Length > 0 && HotkeyParse(d["capture.hotkeyFull"]) == null) bad += "全屏截图 ";
+                    if (d["capture.hotkeyPin"].Trim().Length > 0 && HotkeyParse(d["capture.hotkeyPin"]) == null) bad += "贴图 ";
+                    if (bad.Length > 0)
+                        TrayNotify("热键格式无法识别", "以下热键已忽略(用默认降级链): " + bad.Trim() + " — 格式如 Ctrl+Alt+S / Win+Shift+A / F9");
+                    else
+                        TrayNotify("热键已即时生效", "区域 " + shotHotkeyName + " · 全屏 " + fullShotHotkeyName + " · 贴图 " + pinHotkeyName +
+                            (hotkeyFallbackMsg != null ? " — " + hotkeyFallbackMsg : ""));
+                }
             }
             catch (Exception ex)
             {

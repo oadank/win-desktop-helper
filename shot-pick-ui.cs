@@ -115,7 +115,7 @@ static class PickStyle
 // ==================== 小圆点 ====================
 sealed class PickDotForm : Form
 {
-    public const int DOT = 26;
+    public const int DOT = 14;
 
     public PickDotForm()
     {
@@ -135,13 +135,16 @@ sealed class PickDotForm : Form
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.Clear(PickStyle.CardBg);   // 圆形 Region 裁边, 不再用品红透色
+        int d = DOT - 2;                 // 球直径, 留 1px 边
+        int off = 1;                     // 左上偏移
         using (var sh = new SolidBrush(Color.FromArgb(70, 0, 0, 0)))
-            g.FillEllipse(sh, 4, 5, DOT - 7, DOT - 7);          // 投影
+            g.FillEllipse(sh, off, off + 1, d, d);              // 投影
         using (var br = new SolidBrush(PickStyle.Accent))
-            g.FillEllipse(br, 3, 3, DOT - 7, DOT - 7);          // 实心蓝
-        using (var pen = new Pen(Color.White, 2f))
-            g.DrawEllipse(pen, 3, 3, DOT - 7, DOT - 7);         // 白描边, 深浅背景都能看见
-        g.FillEllipse(Brushes.White, DOT / 2 - 2, DOT / 2 - 2, 4, 4);
+            g.FillEllipse(br, off, off, d, d);                  // 实心蓝
+        using (var pen = new Pen(Color.White, Math.Max(1f, DOT / 10f)))
+            g.DrawEllipse(pen, off, off, d, d);                 // 白描边, 深浅背景都能看见
+        int cd = Math.Max(2, d / 3);
+        g.FillEllipse(Brushes.White, off + (d - cd) / 2, off + (d - cd) / 2, cd, cd);
     }
     protected override void OnShown(EventArgs e)
     {

@@ -47,6 +47,7 @@ public partial class ShotService
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
     const string MUTEX_NAME = @"Global\WinDesktopHelper"; // 单实例互斥(跨会话, 防双进程)
+    const string WATCHDOG_MUTEX = @"Global\WinDesktopHelperWatchdog"; // 看门狗专属互斥(与主互斥分离, 避免被主进程接管逻辑误杀)
     static Mutex instanceMutex;
     static string ShotDir = Environment.GetEnvironmentVariable("WDH_SHOT_DIR")
         ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Screenshots");
@@ -2982,6 +2983,190 @@ public partial class ShotService
     }
     const int WM_DISPLAYCHANGE = 0x007E;
 
+    // 截图三热键 (区域/全屏/贴图) 注册: 配置值优先, 被占用自动降级到默认候选链 (与剪贴板热键同款策略)
+    // 降级/失败信息写 hotkeyFallbackMsg, 由调用方在合适线程气泡通知 (启动时托盘可能还没就绪, 静默)
+    static string hotkeyFallbackMsg = null;
+    static void RegisterShotHotkeys(IntPtr hwnd, string regionSpec, string fullSpec, string pinSpec)
+    {
+        hotkeyFallbackMsg = null;
+        // ---- 区域截图 ----
+        uint[][] scands; string[] scanmes;
+        uint[] cfgShot = HotkeyParse(regionSpec);
+        if (cfgShot != null)
+        {
+            scands = new uint[][] { cfgShot,
+                new uint[] { MOD_WIN | MOD_SHIFT, 0x41 },
+                new uint[] { MOD_CONTROL | MOD_SHIFT, 0x53 },
+                new uint[] { MOD_WIN | MOD_SHIFT, 0x53 } };
+            scanmes = new string[] { regionSpec, "Win+Shift+A", "Ctrl+Shift+S", "Win+Shift+S" };
+        }
+        else
+        {
+            scands = new uint[][] {
+                new uint[] { MOD_WIN | MOD_SHIFT, 0x41 },
+                new uint[] { MOD_CONTROL | MOD_SHIFT, 0x53 },
+                new uint[] { MOD_WIN | MOD_SHIFT, 0x53 } };
+            scanmes = new string[] { "Win+Shift+A", "Ctrl+Shift+S", "Win+Shift+S" };
+        }
+        bool shOk = false;
+        for (int ci = 0; ci < scands.Length; ci++)
+        {
+            if (RegisterHotKey(hwnd, SHOT_HOTKEY_ID, scands[ci][0], scands[ci][1]))
+            {
+                shotHotkeyName = scanmes[ci];
+                shOk = true;
+                if (ci > 0) hotkeyFallbackMsg = "区域截图 " + regionSpec + " 被占用, 已降级 " + scanmes[ci];
+                Log("shot hotkey registered: " + scanmes[ci] + (ci > 0 ? " (配置值被占用, 自动降级)" : ""));
+                break;
+            }
+        }
+        if (!shOk) { Log("shot hotkey register FAILED (all candidates busy)"); hotkeyFallbackMsg = "区域截图热键全部候选被占用"; }
+        // ---- 全屏截图 ----
+        uint[][] fcands; string[] fnames;
+        uint[] cfgFull = HotkeyParse(fullSpec);
+        if (cfgFull != null)
+        {
+            fcands = new uint[][] { cfgFull,
+                new uint[] { MOD_CONTROL | MOD_ALT, 0x41 },
+                new uint[] { MOD_CONTROL | MOD_SHIFT, 0x41 },
+                new uint[] { MOD_CONTROL | MOD_ALT, 0x46 } };
+            fnames = new string[] { fullSpec, "Ctrl+Alt+A", "Ctrl+Shift+A", "Ctrl+Alt+F" };
+        }
+        else
+        {
+            fcands = new uint[][] {
+                new uint[] { MOD_CONTROL | MOD_ALT, 0x41 },
+                new uint[] { MOD_CONTROL | MOD_SHIFT, 0x41 },
+                new uint[] { MOD_CONTROL | MOD_ALT, 0x46 } };
+            fnames = new string[] { "Ctrl+Alt+A", "Ctrl+Shift+A", "Ctrl+Alt+F" };
+        }
+        bool fOk = false;
+        for (int ci = 0; ci < fcands.Length; ci++)
+        {
+            if (RegisterHotKey(hwnd, FULLSHOT_HOTKEY_ID, fcands[ci][0], fcands[ci][1]))
+            {
+                fullShotHotkeyName = fnames[ci];
+                fOk = true;
+                if (ci > 0) hotkeyFallbackMsg = (hotkeyFallbackMsg == null ? "" : hotkeyFallbackMsg + "; ") + "全屏截图 " + fullSpec + " 被占用, 已降级 " + fnames[ci];
+                Log("fullscreen shot hotkey registered: " + fnames[ci] + (ci > 0 ? " (配置值被占用, 自动降级)" : ""));
+                break;
+            }
+        }
+        if (!fOk) Log("fullscreen shot hotkey register FAILED (all candidates busy)");
+        // ---- 贴图 (PixPin F3 同款) ----
+        uint[][] pcands; string[] pnames;
+        uint[] cfgPin = HotkeyParse(pinSpec);
+        if (cfgPin != null)
+        {
+            pcands = new uint[][] { cfgPin, new uint[] { 0, 0x72 }, new uint[] { MOD_CONTROL | MOD_ALT, 0x50 } };
+            pnames = new string[] { pinSpec, "F3", "Ctrl+Alt+P" };
+        }
+        else
+        {
+            pcands = new uint[][] {
+                new uint[] { 0, 0x72 },
+                new uint[] { MOD_CONTROL | MOD_ALT, 0x50 } };
+            pnames = new string[] { "F3", "Ctrl+Alt+P" };
+        }
+        bool pOk = false;
+        for (int ci = 0; ci < pcands.Length; ci++)
+        {
+            if (RegisterHotKey(hwnd, PIN_HOTKEY_ID, pcands[ci][0], pcands[ci][1]))
+            {
+                pinHotkeyName = pnames[ci];
+                pOk = true;
+                if (ci > 0) hotkeyFallbackMsg = (hotkeyFallbackMsg == null ? "" : hotkeyFallbackMsg + "; ") + "贴图 " + pinSpec + " 被占用, 已降级 " + pnames[ci];
+                Log("pin hotkey registered: " + pnames[ci] + (ci > 0 ? " (配置值被占用, 自动降级)" : ""));
+                break;
+            }
+        }
+        if (!pOk) Log("pin hotkey register FAILED (all candidates busy)");
+    }
+
+    // 无参重载: 按当前配置注册 (启动/配置保存用)
+    static void RegisterShotHotkeys(IntPtr hwnd)
+    {
+        RegisterShotHotkeys(hwnd, Cfg("capture.hotkeyRegion", ""), Cfg("capture.hotkeyFull", ""), Cfg("capture.hotkeyPin", ""));
+    }
+
+    // 剪贴板历史热键: 候选组合自动降级 (Ctrl+Win+V 是 Win11 系统"切换声音输出"自带键, 故 Ctrl+Alt+V 优先)
+    static void RegisterClipHotkey(IntPtr hwnd)
+    {
+        uint[][] cands = new uint[][]
+        {
+            new uint[] { MOD_CONTROL | MOD_ALT, 0x56 },   // Ctrl+Alt+V (优先, 用户确认空闲)
+            new uint[] { MOD_CONTROL | MOD_WIN, 0x56 },   // Ctrl+Win+V (Win11 系统占用中, 备选)
+            new uint[] { MOD_CONTROL | MOD_SHIFT, 0x56 }, // Ctrl+Shift+V
+            new uint[] { MOD_WIN, 0x56 },                 // Win+V (系统剪贴板历史)
+            new uint[] { MOD_CONTROL | MOD_WIN | MOD_ALT, 0x51 }, // Ctrl+Win+Alt+Q
+        };
+        string[] candNames = new string[] { "Ctrl+Alt+V", "Ctrl+Win+V", "Ctrl+Shift+V", "Win+V", "Ctrl+Win+Alt+Q" };
+        for (int ci = 0; ci < cands.Length; ci++)
+        {
+            if (RegisterHotKey(hwnd, HOTKEY_ID, cands[ci][0], cands[ci][1]))
+            {
+                clipHotkeyName = candNames[ci];
+                Log("clip hotkey registered: " + candNames[ci]);
+                return;
+            }
+        }
+        Log("clip hotkey register FAILED (all candidates busy)");
+    }
+
+    // 全部热键注销 (设置窗录制前调用: 旧热键还注册着, 按下去会直接触发动作而非被录制 — 用户实测事故)
+    static void UnregisterShotHotkeys()
+    {
+        try
+        {
+            Form hk = hkForm;
+            if (hk == null || !hk.IsHandleCreated) return;
+            hk.Invoke(new MethodInvoker(delegate
+            {
+                try
+                {
+                    UnregisterHotKey(hk.Handle, HOTKEY_ID);
+                    UnregisterHotKey(hk.Handle, SHOT_HOTKEY_ID);
+                    UnregisterHotKey(hk.Handle, FULLSHOT_HOTKEY_ID);
+                    UnregisterHotKey(hk.Handle, PIN_HOTKEY_ID);
+                    Log("all hotkeys unregistered (录制模式)");
+                }
+                catch (Exception ex) { Log("hotkey unregister err: " + ex.Message); }
+            }));
+        }
+        catch (Exception ex) { Log("hotkey unregister invoke err: " + ex.Message); }
+    }
+
+    // 按指定值热切换全部热键 (录制成功即刻生效 / 取消恢复原值 / 配置保存, 都走这里)
+    static void ApplyShotHotkeys(string regionSpec, string fullSpec, string pinSpec)
+    {
+        try
+        {
+            Form hk = hkForm;
+            if (hk == null || !hk.IsHandleCreated) { Log("hotkey apply skipped: 热键窗未就绪 (重启服务后生效)"); return; }
+            try
+            {
+                hk.Invoke(new MethodInvoker(delegate
+                {
+                    UnregisterHotKey(hk.Handle, HOTKEY_ID);
+                    UnregisterHotKey(hk.Handle, SHOT_HOTKEY_ID);
+                    UnregisterHotKey(hk.Handle, FULLSHOT_HOTKEY_ID);
+                    UnregisterHotKey(hk.Handle, PIN_HOTKEY_ID);
+                    RegisterClipHotkey(hk.Handle);
+                    RegisterShotHotkeys(hk.Handle, regionSpec, fullSpec, pinSpec);
+                }));
+                Log("hotkeys applied: clip=" + clipHotkeyName + " shot=" + shotHotkeyName + " full=" + fullShotHotkeyName + " pin=" + pinHotkeyName);
+            }
+            catch (Exception ex) { Log("hotkey apply err: " + ex.Message); }
+        }
+        catch (Exception ex) { Log("hotkey apply invoke err: " + ex.Message); }
+    }
+
+    // 配置保存后即时重注册截图三热键 (无需重启服务): 热键线程上 卸载→重注册
+    static void ReapplyShotHotkeys()
+    {
+        ApplyShotHotkeys(Cfg("capture.hotkeyRegion", ""), Cfg("capture.hotkeyFull", ""), Cfg("capture.hotkeyPin", ""));
+    }
+
     static Control hookSync; // 钩子线程的同步控件: 自愈重装经它 Invoke 回钩子线程 (回调必须在安装线程的消息循环里被调用)
 
     // 鼠标钩子独立线程入口 (拖卡根治): WH_MOUSE_LL 回调在安装线程同步执行 —
@@ -2991,6 +3176,7 @@ public partial class ShotService
     {
         try
         {
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException); // 同热键线程: UI 异常不弹崩溃框杀进程
             hookSync = new Control();
             hookSync.CreateControl(); // 消息循环所在线程的句柄, 供 Invoke
             volHookProc = new LowLevelMouseProc(VolumeHookProc);
@@ -4158,7 +4344,7 @@ public partial class ShotService
         bool createdNew;
         try
         {
-            instanceMutex = new Mutex(true, MUTEX_NAME, out createdNew);
+            instanceMutex = new Mutex(true, watchMode ? WATCHDOG_MUTEX : MUTEX_NAME, out createdNew);
             if (!createdNew)
             {
                 // 已有一个管理员实例在跑、而自己是普通实例 → 别抢(抢了会把提权实例 kill 掉, 反而降级)
@@ -4234,6 +4420,7 @@ public partial class ShotService
         try { if (!Directory.Exists(ShotDir)) Directory.CreateDirectory(ShotDir); } catch { }
 
         if (watchMode) { RunWatch(); return; }    // 自愈守护 (替代 shot-watcher.exe)
+        EnsureWatchdog();   // 拉起 -watch 看门狗(崩溃自愈常驻); 已在跑则跳过
 
         Thread srv = new Thread(new ThreadStart(ServerLoop));
         srv.IsBackground = true;
@@ -4257,111 +4444,15 @@ public partial class ShotService
             {
                 try
                 {
+                    // 🔴 本线程自己的 WinForms 异常模式: 新线程默认 ThrowException = 未处理异常弹 .NET 崩溃框杀进程
+                    // (19:24 DrawLines 崩溃/本次 NRE 崩溃都死在这: overlay 跑本线程, 兜底没覆盖)
+                    // 设成 CatchException 后, 本线程 UI 异常走全局 Application.ThreadException (只记日志+气球, 不杀进程)
+                    Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
                     HotkeyForm hk = new HotkeyForm();
                     hkForm = hk;
                     hk.CreateControl();
-                    // 候选组合自动降级: Ctrl+Win+V 是 Win11 系统"切换声音输出"自带键, 故 Ctrl+Alt+V 优先; 记录实际生效键
-                    uint[][] cands = new uint[][]
-                    {
-                        new uint[] { MOD_CONTROL | MOD_ALT, 0x56 },   // Ctrl+Alt+V (优先, 用户确认空闲)
-                        new uint[] { MOD_CONTROL | MOD_WIN, 0x56 },   // Ctrl+Win+V (Win11 系统占用中, 备选)
-                        new uint[] { MOD_CONTROL | MOD_SHIFT, 0x56 }, // Ctrl+Shift+V
-                        new uint[] { MOD_WIN, 0x56 },                 // Win+V (系统剪贴板历史)
-                        new uint[] { MOD_CONTROL | MOD_WIN | MOD_ALT, 0x51 }, // Ctrl+Win+Alt+Q
-                    };
-                    string[] candNames = new string[] { "Ctrl+Alt+V", "Ctrl+Win+V", "Ctrl+Shift+V", "Win+V", "Ctrl+Win+Alt+Q" };
-                    bool hkOk = false;
-                    for (int ci = 0; ci < cands.Length; ci++)
-                    {
-                        if (RegisterHotKey(hk.Handle, HOTKEY_ID, cands[ci][0], cands[ci][1]))
-                        {
-                            clipHotkeyName = candNames[ci];
-                            hkOk = true;
-                            Log("clip hotkey registered: " + candNames[ci]);
-                            break;
-                        }
-                    }
-                    if (!hkOk) Log("clip hotkey register FAILED (all candidates busy)");
-                    // 区域截图热键: 候选组合自动降级 (Win+Shift+S 被 Win11 系统截图占用, 故 Win+Shift+A 优先)
-                    uint[][] scands;
-                    string[] scanmes;
-                    uint[] cfgShot = HotkeyParse(Cfg("capture.hotkeyRegion", ""));
-                    if (cfgShot != null) { scands = new uint[][] { cfgShot }; scanmes = new string[] { Cfg("capture.hotkeyRegion", "") }; }
-                    else
-                    {
-                        scands = new uint[][]
-                        {
-                            new uint[] { MOD_WIN | MOD_SHIFT, 0x41 },
-                            new uint[] { MOD_CONTROL | MOD_SHIFT, 0x53 },
-                            new uint[] { MOD_WIN | MOD_SHIFT, 0x53 },
-                        };
-                        scanmes = new string[] { "Win+Shift+A", "Ctrl+Shift+S", "Win+Shift+S" };
-                    }
-                    bool shOk = false;
-                    for (int ci = 0; ci < scands.Length; ci++)
-                    {
-                        if (RegisterHotKey(hk.Handle, SHOT_HOTKEY_ID, scands[ci][0], scands[ci][1]))
-                        {
-                            shotHotkeyName = scanmes[ci];
-                            shOk = true;
-                            Log("shot hotkey registered: " + scanmes[ci]);
-                            break;
-                        }
-                    }
-                    if (!shOk) Log("shot hotkey register FAILED (all candidates busy)");
-                    // 全屏截图热键 (Ctrl+Alt+A, 候选降级)
-                    uint[][] fcands;
-                    string[] fnames;
-                    uint[] cfgFull = HotkeyParse(Cfg("capture.hotkeyFull", ""));
-                    if (cfgFull != null) { fcands = new uint[][] { cfgFull }; fnames = new string[] { Cfg("capture.hotkeyFull", "") }; }
-                    else
-                    {
-                        fcands = new uint[][]
-                        {
-                            new uint[] { MOD_CONTROL | MOD_ALT, 0x41 },
-                            new uint[] { MOD_CONTROL | MOD_SHIFT, 0x41 },
-                            new uint[] { MOD_CONTROL | MOD_ALT, 0x46 },
-                        };
-                        fnames = new string[] { "Ctrl+Alt+A", "Ctrl+Shift+A", "Ctrl+Alt+F" };
-                    }
-                    bool fOk = false;
-                    for (int ci = 0; ci < fcands.Length; ci++)
-                    {
-                        if (RegisterHotKey(hk.Handle, FULLSHOT_HOTKEY_ID, fcands[ci][0], fcands[ci][1]))
-                        {
-                            fullShotHotkeyName = fnames[ci];
-                            fOk = true;
-                            Log("fullscreen shot hotkey registered: " + fnames[ci]);
-                            break;
-                        }
-                    }
-                    if (!fOk) Log("fullscreen shot hotkey register FAILED (all candidates busy)");
-                    // 贴图热键 (PixPin F3 同款): 剪贴板图钉到桌面
-                    uint[][] pcands;
-                    string[] pnames;
-                    uint[] cfgPin = HotkeyParse(Cfg("capture.hotkeyPin", ""));
-                    if (cfgPin != null) { pcands = new uint[][] { cfgPin }; pnames = new string[] { Cfg("capture.hotkeyPin", "") }; }
-                    else
-                    {
-                        pcands = new uint[][]
-                        {
-                            new uint[] { 0, 0x72 },
-                            new uint[] { MOD_CONTROL | MOD_ALT, 0x50 },
-                        };
-                        pnames = new string[] { "F3", "Ctrl+Alt+P" };
-                    }
-                    bool pOk = false;
-                    for (int ci = 0; ci < pcands.Length; ci++)
-                    {
-                        if (RegisterHotKey(hk.Handle, PIN_HOTKEY_ID, pcands[ci][0], pcands[ci][1]))
-                        {
-                            pinHotkeyName = pnames[ci];
-                            pOk = true;
-                            Log("pin hotkey registered: " + pnames[ci]);
-                            break;
-                        }
-                    }
-                    if (!pOk) Log("pin hotkey register FAILED (all candidates busy)");
+                    RegisterClipHotkey(hk.Handle);
+                    RegisterShotHotkeys(hk.Handle);
                     Application.Run(hk);
                 }
                 catch (Exception ex) { Log("hotkey form err: " + ex.Message); Application.Run(); }
@@ -4560,11 +4651,36 @@ public partial class ShotService
         return false;
     }
 
+    // 更新锁: 部署/自更新期间存在, 看门狗见锁即跳过拉起, 绝不挡覆盖
+    static bool UpdatingLocked()
+    {
+        try { return File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "updating.lock")); }
+        catch { return false; }
+    }
+
+    // service 模式启动后拉起看门狗常驻(同会话); 已存在则跳过。看门狗互持有 WATCHDOG_MUTEX 保证单例
+    static void EnsureWatchdog()
+    {
+        try
+        {
+            bool created;
+            using (new Mutex(true, WATCHDOG_MUTEX, out created)) { }
+            if (!created) return;   // 看门狗已在跑, 不重复拉
+            var psi = new ProcessStartInfo(Process.GetCurrentProcess().MainModule.FileName, "-watch");
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            Process.Start(psi);
+            Log("watchdog: launched -watch child");
+        }
+        catch (Exception ex) { Log("watchdog launch err: " + ex.Message); }
+    }
+
     static void RunWatch()
     {
         DateTime last = DateTime.MinValue;
         while (true)
         {
+            if (UpdatingLocked()) { Thread.Sleep(5000); continue; }   // 更新中: 不打扰, 不拉起
             if (!ServiceAlive() && (DateTime.Now - last).TotalMilliseconds > 15000)
             {
                 try { Process.Start(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shot-service.exe")); last = DateTime.Now; Log("watch: relaunch shot-service"); }

@@ -37,18 +37,21 @@ partial class ShotService
     // 光标处的检测目标窗口 (跳过自己/工具窗/最小化/cloaked 幻影/桌面), 并下钻到最深层子窗口。
     // PixPin 同款灵敏度的关键 = 子窗口下钻: Electron/浏览器/IDE 的侧栏/正文/输入区都是子 HWND,
     // 只回顶层时整个应用一个大框 (实测 zcode 高亮全窗); 下钻后高亮贴到内容区。深度上限防病态嵌套。
-    static IntPtr WindowFromPointEx(POINT p, IntPtr exclude)
+    static IntPtr WindowFromPointEx(POINT p, IntPtr exclude) { return WindowFromPointEx(p, exclude, true, null); }
+    // deep=false: 只回顶层窗口 (PixPin「UI 检测 = 仅窗口」档)
+    // path: 顺路收集下钻经过的每一层 HWND (顶层 → 最深), 供「滚轮切换父子元素」用
+    static IntPtr WindowFromPointEx(POINT p, IntPtr exclude, bool deep, System.Collections.Generic.List<IntPtr> path)
     {
         IntPtr top = IntPtr.Zero;
-        uint myPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
         EnumWindows(delegate (IntPtr h, IntPtr lp)
         {
             try
             {
                 if (h == exclude || !IsWindowVisible(h)) return true;
                 if ((GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return true;
-                uint wpid; GetWindowThreadProcessId(h, out wpid);
-                if (wpid == myPid) return true; // 自家浮窗(结果/热键宿主)不参加检测
+                // 不再按"自家进程"整锅排除: 否则截图永远认不到自家窗口 (实测: 对着自家设置窗连大框都不出, PixPin 能认到里面的输入框)。
+                // 自家浮窗里该排的各有归属: 遮罩=调用方 exclude 参数; 工具条/属性栏/下拉=遮罩的子 Panel (非顶级窗, 本就不进枚举);
+                // 贴图窗/结果窗 = 合法截图目标, 该认就认。
                 RECT r;
                 if (!GetWindowRect(h, out r)) return true;
                 if (r.Left < -30000) return true; // 最小化
@@ -67,6 +70,8 @@ partial class ShotService
             return true;
         }, IntPtr.Zero);
         if (top == IntPtr.Zero) return IntPtr.Zero;
+        if (path != null) path.Add(top);
+        if (!deep) return top;
         // 子窗口下钻: ChildWindowFromPointEx 的 pt 是父窗口客户区坐标, 每层都要 ScreenToClient
         IntPtr cur = top;
         for (int i = 0; i < 12; i++)
@@ -77,6 +82,7 @@ partial class ShotService
             RECT cr;
             if (!GetWindowRect(child, out cr) || cr.Right <= cr.Left || cr.Bottom <= cr.Top) break;
             cur = child;
+            if (path != null) path.Add(cur);
         }
         return cur;
     }

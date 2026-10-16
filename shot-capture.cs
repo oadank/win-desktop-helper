@@ -283,15 +283,23 @@ partial class ShotService
     class Annot
     {
         public const int K_RECT = 0, K_ELLIPSE = 1, K_ARROW = 2, K_PEN = 3, K_TEXT = 4, K_SEQ = 5;
+        public const int K_POLY = 6;  // 折线/曲线 (PixPin BrokenLine: 直线段/平滑曲线 同工具两形态, 单击加点+双击/回车收尾)
         // 箭头样式 (PixPin 同款)
         public const int S_ARROW = 0, S_BOTH = 1, S_LINE = 2, S_CALLOUT = 3;
+        public const int S_THIN = 4, S_HOLLOW = 5; // 细尾渐变实心 / 细尾空心 (老版保留样式, 用户点名不许丢)
         public int Kind;
-        public int Style = S_ARROW;  // 箭头样式
+        public int Style = S_ARROW;  // 箭头样式 (旧 6 样式兼容; 新模型用下方头型字段)
+        // PixPin 头型复刻 (证据级, 逆向自 GenArrowHeadContour, 取值 0-12):
+        //   0=无 1=开口 2=实心三角(大) 3=实心三角(小) 4=实心圆 5=空心圆 6=实心菱形 7=空心菱形 8=刻度 9=十字 10=开口(细) 11=尾三角 12=五角
+        public int StartType = 0;    // 起点箭头型 (0=无)
+        public int EndType = 2;      // 终点箭头型 (默认 2=实心三角, 同 PixPin 默认)
+        public bool Smooth = false;   // 平滑曲线 (PixPin FUN_180082b70)
+        public int Dash = 0;         // 虚线: 0=实线 2/3/4/5 (见 PixPinArrowGeom.SetDash)
+        public bool Fill = false;    // 折线闭合填充 (PixPin MarkBar.BrokenLine.Fill: 首尾闭合成多边形纯色填满, 无头型/虚线)
         public float Width = 3f;     // 线宽
         public int FontPt = 14;      // 文字/序号字号
-        public int Angle = 0;        // 文字旋转角 (度, 顺时针)
         public string SeqFmt = "1";  // 序号格式: 1=1.2.3  I=I.II.III  a=a.b.c  A=A.B.C
-        public const int S_THIN = 4, S_HOLLOW = 5; // 箭头样式 (细尾/空心)
+        public int Angle = 0;        // 文字旋转角 (度, 顺时针)
         public string FontFamily = "Microsoft YaHei UI"; // 文字字体
         public Rectangle Rect;      // rect/ellipse/arrow 的包围盒; seq/text 的定位点在 Rect.Location
         public List<Point> Pts;     // 画笔折线 (屏坐标)
@@ -335,8 +343,8 @@ partial class ShotService
         {
             this.keys = keys; this.isCurrent = isCurrent; this.onPick = onPick; this.drawer = drawer; this.tipper = tipper; this.ink = ink;
             float s = UiScale();
-            RowH = (int)Math.Round(20 * s);   // PixPin 同款紧凑行高: 显示 30px (34*1.5=51 太高, 用户要求整体缩小)
-            Pad = (int)Math.Round(4 * s);     // 显示 6px
+            RowH = (int)Math.Round(24 * s);   // 行高 (显示 ~30px; 旧 20*s=25px 太挤, 用户实测"挤到一起")
+            Pad = (int)Math.Round(6 * s);     // 内边距 (显示 ~7px)
             Rad = (int)Math.Round(8 * s);
             RadRow = (int)Math.Round(6 * s);
             AutoScaleMode = AutoScaleMode.None; // 关自动缩放: 手动算尺寸, 双重缩放会让行位与可见区错位 (蓝块被裁)
@@ -347,7 +355,7 @@ partial class ShotService
             BackColor = Color.FromArgb(40, 41, 46);
             DoubleBuffered = true;
             KeyPreview = true;
-            designSize = new Size((int)Math.Round(100 * s), keys.Length * RowH + Pad * 2); // 显示 ~150 宽 (PixPin 166)
+            designSize = new Size((int)Math.Round(132 * s), keys.Length * RowH + Pad * 2); // 宽 ~164px (PixPin 同款 166; 旧 100*s=124px 太窄)
             Size = designSize;
             using (GraphicsPath gp = RoundPath(0, 0, Width, Height, Rad)) Region = new Region(gp);
             Log(string.Format("StylePopup ctor: s={0:F3} Size={1}x{2} RowH={3} Pad={4}", s, Width, Height, RowH, Pad));
@@ -367,6 +375,17 @@ partial class ShotService
         public new void Show()
         {
             designPos = Location;
+            // 屏幕边缘钳制: 加高后的弹层(14 项 ~430px)靠近屏底/屏顶会出界, 整体平移回屏内
+            try
+            {
+                Rectangle vs = SystemInformation.VirtualScreen;
+                int h = designSize.Height, w = designSize.Width;
+                if (designPos.Y + h > vs.Bottom - 4) designPos.Y = vs.Bottom - h - 4;
+                if (designPos.Y < vs.Top + 4) designPos.Y = vs.Top + 4;
+                if (designPos.X + w > vs.Right - 4) designPos.X = vs.Right - w - 4;
+                if (designPos.X < vs.Left + 4) designPos.X = vs.Left + 4;
+            }
+            catch { }
             base.Show();
         }
 
@@ -467,6 +486,13 @@ partial class ShotService
         static int markFontPt0 = 14;
         static string markSeqFmt0 = "1";
         static string markFontFamily0 = "Microsoft YaHei UI";
+        static int markStartType0 = 0;
+        static int markEndType0 = 2;
+        static bool markSmooth0 = false;
+        static int markDash0 = 0;
+        static bool markCallout0 = false;
+        static bool markFill0 = false;
+        static int markShape0 = 0; // 0=PixPin头型 4=细尾实心 5=细尾空心
         static CaptureOverlay()
         {
             try
@@ -477,12 +503,50 @@ partial class ShotService
                 int ci; if (int.TryParse(Cfg("mark.color", ""), System.Globalization.NumberStyles.Integer, null, out ci)) markColor0 = Color.FromArgb(ci);
                 int fp; if (int.TryParse(Cfg("mark.fontPt", ""), out fp) && fp >= 8 && fp <= 72) markFontPt0 = fp;
                 string sf = Cfg("mark.seqFmt", "1"); if (sf.Length == 1 && "1IaA".IndexOf(sf) >= 0) markSeqFmt0 = sf;
+                // 新字段: 头型/平滑/虚线/标注线 (与旧 mark.arrowStyle 并存, 优先新字段)
+                int aet2; if (int.TryParse(Cfg("mark.arrowEnd", ""), out aet2)) markEndType0 = aet2;
+                int ast2; if (int.TryParse(Cfg("mark.arrowStart", ""), out ast2)) markStartType0 = ast2;
+                bool sm2; if (bool.TryParse(Cfg("mark.smooth", ""), out sm2)) markSmooth0 = sm2;
+                int dsh2; if (int.TryParse(Cfg("mark.dash", ""), out dsh2)) markDash0 = dsh2;
+                bool co2; if (bool.TryParse(Cfg("mark.callout", ""), out co2)) markCallout0 = co2;
+                bool fl2; if (bool.TryParse(Cfg("mark.fill", ""), out fl2)) markFill0 = fl2;
+                int shp2; if (int.TryParse(Cfg("mark.shape", ""), out shp2) && (shp2 == 0 || shp2 == 4 || shp2 == 5)) markShape0 = shp2;
+                // 旧版只存 mark.arrowStyle(0-5), 新字段缺失时向后兼容映射到 PixPin 头型
+                if (string.IsNullOrEmpty(Cfg("mark.arrowEnd", "")) && string.IsNullOrEmpty(Cfg("mark.shape", "")) && !string.IsNullOrEmpty(Cfg("mark.arrowStyle", "")))
+                {
+                    int st2; if (int.TryParse(Cfg("mark.arrowStyle", ""), out st2))
+                    {
+                        switch (st2)
+                        {
+                            case 0: markStartType0 = 0; markEndType0 = 2; break;       // 实线箭头
+                            case 1: markStartType0 = 2; markEndType0 = 2; break;       // 双向
+                            case 2: markStartType0 = 0; markEndType0 = 0; break;       // 直线
+                            case 3: markCallout0 = true; markEndType0 = 2; break;      // 标注线
+                            case 4: markShape0 = 4; break;                             // 细尾实心 (原样保留)
+                            case 5: markShape0 = 5; break;                             // 细尾空心 (原样保留)
+                        }
+                    }
+                }
                 string ff = Cfg("mark.fontFamily", ""); if (ff.Length > 0) markFontFamily0 = ff;
-                Log("mark cfg loaded: w=" + markWidth0 + " style=" + markArrowStyle0 + " color=" + markColor0.ToArgb() + " pt=" + markFontPt0 + " fam=" + markFontFamily0 + " seq=" + markSeqFmt0);
+                Log("mark cfg loaded: w=" + markWidth0 + " style=" + markArrowStyle0 + " start=" + markStartType0 + " end=" + markEndType0 + " smooth=" + markSmooth0 + " dash=" + markDash0 + " callout=" + markCallout0 + " color=" + markColor0.ToArgb() + " pt=" + markFontPt0 + " fam=" + markFontFamily0 + " seq=" + markSeqFmt0);
             }
             catch (Exception ex) { Log("mark cfg load err: " + ex.Message); }
         }
-        int curArrowStyle = markArrowStyle0;        // 属性栏: 箭头样式
+        int curArrowStyle = markArrowStyle0;        // 属性栏: 箭头样式 (旧键兼容, 新模型用下方头型字段)
+        int curStartType = markStartType0;
+        int curEndType = markEndType0;
+        bool curSmooth = markSmooth0;
+        int curDash = markDash0;
+        bool curCallout = markCallout0;
+        bool curFill = markFill0;                  // 折线闭合填充开关
+        int curShape = markShape0;                  // 0=PixPin头型 4=细尾实心 5=细尾空心
+        Point polyHover = Point.Empty;              // 折线绘制中的橡皮筋落点 (屏坐标)
+        bool polyHoverOk = false;
+        // ---- 选区识别 (PixPin「配置-截图-UI 检测」同款) ----
+        int uiDetect = 0;                           // 0=检测元素(细,默认) 1=仅窗口 2=不检测 (每次开遮罩现读配置, 改完即生效)
+        Rectangle[] hoverChain = new Rectangle[0];  // 父子层级链: [0]=窗口 → [n-1]=最深元素 (滚轮切换用)
+        int hoverLevel = -1;                        // -1=自动落在最深一层; >=0=用户滚轮锁定的层级
+        bool curBidirectional = (markStartType0 != 0 && markStartType0 == markEndType0);
         float curWidth = markWidth0;                // 属性栏: 线宽 (细2/中3.5/粗6)
         Color curColor = markColor0;                // 属性栏: 颜色 (PixPin 默认红)
         int seqNext = 1;
@@ -546,6 +610,7 @@ partial class ShotService
             Cursor = Cursors.Cross;
             DoubleBuffered = true;
             KeyPreview = true;
+            int ud; if (int.TryParse(Cfg("capture.uiDetect", "0"), out ud) && ud >= 0 && ud <= 2) uiDetect = ud;
         }
 
         protected override void OnShown(EventArgs e)
@@ -564,6 +629,7 @@ partial class ShotService
         // 第二次 Down 已在 OnMouseDown 里 return 跳过, 此处状态未被破坏; 复制后关闭, 无残余消息
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
+            if (cur != null && cur.Kind == Annot.K_POLY && e.Button == MouseButtons.Left) { FinishPoly(); return; } // 折线绘制中: 双击收尾
             if (e.Button == MouseButtons.Left && hasSel && tool == null && !textMode && cur == null && !IsDisposed)
             {
                 Log("capture: dblclick = copy");
@@ -571,6 +637,26 @@ partial class ShotService
                 return;
             }
             base.OnMouseDoubleClick(e);
+        }
+
+        // PixPin 同款: 选 UI 元素时滚轮切父子层级 (官方: 「选择 UI 元素时, 可通过鼠标滚轮切换到父子元素」)
+        // 上滚=放大到父级(整个卡片/面板), 下滚=缩小到子级(按钮/输入框)。只在还没框选时有效, 链到头就停住。
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            if (!hasSel && hoverChain.Length > 0 && tool == null && !textMode)
+            {
+                int lv = hoverLevel < 0 ? hoverChain.Length - 1 : hoverLevel;
+                int nv = lv + (e.Delta > 0 ? -1 : 1); // 上滚 → 往父一级
+                nv = Math.Max(0, Math.Min(hoverChain.Length - 1, nv));
+                if (nv != lv)
+                {
+                    hoverLevel = nv;
+                    SetHoverWin(hoverChain[nv]);
+                    Log("capture: hover level " + nv + "/" + (hoverChain.Length - 1) + " " + hoverChain[nv].Width + "x" + hoverChain[nv].Height);
+                }
+                return;
+            }
+            base.OnMouseWheel(e);
         }
 
         // 右键: 有选区/工具时 = 清空重新框选 (PixPin 同款); 什么都没有才退出
@@ -668,6 +754,15 @@ partial class ShotService
             if (recMode) return; // 录制中: 选区外点击不再改变选区 (选区内点击已被 Region 镂空直达下层应用)
             if (e.Button == MouseButtons.Right)
             {
+                // PixPin 同款: 正在画的时候右键 = 结束当前这个动作, 不是退出工具/重新框选
+                //   实证: pixpin.cn/docs/mark/line —— 折线"最后双击左键或单击右键完成绘制"
+                //   折线截图模式: 端点够 → 右键确认; 端点不够 → 右键取消已有端点 (同源语义: 收尾或作废, 都不退工具)
+                if (cur != null)
+                {
+                    if (cur.Kind == Annot.K_POLY) FinishPoly();
+                    else { var c = cur; cur = null; polyHoverOk = false; InvalidateAnnot(c); }
+                    return;
+                }
                 if (hasSel || tool != null || textMode) ResetSelection();
                 else CancelAll();
                 return;
@@ -720,11 +815,35 @@ partial class ShotService
                     OpenTextInput(sp);
                     return;
                 }
+                if (tool == "poly" || tool == "curve")
+                {
+                    // 折线/曲线 (PixPin BrokenLine 输入模式): 单击加点, 双击/回车收尾; 端点创建期钳制不出框
+                    if (cur == null)
+                    {
+                        cur = new Annot();
+                        cur.Kind = Annot.K_POLY;
+                        cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
+                        cur.StartType = curStartType; cur.EndType = curEndType;
+                        cur.Smooth = (tool == "curve"); // 曲线工具 = 平滑样条 (PixPin StraightCurveMode)
+                        cur.Dash = curDash; cur.Fill = curFill;
+                        cur.Style = Annot.S_ARROW; // 折线走头型字段, 不用旧 6 样式
+                        cur.Pts = new List<Point>(); // 🔴 必须初始化: 否则首下点击 cur.Pts.Count 空引用崩进程 (用户实测 NRE)
+                        polyHoverOk = false;
+                    }
+                    Point np = ClampToSel(sp);
+                    if (cur.Pts.Count == 0 || cur.Pts[cur.Pts.Count - 1] != np) cur.Pts.Add(np); // 同点不重复加 (双击第二下)
+                    InvalidateAnnot(cur);
+                    return;
+                }
                 cur = new Annot();
                 cur.Kind = tool == "rect" ? Annot.K_RECT : tool == "ellipse" ? Annot.K_ELLIPSE :
                            tool == "arrow" ? Annot.K_ARROW : tool == "seq" ? Annot.K_SEQ : Annot.K_PEN;
-                cur.Width = curWidth; cur.Color = curColor; cur.Style = curArrowStyle; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
-                downPt = sp; // 形状基准点 = 按下处 (漂移修复: 旧版用上一次 Rect.Location, 越拖越飘)
+                cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
+                cur.StartType = curStartType; cur.EndType = curEndType; cur.Smooth = curSmooth; cur.Dash = curDash;
+                cur.Style = curCallout ? Annot.S_CALLOUT :
+                            (cur.Kind == Annot.K_ARROW ? (curShape == Annot.S_THIN ? Annot.S_THIN : curShape == Annot.S_HOLLOW ? Annot.S_HOLLOW : Annot.S_ARROW) : curArrowStyle);
+                downPt = ClampToSel(sp); // 形状基准点 = 按下处, 钳进选区 (漂移修复 + 不出界)
+                sp = downPt; // 创建几何统一用钳制后的坐标
                 if (cur.Kind == Annot.K_ARROW) cur.Pts = new List<Point> { sp, sp }; // 箭头存真实起终点
                 if (cur.Kind == Annot.K_SEQ)
                 {
@@ -791,7 +910,19 @@ partial class ShotService
             }
             else if (cur != null)
             {
-                if (cur.Kind == Annot.K_PEN) { cur.Pts.Add(sp); InvalidateAnnot(cur); }
+                sp = ClampToSel(sp); // 拖拽时端点钳进选区, 不出界限
+                if (cur.Kind == Annot.K_POLY)
+                {
+                    // 折线绘制中: 只更新橡皮筋落点 (不加点, 点是在 mousedown 加的)
+                    if (sp != polyHover)
+                    {
+                        Rectangle oldB = BoundsOf(cur);
+                        if (polyHoverOk) oldB = Rectangle.Union(oldB, new Rectangle(polyHover, Size.Empty));
+                        polyHover = sp; polyHoverOk = true;
+                        InvalidateAnnot(Rectangle.Union(oldB, new Rectangle(polyHover, Size.Empty)));
+                    }
+                }
+                else if (cur.Kind == Annot.K_PEN) { cur.Pts.Add(sp); InvalidateAnnot(cur); }
                 else if (cur.Kind == Annot.K_ARROW)
                 {
                     cur.Pts[1] = sp; // 终点跟手 (方向 = 起点->鼠标)
@@ -868,6 +999,7 @@ partial class ShotService
 
         void UpdateHoverDetectCore(Point sp)
         {
+            if (uiDetect == 2) return; // 不检测档: 纯手动框选, 这条同步检测路径也别画框
             if ((DateTime.Now - lastHoverCheck).TotalMilliseconds < 50) return;
             lastHoverCheck = DateTime.Now;
             POINT pp; pp.x = sp.X; pp.y = sp.Y;
@@ -926,8 +1058,27 @@ partial class ShotService
                 {
                     POINT cp; GetCursorPos(out cp);
                     var sp = new Point(cp.x, cp.y);
+
+                    // 滚轮切中的层级: 光标还在这层里就别自动改回去 (PixPin: 选完层级就锁住, 移开才重算)
+                    Rectangle[] chNow = hoverChain;
+                    if (chNow.Length > 0 && hoverLevel >= 0 && hoverLevel < chNow.Length && chNow[hoverLevel].Contains(sp))
+                    {
+                        ApplyHover(chNow[hoverLevel]);
+                        System.Threading.Thread.Sleep(60);
+                        continue;
+                    }
+                    if (uiDetect == 2) // 不检测: 纯手动框选
+                    {
+                        if (hoverChain.Length > 0) { hoverChain = new Rectangle[0]; hoverLevel = -1; }
+                        ApplyHover(Rectangle.Empty);
+                        lastHwnd = IntPtr.Zero;
+                        System.Threading.Thread.Sleep(60);
+                        continue;
+                    }
+
                     Rectangle fin = Rectangle.Empty;
-                    IntPtr h = WindowFromPointEx(cp, Handle);
+                    var path = new System.Collections.Generic.List<IntPtr>();
+                    IntPtr h = WindowFromPointEx(cp, Handle, uiDetect == 0, path); // 仅窗口档: 不下钻
                     if (h != IntPtr.Zero)
                     {
                         RECT r;
@@ -939,23 +1090,54 @@ partial class ShotService
                             if (cacheHit)
                             {
                                 fin = uiaCache; // 锁定: 光标还在细化框内就不换框 (稳定不闪)
+                                Rectangle[] chc = hoverChain;
+                                if (chc.Length > 0 && hoverLevel >= 0 && hoverLevel < chc.Length && chc[hoverLevel].Contains(sp))
+                                    fin = chc[hoverLevel];
                             }
-                            else if (uiaFailStreak < 5)
+                            else if (uiDetect == 0 && uiaFailStreak < 5)
                             {
                                 // 缓存失配: 请求后台细化 (绝不阻塞本循环 — 树冷查询几百 ms, 同步查=高亮冻住不跟手)
                                 lock (uiaLock) { reqHwnd = h; reqPt = sp; }
                                 uiaKick.Set();
                                 // 顺手消费已就绪的结果 (光标还停在结果框内才收)
+                                Rectangle[] got = null; Rectangle gotRect = Rectangle.Empty;
                                 lock (uiaLock)
                                 {
                                     if (uiaResultHwnd == h && uiaResult != Rectangle.Empty &&
                                         uiaResult.Contains(sp) && fin.Contains(uiaResult))
-                                    { uiaCache = uiaResult; uiaCacheHwnd = h; fin = uiaResult; uiaResult = Rectangle.Empty; }
+                                    { gotRect = uiaResult; got = uiaResultChain; uiaResult = Rectangle.Empty; }
+                                }
+                                if (got != null && got.Length > 0)
+                                {
+                                    uiaCache = gotRect; uiaCacheHwnd = h; fin = gotRect;
+                                    // 父子链 = 窗口层级(顶层→最深) + UIA 层级(去掉与窗口末层重复的首项)
+                                    var merged = new System.Collections.Generic.List<Rectangle>();
+                                    Rectangle lastWin = Rectangle.Empty;
+                                    RECT rw;
+                                    foreach (IntPtr hh in path)
+                                    {
+                                        if (GetWindowRect(hh, out rw) && rw.Right > rw.Left && rw.Bottom > rw.Top)
+                                        {
+                                            var rr = new Rectangle(rw.Left, rw.Top, rw.Right - rw.Left, rw.Bottom - rw.Top);
+                                            if (merged.Count == 0 || rr != merged[merged.Count - 1]) merged.Add(rr);
+                                            lastWin = rr;
+                                        }
+                                    }
+                                    for (int i = 0; i < got.Length; i++)
+                                        if (!(i == 0 && got[i] == lastWin) && got[i] != Rectangle.Empty &&
+                                            (merged.Count == 0 || got[i] != merged[merged.Count - 1])) merged.Add(got[i]);
+                                    hoverChain = merged.ToArray();
+                                    hoverLevel = -1; // 默认落在最深一层
+
                                 }
                             }
                         }
                     }
-                    if (h != lastHwnd) { uiaCache = Rectangle.Empty; uiaCacheHwnd = IntPtr.Zero; }
+                    if (h != lastHwnd)
+                    {
+                        uiaCache = Rectangle.Empty; uiaCacheHwnd = IntPtr.Zero;
+                        hoverChain = new Rectangle[0]; hoverLevel = -1; 
+                    }
                     lastHwnd = h;
                     ApplyHover(fin); // 带滑动过渡动画
                 }
@@ -968,6 +1150,7 @@ partial class ShotService
         readonly object uiaLock = new object();
         IntPtr reqHwnd = IntPtr.Zero; Point reqPt;
         Rectangle uiaResult = Rectangle.Empty; IntPtr uiaResultHwnd = IntPtr.Zero;
+    Rectangle[] uiaResultChain = new Rectangle[0]; // 父子链 (滚轮切换用, 数组引用整体替换 = 跨线程读安全)
         System.Threading.AutoResetEvent uiaKick = new System.Threading.AutoResetEvent(false);
         System.Threading.Thread refinerThread;
 
@@ -987,19 +1170,29 @@ partial class ShotService
                 IntPtr h; Point pt;
                 lock (uiaLock) { h = reqHwnd; pt = reqPt; reqHwnd = IntPtr.Zero; }
                 if (h == IntPtr.Zero) continue;
-                Rectangle uia = UiaRectAt(h, pt); // 可能几百 ms (树冷) — 反正不挡悬停循环
-                lock (uiaLock) { uiaResult = uia; uiaResultHwnd = h; }
+                if (uiDetect != 0) continue; // 仅窗口/不检测档: 不做 UIA 细化
+                Rectangle[] ch = UiaChainAt(h, pt); // 可能几百 ms (树冷) — 反正不挡悬停循环
+                lock (uiaLock)
+                {
+                    uiaResultChain = ch;
+                    uiaResult = ch.Length > 0 ? ch[ch.Length - 1] : Rectangle.Empty;
+                    uiaResultHwnd = h;
+                }
             }
         }
 
         // UIA 子树命中: 在目标窗口辅助功能树里向下找包含 pt 的最小元素 (输入框/气泡/窗格级 = PixPin 手感来源)
-        Rectangle UiaRectAt(IntPtr hwnd, Point pt)
+        // 返回整条父子链 [0]=窗口 → [n-1]=最深元素; PixPin「鼠标滚轮切换父子元素」就用这条链 (官方: 配置-截图-UI 检测=检测元素)
+        Rectangle[] UiaChainAt(IntPtr hwnd, Point pt)
         {
+            var chain = new List<Rectangle>();
             try
             {
                 int dbgWalk = 0;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var cur = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+                Rectangle rf = RectOf(cur);
+                if (!rf.IsEmpty) chain.Add(rf);
                 for (int depth = 0; depth < 8; depth++)
                 {
                     var kids = cur.FindAll(System.Windows.Automation.TreeScope.Children, System.Windows.Automation.Condition.TrueCondition);
@@ -1025,21 +1218,35 @@ partial class ShotService
                     }
                     if (next == null) break;
                     cur = next;
+                    Rectangle rn = RectOf(cur);
+                    if (!rn.IsEmpty) chain.Add(rn); // 这一层也进链 = 滚轮能停在中间层级
                 }
-                var fr = cur.Current.BoundingRectangle; // 最深命中元素的矩形
                 if (sw.ElapsedMilliseconds > 500)
                 {
                     // 首查可能因 Chromium 惰性建树很慢 (实测 1761ms), 连续 5 次才判残废
                     if (++uiaFailStreak >= 5) { uiaDisabled = 1; Log("hover uia slow x5 -> disabled this session"); }
                 }
                 else uiaFailStreak = 0;
-                return fr.IsEmpty ? Rectangle.Empty : new Rectangle((int)fr.Left, (int)fr.Top, (int)fr.Width, (int)fr.Height);
+                if (chain.Count == 0) chain.Add(Rectangle.Empty);
+                return chain.ToArray();
             }
             catch (Exception ex)
             {
                 if (++uiaFailStreak >= 5) { uiaDisabled = 1; Log("hover uia err x5: " + ex.Message); }
-                return Rectangle.Empty;
+                if (chain.Count == 0) chain.Add(Rectangle.Empty);
+                return chain.ToArray();
             }
+        }
+
+        static Rectangle RectOf(System.Windows.Automation.AutomationElement e)
+        {
+            try
+            {
+                var r = e.Current.BoundingRectangle;
+                if (r.IsEmpty) return Rectangle.Empty;
+                return new Rectangle((int)r.Left, (int)r.Top, (int)r.Width, (int)r.Height);
+            }
+            catch { return Rectangle.Empty; }
         }
 
         // 检测结果回 UI 线程: 换框 + 联合区域重绘 (选区已有时只更新字段不重绘, OnPaint 本来就不画 hover)
@@ -1108,10 +1315,30 @@ partial class ShotService
         {
             Rectangle prev = hoverWin;
             hoverWin = nr;
-            Rectangle u = nr != Rectangle.Empty ? RectangleToClient(nr) : Rectangle.Empty;
-            if (prev != Rectangle.Empty)
-                u = u != Rectangle.Empty ? Rectangle.Union(u, RectangleToClient(prev)) : RectangleToClient(prev);
-            if (!hasSel && u != Rectangle.Empty) { u.Inflate(40, 30); Invalidate(u); }
+            if (hasSel) return; // 选区已有时不画悬停框
+            if (prev == Rectangle.Empty && nr == Rectangle.Empty) return;
+            Rectangle a = prev != Rectangle.Empty ? RectangleToClient(prev) : Rectangle.Empty;
+            Rectangle b = nr != Rectangle.Empty ? RectangleToClient(nr) : Rectangle.Empty;
+            // 框出现/消失: 只能整块重画
+            if (prev == Rectangle.Empty || nr == Rectangle.Empty)
+            {
+                Rectangle u0 = prev != Rectangle.Empty ? a : b;
+                u0.Inflate(40, 30);
+                Invalidate(u0);
+                return;
+            }
+            // 框↔框: 只重画「变了的那一圈」= 两框并集 挖掉 交集内部。
+            // 为什么必须挖: 窗体背景是整张全屏冻结图, 脏区越大系统重绘背景越慢;
+            // 原来一失效就是全屏, 滚轮连切层级时每格都全屏 blit → 卡成幻灯片 (用户实测"超级慢")。
+            // 交集内部的画面(亮+原图)根本没变, 挖掉它 = 脏区从整屏降到一条边带。
+            Rectangle u = Rectangle.Union(a, b); u.Inflate(6, 6);
+            Rectangle inter = Rectangle.Intersect(a, b);
+            if (inter.Width > 12 && inter.Height > 12)
+            {
+                inter.Inflate(-4, -4); // 留 4px 保住边框线本身会被重画
+                using (Region rg = new Region(u)) { rg.Exclude(inter); Invalidate(rg); }
+            }
+            else Invalidate(u);
         }
 
         static Rectangle LerpRect(Rectangle a, Rectangle b, double t)
@@ -1175,10 +1402,17 @@ partial class ShotService
             }
             if (cur != null)
             {
-                if (cur.Kind == Annot.K_PEN) { if (cur.Pts.Count > 1) PushAnnot(cur); }
-                else if (cur.Kind == Annot.K_ARROW) { if (cur.Pts.Count >= 2 && cur.Pts[0] != cur.Pts[1]) PushAnnot(cur); }
-                else if (cur.Rect.Width > 2 && cur.Rect.Height > 2) PushAnnot(cur);
-                cur = null;
+                if (cur.Kind == Annot.K_POLY)
+                {
+                    // 折线/曲线: 单击只加点 (mousedown 已处理), 鼠标松开不收尾不清理 — 等双击/回车
+                }
+                else
+                {
+                    if (cur.Kind == Annot.K_PEN) { if (cur.Pts.Count > 1) PushAnnot(cur); }
+                    else if (cur.Kind == Annot.K_ARROW) { if (cur.Pts.Count >= 2 && cur.Pts[0] != cur.Pts[1]) PushAnnot(cur); }
+                    else if (cur.Rect.Width > 2 && cur.Rect.Height > 2) PushAnnot(cur);
+                    cur = null;
+                }
             }
             }
             catch (Exception ex) { Log("mouseup err: " + ex.Message); }
@@ -1218,8 +1452,9 @@ partial class ShotService
 
         static Rectangle BoundsOf(Annot a)
         {
-            if (a.Kind == Annot.K_PEN)
+            if (a.Kind == Annot.K_PEN || a.Kind == Annot.K_POLY)
             {
+                if (a.Pts == null || a.Pts.Count == 0) return Rectangle.Empty;
                 Rectangle r = new Rectangle(a.Pts[0], Size.Empty);
                 foreach (Point p in a.Pts) r = Rectangle.Union(r, new Rectangle(p, Size.Empty));
                 return r;
@@ -1257,9 +1492,14 @@ partial class ShotService
                     if (hd.Width > 4 && hd.Height > 4)
                     {
                         g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-                        g.SetClip(hd);
-                        g.DrawImage(frozen, hd, hd, GraphicsUnit.Pixel);
-                        g.ResetClip();
+                        // 只采样真正要重画的那块 (脏区 ∩ 框), 别拿整框做源矩形 — 整框=全屏时是百万级像素拷贝
+                        Rectangle dr = hd; dr.Intersect(e.ClipRectangle);
+                        if (dr.Width > 0 && dr.Height > 0)
+                        {
+                            g.SetClip(dr);
+                            g.DrawImage(frozen, dr, dr, GraphicsUnit.Pixel);
+                            g.ResetClip();
+                        }
                         using (Pen hp = new Pen(Color.Orange, 2)) g.DrawRectangle(hp, hd);
                     }
                 }
@@ -1341,11 +1581,29 @@ partial class ShotService
         // 画标注 (屏坐标 -> 客户区偏移 offset; 导出时 offset = -sel.Location, 裁剪坐标系)
         void DrawAnnots(Graphics g, Point offset)
         {
-            DrawOne(g, cur, offset); // 正在绘制的画在最上层
+            // PixPin 同款: 标注端点创建时即钳进选区 (出不界), 故此处无需裁剪
+            DrawOne(g, cur, offset, true); // 正在绘制的画在最上层 (inProgress=true: 填充模式也先画线框)
             for (int i = 0; i < annots.Count; i++) DrawOne(g, annots[i], offset);
+            // 折线/曲线绘制中: 橡皮筋 (最后一点→鼠标) + 已加点顶点 dot (PixPin 同款反馈)
+            if (cur != null && cur.Kind == Annot.K_POLY && polyHoverOk && cur.Pts != null && cur.Pts.Count >= 1)
+            {
+                PointF last = new PointF(cur.Pts[cur.Pts.Count - 1].X - offset.X, cur.Pts[cur.Pts.Count - 1].Y - offset.Y);
+                PointF hv = new PointF(polyHover.X - offset.X, polyHover.Y - offset.Y);
+                using (Pen rp = new Pen(cur.Color, 1.5f))
+                {
+                    rp.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
+                    g.DrawLine(rp, last, hv);
+                }
+                foreach (Point pt in cur.Pts)
+                    using (SolidBrush vb = new SolidBrush(cur.Color))
+                        g.FillEllipse(vb, pt.X - offset.X - 2.5f, pt.Y - offset.Y - 2.5f, 5f, 5f);
+            }
         }
 
-        static void DrawOne(Graphics g, Annot a, Point offset)
+        static void DrawOne(Graphics g, Annot a, Point offset) { DrawOne(g, a, offset, false); }
+
+        // inProgress=true = 正在绘制的标注 (填充模式也先画线框, 收尾才呈现填充 — 用户实测: 填充开着线段不可见)
+        static void DrawOne(Graphics g, Annot a, Point offset, bool inProgress)
         {
             if (a == null) return;
             using (Pen p = new Pen(a.Color, a.Width))
@@ -1359,12 +1617,10 @@ partial class ShotService
                         g.DrawEllipse(p, a.Rect.X - offset.X, a.Rect.Y - offset.Y, a.Rect.Width, a.Rect.Height);
                         break;
                     case Annot.K_ARROW:
-                        if (a.Pts != null && a.Pts.Count >= 2)
-                            DrawArrowEx(g, p, a.Pts[0].X - offset.X, a.Pts[0].Y - offset.Y,
-                                        a.Pts[1].X - offset.X, a.Pts[1].Y - offset.Y, a.Style);
-                        else
-                            DrawArrowEx(g, p, a.Rect.X - offset.X, a.Rect.Y - offset.Y,
-                                        a.Rect.Right - offset.X, a.Rect.Bottom - offset.Y, a.Style);
+                        DrawAnnotArrow(g, a, offset);
+                        break;
+                    case Annot.K_POLY:
+                        DrawAnnotPoly(g, a, offset, inProgress);
                         break;
                     case Annot.K_PEN:
                         if (a.Pts != null && a.Pts.Count > 1)
@@ -1424,110 +1680,80 @@ partial class ShotService
             }
         }
 
-        static PointF[] LocalArrow(PointF[] local, float ox, float oy, float ang)
+        // 折线/曲线 (PixPin BrokenLine): 多顶点 + 起止头型 + 虚线 + 平滑样条
+        //   Fill=true 时 = 闭合填充 (PixPin MarkBar.BrokenLine.Fill): 首尾闭合成多边形纯色填满, 无头型无虚线
+        //   inProgress=true (绘制中) 时填充模式也先画线框 — 否则 2 个点的多边形面积=0, 线段全隐 (用户实测)
+        static void DrawAnnotPoly(Graphics g, Annot a, Point offset, bool inProgress)
         {
-            float cs = (float)Math.Cos(ang), sn = (float)Math.Sin(ang);
-            PointF[] outp = new PointF[local.Length];
-            for (int i = 0; i < local.Length; i++)
-                outp[i] = new PointF(ox + local[i].X * cs - local[i].Y * sn, oy + local[i].X * sn + local[i].Y * cs);
-            return outp;
-        }
-
-        static void DrawArrowHead(Graphics g, Pen p, float tipX, float tipY, float ang, float hl)
-        {
-            PointF a1 = new PointF(tipX - hl * (float)Math.Cos(ang - 0.45), tipY - hl * (float)Math.Sin(ang - 0.45));
-            PointF a2 = new PointF(tipX - hl * (float)Math.Cos(ang + 0.45), tipY - hl * (float)Math.Sin(ang + 0.45));
-            using (SolidBrush b = new SolidBrush(p.Color))
-                g.FillPolygon(b, new PointF[] { new PointF(tipX, tipY), a1, a2 });
-        }
-
-        // 箭头 6 样式 (照 PixPin): 实线 / 双向 / 细尾锥形 / 空心 / 标注线(双竖杠) / 直线
-        // 头部大小随线宽缩放: hl=max(14, width*6) — 粗线大箭头 (用户实测要求)
-        static void DrawArrowEx(Graphics g, Pen p, float x1, float y1, float x2, float y2, int style) { DrawArrowEx(g, p, x1, y1, x2, y2, style, 1f); }
-        static void DrawArrowEx(Graphics g, Pen p, float x1, float y1, float x2, float y2, int style, float scale)
-        {
-            float w = p.Width;
-            float hl = Math.Max(26, w * 8f) * scale;   // 头长 (PixPin 比例: 大醒目; 预览 scale 缩小)
-            float half = Math.Max(12, w * 4f) * scale; // 头底半宽
-            double ang = Math.Atan2(y2 - y1, x2 - x1);
-            double dxc = Math.Cos(ang), dyc = Math.Sin(ang);
-            double pxc = -dyc, pyc = dxc;
-
-            if (style == Annot.S_LINE) { g.DrawLine(p, x1, y1, x2, y2); return; }
-
-            if (style == Annot.S_CALLOUT)
+            if (a == null || a.Pts == null || a.Pts.Count < 2) return;
+            PointF[] pts = new PointF[a.Pts.Count];
+            for (int i = 0; i < a.Pts.Count; i++) pts[i] = new PointF(a.Pts[i].X - offset.X, a.Pts[i].Y - offset.Y);
+            if (a.Fill)
             {
-                float bl = Math.Min(10f, Math.Max(7f, w * 4f)) * scale;
-                float ppx = (float)pxc, ppy = (float)pyc;
-                g.DrawLine(p, x1, y1, x2, y2);
-                g.DrawLine(p, x1 + bl * ppx, y1 + bl * ppy, x1 - bl * ppx, y1 - bl * ppy);
-                g.DrawLine(p, x2 + bl * ppx, y2 + bl * ppy, x2 - bl * ppx, y2 - bl * ppy);
-                return;
-            }
-
-            if (style == Annot.S_THIN)
-            {
-                // 样式① 实心渐变柳叶箭头 (Snipaste/微信风): 尾收尖点 → 杆细到粗 → 大后掠实心三角翼, 单个填充多边形无描边
-                float L = (float)Math.Sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
-                if (L < 4) return;
-                float hhl = Math.Max(18f, L * 0.22f);           // 头长
-                if (hhl > L * 0.6f) hhl = L * 0.6f;
-                float hs2 = L - hhl;                            // 头底 x
-                float hhw = Math.Max(2.5f, w * 2.2f);           // 头底处杆半宽 (500px/默认粗≈9 → 18px 全宽)
-                float chw = hhw * 2.75f;                        // 翼半宽 = 杆端 2.5~3 倍
-                float sweep = hhl * 0.45f;                      // 倒钩后掠
-                PointF[] local = new PointF[] {
-                    new PointF(0, 0),                           // 尖尾 (1px 收尖由多边形自然成)
-                    new PointF(hs2, -hhw),
-                    new PointF(hs2 - sweep, -chw),
-                    new PointF(L, 0),
-                    new PointF(hs2 - sweep, chw),
-                    new PointF(hs2, hhw),
-                };
-                PointF[] screen = LocalArrow(local, x1, y1, (float)ang);
-                using (SolidBrush b = new SolidBrush(p.Color)) g.FillPolygon(b, screen);
-                return;
-            }
-
-            if (style == Annot.S_HOLLOW)
-            {
-                // 样式② 空心线框 = 柳叶轮廓描边版 (用户: 与实心同几何, 尖头到尾全程一个指向, 无平行杆段)
-                float L = (float)Math.Sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
-                if (L < 4) return;
-                float lw2 = Math.Max(2f, w * 1.2f);             // 描边稍细: 太粗会把锥度吃成"平行感" (用户观感反馈)
-                float hhl = Math.Max(22f, L * 0.22f) * scale;
-                if (hhl > L * 0.6f) hhl = L * 0.6f;
-                float hs2 = L - hhl;
-                float hhw = Math.Max(5f, w * 3.1f) * scale;
-                float chw = hhw * 2.75f, sweep = hhl * 0.45f;
-                PointF[] poly = LocalArrow(new PointF[] {
-                    new PointF(0, 0), new PointF(hs2, -hhw), new PointF(hs2 - sweep, -chw),
-                    new PointF(L, 0), new PointF(hs2 - sweep, chw), new PointF(hs2, hhw) }, x1, y1, (float)ang);
-                using (Pen fp = new Pen(p.Color, lw2))
+                if (inProgress)
                 {
-                    fp.LineJoin = LineJoin.Round;
-                    g.DrawPolygon(fp, poly);
+                    // 绘制中: 线框预览 (无头型, 保留虚线), 收尾后才呈现纯色填充
+                    PixPinArrowGeom.DrawBrokenLine(g, pts, a.Width, a.Color, 0, 0, a.Smooth, a.Dash);
+                    return;
                 }
+                float sa, ea;
+                PointF[] poly = a.Smooth ? PixPinArrowGeom.SampleSmooth(pts, 0.5f, out sa, out ea) : pts;
+                if (poly != null && poly.Length >= 3)
+                    using (SolidBrush b = new SolidBrush(a.Color)) g.FillPolygon(b, poly);
                 return;
             }
+            PixPinArrowGeom.DrawBrokenLine(g, pts, a.Width, a.Color, a.StartType, a.EndType, a.Smooth, a.Dash);
+        }
 
-            // 实线/双向: 线画到头底 (头不被线穿透) + 大实心头
-            float b2x = (float)(x2 - hl * 0.72 * dxc), b2y = (float)(y2 - hl * 0.72 * dyc);
-            double angB = Math.Atan2(y1 - y2, x1 - x2);
-            // 左头尖端在 x1、头朝左 (angB 指向左, cos=-1): 头底必须在尖端【内侧】= x1 - hl*0.72*cos(angB)
-            // (写成 + 会把杆起点推到尖端外侧, 杆向左冒出一截 → 用户实测"双箭头左侧横线出了箭头")
-            float b1x = (float)(x1 - hl * 0.72 * Math.Cos(angB)), b1y = (float)(y1 - hl * 0.72 * Math.Sin(angB));
-            // S_BOTH 杆必须从左头底 b1 起画到右头底 b2 — 之前从 x1(左尖端)起画, 杆穿出左箭头外 (用户实测)
-            float shaftX1 = style == Annot.S_BOTH ? b1x : x1, shaftY1 = style == Annot.S_BOTH ? b1y : y1;
-            g.DrawLine(p, shaftX1, shaftY1, b2x, b2y);
-            using (SolidBrush b = new SolidBrush(p.Color))
-                g.FillPolygon(b, new PointF[] {
-                    new PointF(x2, y2),
-                    new PointF((float)(b2x + pxc * half), (float)(b2y + pyc * half)),
-                    new PointF((float)(b2x - pxc * half), (float)(b2y - pyc * half)),
-                });
-            if (style == Annot.S_BOTH)
-                DrawArrowHead(g, p, x1, y1, (float)angB, hl);
+        // 箭头渲染 (证据级复刻 PixPin GenerateBrokenLinePath + GenArrowHeadContour):
+        //   头部几何全部走 PixPinArrowGeom (13 型, REA 逆向实证); 本方法只负责坐标偏移/特例分发.
+        static void DrawAnnotArrow(Graphics g, Annot a, Point offset)
+        {
+            if (a == null) return;
+            // 细尾渐变箭头 (老版保留样式: 实心 S_THIN / 空心 S_HOLLOW) — 几何走 PixPinArrowGeom.DrawTaperArrow
+            if (a.Style == Annot.S_THIN || a.Style == Annot.S_HOLLOW)
+            {
+                PointF tp1, tp2;
+                if (a.Pts != null && a.Pts.Count >= 2)
+                { tp1 = new PointF(a.Pts[0].X - offset.X, a.Pts[0].Y - offset.Y); tp2 = new PointF(a.Pts[1].X - offset.X, a.Pts[1].Y - offset.Y); }
+                else
+                { tp1 = new PointF(a.Rect.X - offset.X, a.Rect.Y - offset.Y); tp2 = new PointF(a.Rect.Right - offset.X, a.Rect.Bottom - offset.Y); }
+                PixPinArrowGeom.DrawTaperArrow(g, tp1, tp2, a.Width, a.Color, a.Style == Annot.S_HOLLOW);
+                return;
+            }
+            // S_CALLOUT 双竖杠标注线 (PixPin 独立标注工具同款) 保留特例
+            if (a.Style == Annot.S_CALLOUT)
+            {
+                PointF p1, p2;
+                if (a.Pts != null && a.Pts.Count >= 2)
+                { p1 = new PointF(a.Pts[0].X - offset.X, a.Pts[0].Y - offset.Y); p2 = new PointF(a.Pts[1].X - offset.X, a.Pts[1].Y - offset.Y); }
+                else
+                { p1 = new PointF(a.Rect.X - offset.X, a.Rect.Y - offset.Y); p2 = new PointF(a.Rect.Right - offset.X, a.Rect.Bottom - offset.Y); }
+                DrawCalloutLine(g, p1, p2, a.Width, a.Color);
+                return;
+            }
+            PointF[] pts;
+            if (a.Pts != null && a.Pts.Count >= 2)
+            {
+                pts = new PointF[a.Pts.Count];
+                for (int i = 0; i < a.Pts.Count; i++) pts[i] = new PointF(a.Pts[i].X - offset.X, a.Pts[i].Y - offset.Y);
+            }
+            else
+            { pts = new PointF[] { new PointF(a.Rect.X - offset.X, a.Rect.Y - offset.Y), new PointF(a.Rect.Right - offset.X, a.Rect.Bottom - offset.Y) }; }
+            PixPinArrowGeom.DrawBrokenLine(g, pts, a.Width, a.Color, a.StartType, a.EndType, a.Smooth, a.Dash);
+        }
+
+        // 双竖杠标注引线 (原 S_CALLOUT 几何, 仅形状不变, 颜色/线宽随属性栏)
+        static void DrawCalloutLine(Graphics g, PointF p1, PointF p2, float w, Color c)
+        {
+            using (Pen p = new Pen(c, w)) { p.LineJoin = LineJoin.Round; g.DrawLine(p, p1, p2); }
+            double ang = Math.Atan2(p2.Y - p1.Y, p2.X - p1.X);
+            float px = (float)-Math.Sin(ang), py = (float)Math.Cos(ang);
+            float bl = Math.Min(10f, Math.Max(7f, w * 4f));
+            using (Pen bp = new Pen(c, w)) { bp.StartCap = LineCap.Round; bp.EndCap = LineCap.Round;
+                g.DrawLine(bp, p1.X + bl * px, p1.Y + bl * py, p1.X - bl * px, p1.Y - bl * py);
+                g.DrawLine(bp, p2.X + bl * px, p2.Y + bl * py, p2.X - bl * px, p2.Y - bl * py);
+            }
         }
 
         // ---- 导出: 冻结图选区 + 标注 合成 ----
@@ -1879,6 +2105,8 @@ partial class ShotService
             bar.Add("rect", "矩形标注", delegate { PickTool("rect"); }, true).ToolKey = "rect";
             bar.Add("ellipse", "椭圆标注", delegate { PickTool("ellipse"); }, true).ToolKey = "ellipse";
             bar.Add("arrow", "箭头标注", delegate { PickTool("arrow"); }, true).ToolKey = "arrow";
+            bar.Add("poly", "折线标注 (单击加点, 双击或回车收尾; PixPin BrokenLine 直线段)", delegate { PickTool("poly"); }, true).ToolKey = "poly";
+            bar.Add("curve", "曲线标注 (单击加点, 双击或回车收尾; PixPin BrokenLine 平滑曲线)", delegate { PickTool("curve"); }, true).ToolKey = "curve";
             bar.Add("pen", "自由画笔", delegate { PickTool("pen"); }, true).ToolKey = "pen";
             bar.Add("text", "文字标注 (点击选区内输入, 回车落字)", delegate { PickTool("text"); }, true).ToolKey = "text";
             bar.Add("seq", "序号标记 (自动递增)", delegate { PickTool("seq"); }, true).ToolKey = "seq";
@@ -1925,7 +2153,7 @@ partial class ShotService
         void ShowPropBar()
         {
             if (propBar == null) { BuildPropBar(); }
-            bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen" || tool == "text" || tool == "seq";
+            bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen" || tool == "text" || tool == "seq" || tool == "poly" || tool == "curve";
             if (!need) { propBar.Visible = false; return; }
             // PixPin 式显隐: 只显示当前工具相关属性 (不相关按钮直接隐藏, 悬空分隔线自动收敛)
             propBar.ShowForTool(tool);
@@ -1941,30 +2169,90 @@ partial class ShotService
             string[] lineTools = { "rect", "ellipse", "arrow", "pen" };
             string[] textTools = { "text", "seq" };
             string[] arrowOnly = { "arrow" };
+            string[] arrowTools = { "arrow", "poly", "curve" }; // 头型/双向/虚线: 折线曲线也有 (PixPin BrokenLine 同款配置)
+            string[] polyTools = { "poly", "curve" };           // 闭合填充: 仅折线/曲线
             string[] seqOnly = { "seq" };
-            // ---- 箭头样式下拉 (竖向菜单+长预览, 用户钦点) ----
-            int[] styleOrder = { Annot.S_ARROW, Annot.S_BOTH, Annot.S_THIN, Annot.S_HOLLOW, Annot.S_LINE, Annot.S_CALLOUT };
-            string[] styleNames = { "实线箭头", "双向箭头", "细尾锥形", "空心箭头", "直线", "标注线" };
+            // ---- 箭头头型下拉 (照 PixPin populateArrowTypes 11 项 + 标注线特例, 竖向菜单+长预览) ----
+            // 头型枚举对应 PixPinArrowGeom.BuildArrowHeadPath: 0无 12五角 1开口 2实心(大) 3实心(小) 4实心圆 5空心圆 6实心菱形 7空心菱形 8刻度 9十字 ; 99=标注线
+            int[] styleOrder = { 0, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 99 };
+            string[] styleNames = { "直线", "五角", "开口箭头", "实心三角(大)", "实心三角(小)", "实心圆", "空心圆", "实心菱形", "空心菱形", "刻度线", "十字", "细尾箭头(实心)", "细尾箭头(空心)", "标注线" };
             ToolbarPanel.Btn styBtn = null;
             styBtn = propBar.AddPreviewDropdown("箭头样式 (点选切换)", delegate
             {
-                // 自绘弹层: 预览直接调画布同一 DrawArrowEx — 预览与画布同源永不漂移, 无白底/黑条
-                float ps = StylePopup.UiScale();
                 StylePopup sp = new StylePopup(styleOrder,
-                    delegate(int v) { return curArrowStyle == v; },
-                    delegate(int v) { curArrowStyle = v; MarkProp(); },
+                    delegate(int v) {
+                        if (v == 99) return curCallout;
+                        if (v == 14) return !curCallout && curShape == Annot.S_THIN;
+                        if (v == 15) return !curCallout && curShape == Annot.S_HOLLOW;
+                        return !curCallout && curShape == 0 && curEndType == v;
+                    },
+                    delegate(int v) {
+                        if (v == 99) { curCallout = true; }
+                        else if (v == 14) { curCallout = false; curShape = Annot.S_THIN; }
+                        else if (v == 15) { curCallout = false; curShape = Annot.S_HOLLOW; }
+                        else
+                        {
+                            // 双向态推导: 之前是双头(start==end 且非0) → 新品种继续双头; 否则单头
+                            bool wasBidir = (curStartType != 0 && curStartType == curEndType);
+                            curCallout = false; curShape = 0; curEndType = v; curStartType = wasBidir ? v : 0;
+                        }
+                        MarkProp();
+                    },
                     delegate(Graphics g, RectangleF row, int key, Color ink2)
                     {
-                        using (Pen ap = new Pen(Color.FromArgb(232, 234, 240), 1.6f * ps))
-                            DrawArrowEx(g, ap, row.X + 10f * ps, row.Y + row.Height / 2f, row.Right - 10f * ps, row.Y + row.Height / 2f, key, 0.62f);
+                        ToolbarPanel.DrawStyleGlyph(g, row, key, ink2, false); // 预览简化图标: 一眼分清, 不求源码几何
                     },
                     delegate(int v) { return styleNames[System.Array.IndexOf(styleOrder, v)]; },
                     Color.FromArgb(232, 234, 240));
                 Point pos = propBar.PointToScreen(new Point(styBtn.Rect.X, styBtn.Rect.Bottom + 4));
                 sp.Location = pos;
                 sp.Show();
-            }, arrowOnly);
+            }, arrowTools);
             styBtn.ToolKey = "styd";
+            // ---- 箭头修饰开关: 双向 / 平滑曲线 / 虚线 ----
+            propBar.AddText((curStartType != 0 && curStartType == curEndType) ? "双向:开" : "双向:关", "双向箭头 (起点同款头型)", delegate
+            {
+                // 单一事实源: 双向态由 start/end 实际值推导 (start!=0 即开), 杜绝标志位与实态漂移
+                if (curStartType != 0 && curStartType == curEndType) curStartType = 0;
+                else curStartType = curEndType;
+                curBidirectional = (curStartType != 0);
+                MarkProp();
+            }, arrowTools).ToolKey = "bidir";
+            propBar.AddText(curSmooth ? "平滑:开" : "平滑:关", "平滑曲线 (PixPin FUN_180082b70)", delegate
+            {
+                curSmooth = !curSmooth;
+                MarkProp();
+            }, arrowOnly).ToolKey = "smooth";
+            ToolbarPanel.Btn dashBtn = null;
+            dashBtn = propBar.AddPreviewDropdown("虚线样式", delegate
+            {
+                int[] dkeys = { 0, 2, 3, 4, 5 }; // PixPin PenStyle 实证 5 项: 实线/疏/点/疏点/疏点(长)
+                StylePopup sp = new StylePopup(dkeys,
+                    delegate(int k) { return curDash == k; },
+                    delegate(int k) { curDash = k; MarkProp(); },
+                    delegate(Graphics g, RectangleF row, int key, Color ink2)
+                    {
+                        float ps2 = StylePopup.UiScale();
+                        using (Pen dp = new Pen(ink2, 2.2f * ps2))
+                        {
+                            dp.StartCap = LineCap.Round; dp.EndCap = LineCap.Round;
+                            PixPinArrowGeom.ApplyDash(dp, key);
+                            g.DrawLine(dp, row.X + 14f * ps2, row.Y + row.Height / 2f, row.Right - 14f * ps2, row.Y + row.Height / 2f);
+                        }
+                    },
+                    delegate(int k) { return k == 2 ? "虚线(疏)" : (k == 3 ? "点线" : (k == 4 ? "虚点线" : (k == 5 ? "虚点线(长)" : "实线"))); },
+                    Color.FromArgb(232, 234, 240));
+                Point pos = propBar.PointToScreen(new Point(dashBtn.Rect.X, dashBtn.Rect.Bottom + 4));
+                sp.Location = pos;
+                sp.Show();
+            }, arrowTools);
+            dashBtn.ToolKey = "dash";
+            // ---- 闭合填充 (PixPin MarkBar.BrokenLine.Fill): 折线首尾闭合成多边形, 纯色填满 ----
+            propBar.AddText(curFill ? "填充:开" : "填充:关", "闭合填充 (折线首尾闭合成多边形, 纯色填满; 填充时无头型/虚线)", delegate
+            {
+                curFill = !curFill;
+                MarkProp();
+            }, polyTools).ToolKey = "fill";
             propBar.AddSep(lineTools);
             // ---- 粗细下拉 (竖排菜单: 每项一条按实际粗细的长预览线) ----
             float[] widthVals = { 2f, 3.5f, 6f };
@@ -2058,7 +2346,11 @@ partial class ShotService
             foreach (var b in propBar.Btns)
             {
                 if (b.ToolKey == null) continue;
-                if (b.ToolKey == "styd") { var po = b.Preview; b.Preview = ToolbarPanel.MakeStylePreviewBmp(curArrowStyle, false); if (po != null) po.Dispose(); }
+                if (b.ToolKey == "styd") { var po = b.Preview; b.Preview = curFill ? ToolbarPanel.MakeFillPreviewBmp(false) : ToolbarPanel.MakeArrowPreviewBmp(curStartType, curEndType, curSmooth, curDash, curCallout, curShape, false); if (po != null) po.Dispose(); }
+                else if (b.ToolKey == "bidir") { bool bd = (curStartType != 0 && curStartType == curEndType); b.DrawStr = bd ? "双向:开" : "双向:关"; b.On = bd; } // 开=按钮高亮, 双头预览不意外
+                else if (b.ToolKey == "smooth") b.DrawStr = curSmooth ? "平滑:开" : "平滑:关";
+                else if (b.ToolKey == "dash") { var po = b.Preview; b.Preview = ToolbarPanel.MakeDashPreviewBmp(curDash, false); if (po != null) po.Dispose(); }
+                else if (b.ToolKey == "fill") b.DrawStr = curFill ? "填充:开" : "填充:关";
                 else if (b.ToolKey == "wd") { var po = b.Preview; b.Preview = ToolbarPanel.MakeWidthPreviewBmp(curWidth, false); if (po != null) po.Dispose(); }
                 else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
             }
@@ -2069,7 +2361,7 @@ partial class ShotService
         // 标注参数落盘 (shot-service.json mark 节)
         void SaveMarkNow()
         {
-            try { SaveMarkCfg(curWidth, curArrowStyle, curColor, curFontPt, curFontFamily, curSeqFmt); } catch { }
+            try { SaveMarkCfg(curWidth, curStartType, curEndType, curSmooth, curDash, curCallout, curShape, curFill, curColor, curFontPt, curFontFamily, curSeqFmt); } catch { }
         }
 
         void PlacePropBar()
@@ -2658,7 +2950,32 @@ partial class ShotService
             }
             if (keyData == (Keys.Control | Keys.Z)) { ActUndo(); return true; } // Ctrl+Z 撤销
             if (keyData == (Keys.Control | Keys.Y)) { ActRedo(); return true; } // Ctrl+Y 重做
+            // 折线/曲线: 回车收尾, 退格删最后一个点 (PixPin BrokenLine 同款手势)
+            if (cur != null && cur.Kind == Annot.K_POLY)
+            {
+                if (keyData == Keys.Enter) { FinishPoly(); return true; }
+                if (keyData == Keys.Back)
+                {
+                    if (cur.Pts.Count > 1) { cur.Pts.RemoveAt(cur.Pts.Count - 1); InvalidateAnnot(cur); }
+                    else { var c0 = cur; cur = null; polyHoverOk = false; InvalidateAnnot(c0); }
+                    return true;
+                }
+            }
             return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        // 折线/曲线收尾 (双击或回车): >=2 点才成笔画
+        void FinishPoly()
+        {
+            if (cur == null || cur.Kind != Annot.K_POLY) return;
+            if (cur.Pts.Count >= 2)
+            {
+                PushAnnot(cur);
+                Log("capture: annot poly pts=" + cur.Pts.Count + (cur.Fill ? " fill" : "") + (cur.Smooth ? " smooth" : ""));
+            }
+            else { var c = cur; InvalidateAnnot(c); }
+            cur = null;
+            polyHoverOk = false;
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -2675,6 +2992,15 @@ partial class ShotService
         {
             int x = Math.Min(a.X, b.X), y = Math.Min(a.Y, b.Y);
             return new Rectangle(x, y, Math.Abs(a.X - b.X), Math.Abs(a.Y - b.Y));
+        }
+
+        // PixPin 同款: 标注端点钳进框选区, 拖到边就撞墙停住, 不让出界限
+        Point ClampToSel(Point p)
+        {
+            if (!hasSel || sel.Width <= 0 || sel.Height <= 0) return p;
+            int x = Math.Max(sel.X, Math.Min(sel.Right, p.X));
+            int y = Math.Max(sel.Y, Math.Min(sel.Bottom, p.Y));
+            return new Point(x, y);
         }
     }
 
@@ -2710,6 +3036,14 @@ partial class ShotService
                 switch (kind)
                 {
                     case "ellipse": g.DrawEllipse(w, 2.5f, 4f, 13, 10); break;
+                    case "poly": // 折线: 三折折线 (PixPin BrokenLine 直线)
+                        g.DrawLine(w, 1.5f, 14.5f, 7, 4.5f);
+                        g.DrawLine(w, 7, 4.5f, 12, 11.5f);
+                        g.DrawLine(w, 12, 11.5f, 16.5f, 3.5f);
+                        break;
+                    case "curve": // 曲线: 平滑 S 弧 (PixPin BrokenLine 曲线)
+                        g.DrawCurve(w, new PointF[] { new PointF(1.5f, 13.5f), new PointF(6.5f, 3f), new PointF(11.5f, 14.5f), new PointF(16.5f, 4.5f) });
+                        break;
                     case "text":
                         g.DrawLine(w, 4, 4, 14, 4);
                         g.DrawLine(w, 9, 4, 9, 15);
@@ -2915,69 +3249,196 @@ partial class ShotService
             Btns.Add(b); Relayout(); Invalidate(); return b;
         }
 
-        // 下拉菜单项/按钮用的长预览图 (用户: "展示的长度稍微长点, 太短看不清楚")
+        // 旧 6 样式预览 (兼容): 细尾/空心走真实锥形预览, 其余映射到 PixPin 头型
         public static Bitmap MakeStylePreviewBmp(int style, bool forMenu)
         {
-            int W = forMenu ? 76 : 46, H = forMenu ? 22 : 18;
+            int end = 2, start = 0; bool callout = false; int shape = 0;
+            if (style == Annot.S_BOTH) { start = 2; end = 2; }
+            else if (style == Annot.S_LINE) { start = 0; end = 0; }
+            else if (style == Annot.S_CALLOUT) { callout = true; }
+            else if (style == Annot.S_THIN) { shape = Annot.S_THIN; }
+            else if (style == Annot.S_HOLLOW) { shape = Annot.S_HOLLOW; }
+            else { start = 0; end = 2; }
+            return MakeArrowPreviewBmp(start, end, false, 0, callout, shape, forMenu);
+        }
+
+        // 预览专用简化图标 (用户实测三次反馈: 源码几何缩到预览尺寸就是"胖图标", 看不清)
+        // 原则: 不求代码源码画法, 只求一眼分清 14 种样式 — 粗线 + 大头 + 高对比
+        //   key: 0直线 12五角 1开口 2实三角大 3实三角小 4实圆 5空圆 6实菱 7空菱 8刻度 9十字 14细尾实 15细尾空 99标注线
+        public static void DrawStyleGlyph(Graphics g, RectangleF box, int key, Color ink, bool doubleEnds)
+        {
+            float cy = box.Y + box.Height / 2f;
+            float m = Math.Max(4f, box.Width * 0.07f);
+            float x1 = box.X + m, x2 = box.Right - m;
+            float sw = Math.Max(2f, Math.Min(2.6f, box.Height * 0.09f)); // 粗线: 小尺寸也看得见
+            float sc = Math.Max(0.73f, Math.Min(1f, 22f / Math.Max(1f, box.Height))); // 盒高缩放: 按钮盒(22)=1.0 基准, 下拉行盒(30)缩至 0.73 (行宽同尺寸显大)
+
+            if (key == 99) // 标注线: 横线 + 两端短竖杠
+            {
+                using (Pen p = new Pen(ink, sw)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; g.DrawLine(p, x1, cy, x2, cy); }
+                float bl = Math.Min(9f, box.Height * 0.32f) * sc;
+                using (Pen p = new Pen(ink, sw)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round;
+                    g.DrawLine(p, x1, cy - bl, x1, cy + bl); g.DrawLine(p, x2, cy - bl, x2, cy + bl); }
+                return;
+            }
+            if (key == 14 || key == 15) // 细尾: 粗楔形 (实心填充/空心描边)
+            {
+                float hl = Math.Max(12f, (x2 - x1) * 0.22f) * sc;
+                float hh = hl * 0.5f;
+                PointF[] poly = new PointF[] {
+                    new PointF(x1, cy),
+                    new PointF(x2 - hl * 0.95f, cy - hh * 0.32f),
+                    new PointF(x2 - hl, cy - hh),
+                    new PointF(x2, cy),
+                    new PointF(x2 - hl, cy + hh),
+                    new PointF(x2 - hl * 0.95f, cy + hh * 0.32f) };
+                if (key == 14) { using (SolidBrush b = new SolidBrush(ink)) g.FillPolygon(b, poly); }
+                else using (Pen p = new Pen(ink, sw)) { p.LineJoin = LineJoin.Round; g.DrawPolygon(p, poly); }
+                return;
+            }
+
+            float back = GlyphHeadBack(key) * sc;
+            float sx1 = doubleEnds ? x1 + back : x1, sx2 = x2 - back;
+            using (Pen p = new Pen(ink, sw)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; g.DrawLine(p, sx1, cy, sx2, cy); }
+            if (key != 0)
+            {
+                DrawGlyphHead(g, key, x2, cy, 1f, ink, sw, sc);
+                if (doubleEnds) DrawGlyphHead(g, key, x1, cy, -1f, ink, sw, sc);
+            }
+        }
+
+        static float GlyphHeadBack(int key)
+        {
+            switch (key)
+            {
+                case 1: return 13f; case 2: return 16f; case 3: return 10f;
+                case 4: case 5: return 14f; case 6: case 7: return 18f;
+                case 8: return 7f; case 9: return 14f; case 12: return 17f;
+                default: return 0f;
+            }
+        }
+
+        // 头型本地坐标: 尖在原点, 头体沿 -x 展开; dir=+1 朝右 / -1 朝左
+        static PointF GPt(float tipX, float tipY, float dir, float lx, float ly)
+        {
+            return new PointF(tipX + dir * lx, tipY + ly);
+        }
+
+        static void DrawGlyphHead(Graphics g, int key, float tipX, float tipY, float dir, Color ink, float sw, float sc)
+        {
+            switch (key)
+            {
+                case 1: // 开口 V
+                    using (Pen p = new Pen(ink, sw)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+                        g.DrawLine(p, GPt(tipX, tipY, dir, -13 * sc, -8 * sc), GPt(tipX, tipY, dir, 0, 0));
+                        g.DrawLine(p, GPt(tipX, tipY, dir, 0, 0), GPt(tipX, tipY, dir, -13 * sc, 8 * sc)); }
+                    break;
+                case 2: case 3: // 实心三角 (大/小)
+                {
+                    float hl = (key == 2 ? 16f : 10f) * sc, hh = (key == 2 ? 9f : 6f) * sc;
+                    using (SolidBrush b = new SolidBrush(ink))
+                        g.FillPolygon(b, new PointF[] { GPt(tipX, tipY, dir, 0, 0), GPt(tipX, tipY, dir, -hl, -hh), GPt(tipX, tipY, dir, -hl, hh) });
+                    break;
+                }
+                case 4: case 5: // 实心圆/空心圆
+                {
+                    float r = 6.5f * sc;
+                    RectangleF rc = new RectangleF(tipX + dir * (-7f * sc) - r, tipY - r, r * 2, r * 2);
+                    if (key == 4) { using (SolidBrush b = new SolidBrush(ink)) g.FillEllipse(b, rc); }
+                    else using (Pen p = new Pen(ink, Math.Max(1.8f, sw * 0.85f))) g.DrawEllipse(p, rc);
+                    break;
+                }
+                case 6: case 7: // 实心菱形/空心菱形
+                {
+                    PointF[] poly = new PointF[] { GPt(tipX, tipY, dir, 0, 0), GPt(tipX, tipY, dir, -9 * sc, -7 * sc), GPt(tipX, tipY, dir, -18 * sc, 0), GPt(tipX, tipY, dir, -9 * sc, 7 * sc) };
+                    if (key == 6) { using (SolidBrush b = new SolidBrush(ink)) g.FillPolygon(b, poly); }
+                    else using (Pen p = new Pen(ink, Math.Max(1.8f, sw * 0.85f))) { p.LineJoin = LineJoin.Round; g.DrawPolygon(p, poly); }
+                    break;
+                }
+                case 8: // 刻度线
+                    using (Pen p = new Pen(ink, sw)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round;
+                        g.DrawLine(p, GPt(tipX, tipY, dir, -6 * sc, -7 * sc), GPt(tipX, tipY, dir, -6 * sc, 7 * sc)); }
+                    break;
+                case 9: // 十字
+                    using (Pen p = new Pen(ink, sw)) { p.StartCap = LineCap.Round; p.EndCap = LineCap.Round;
+                        g.DrawLine(p, GPt(tipX, tipY, dir, -8 * sc, -8 * sc), GPt(tipX, tipY, dir, -8 * sc, 8 * sc));
+                        g.DrawLine(p, GPt(tipX, tipY, dir, -14 * sc, 0), GPt(tipX, tipY, dir, -2 * sc, 0)); }
+                    break;
+                case 12: // 五角
+                {
+                    PointF[] star = new PointF[10];
+                    for (int i = 0; i < 10; i++)
+                    {
+                        double ang = -Math.PI / 2 + i * Math.PI / 5;
+                        float r = ((i % 2 == 0) ? 8f : 3.4f) * sc;
+                        star[i] = new PointF(tipX + dir * (-9f * sc) + (float)Math.Cos(ang) * r, tipY + (float)Math.Sin(ang) * r);
+                    }
+                    using (Pen p = new Pen(ink, Math.Max(1.8f, sw * 0.85f))) { p.LineJoin = LineJoin.Round; g.DrawPolygon(p, star); }
+                    break;
+                }
+            }
+        }
+
+        // 箭头预览图 (属性栏按钮 + 菜单项共用): 简化图标, 一眼分清 (画布仍走源码几何, 预览不走)
+        public static Bitmap MakeArrowPreviewBmp(int startType, int endType, bool smooth, int dash, bool callout, int shape, bool forMenu)
+        {
+            int W = forMenu ? 76 : 58, H = forMenu ? 22 : 22;
             Bitmap bmp = new Bitmap(W, H);
             using (Graphics g = Graphics.FromImage(bmp))
             {
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                g.Clear(Color.FromArgb(40, 41, 46)); // 填菜单底色: 透明底被 ToolStrip 缩放合成纯白 (用户实测看不见样式)
-                float cy = H / 2f, x1 = 3, x2 = W - 3;
+                g.Clear(Color.FromArgb(40, 41, 46));
                 Color c = Color.FromArgb(232, 234, 240);
-                using (Pen p = new Pen(c, 2.4f))
+                int key; bool dbl = false;
+                if (callout) key = 99;
+                else if (shape == Annot.S_THIN) key = 14;
+                else if (shape == Annot.S_HOLLOW) key = 15;
+                else { key = endType; dbl = (startType != 0); }
+                DrawStyleGlyph(g, new RectangleF(0, 0, W, H), key, c, dbl);
+            }
+            return bmp;
+        }
+
+        // 虚线样式预览 (属性栏按钮): 与画布同一 dash 数组
+        public static Bitmap MakeDashPreviewBmp(int dash, bool forMenu)
+        {
+            int W = forMenu ? 76 : 58, H = forMenu ? 22 : 22;
+            Bitmap bmp = new Bitmap(W, H);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.FromArgb(40, 41, 46));
+                using (Pen p = new Pen(Color.FromArgb(232, 234, 240), 2.8f))
                 {
-                    if (style == Annot.S_ARROW)
-                    {
-                        g.DrawLine(p, x1, cy, x2 - 8, cy);
-                        using (SolidBrush b = new SolidBrush(c)) g.FillPolygon(b, new PointF[] { new PointF(x2, cy), new PointF(x2 - 10f, cy - 5.5f), new PointF(x2 - 10f, cy + 5.5f) });
-                    }
-                    else if (style == Annot.S_BOTH)
-                    {
-                        g.DrawLine(p, x1 + 8, cy, x2 - 8, cy);
-                        using (SolidBrush b = new SolidBrush(c))
-                        {
-                            g.FillPolygon(b, new PointF[] { new PointF(x2, cy), new PointF(x2 - 10f, cy - 5.5f), new PointF(x2 - 10f, cy + 5.5f) });
-                            g.FillPolygon(b, new PointF[] { new PointF(x1, cy), new PointF(x1 + 10f, cy - 5.5f), new PointF(x1 + 10f, cy + 5.5f) });
-                        }
-                    }
-                    else if (style == Annot.S_LINE) g.DrawLine(p, x1, cy, x2, cy);
-                    else if (style == Annot.S_CALLOUT)
-                    {
-                        g.DrawLine(p, x1 + 5, cy, x2 - 5, cy);
-                        g.DrawLine(p, x1 + 5, cy - 7, x1 + 5, cy + 7);
-                        g.DrawLine(p, x2 - 5, cy - 7, x2 - 5, cy + 7);
-                    }
-                    else if (style == Annot.S_THIN)
-                    {
-                        float LL = x2 - x1, hhl2 = LL * 0.34f, hs3 = LL - hhl2;
-                        float hhw2 = 2.6f, chw2 = hhw2 * 2.6f, sw3 = hhl2 * 0.45f;
-                        using (SolidBrush b = new SolidBrush(c))
-                            g.FillPolygon(b, new PointF[] {
-                                new PointF(x1, cy), new PointF(x1 + hs3, cy - hhw2), new PointF(x1 + hs3 - sw3, cy - chw2),
-                                new PointF(x2, cy), new PointF(x1 + hs3 - sw3, cy + chw2), new PointF(x1 + hs3, cy + hhw2) });
-                    }
-                    else if (style == Annot.S_HOLLOW)
-                    {
-                        float LL = x2 - x1, hhl2 = LL * 0.34f, hs3 = LL - hhl2;
-                        float hhw2 = 2.6f, chw2 = hhw2 * 2.6f, sw3 = hhl2 * 0.45f;
-                        using (Pen hp = new Pen(c, 1.9f))
-                        {
-                            hp.LineJoin = LineJoin.Round;
-                            g.DrawPolygon(hp, new PointF[] {
-                                new PointF(x1, cy), new PointF(x1 + hs3, cy - hhw2), new PointF(x1 + hs3 - sw3, cy - chw2),
-                                new PointF(x2, cy), new PointF(x1 + hs3 - sw3, cy + chw2), new PointF(x1 + hs3, cy + hhw2) });
-                        }
-                    }
+                    p.StartCap = System.Drawing.Drawing2D.LineCap.Round; p.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                    PixPinArrowGeom.ApplyDash(p, dash);
+                    g.DrawLine(p, 4, H / 2f, W - 4, H / 2f);
                 }
             }
             return bmp;
         }
 
+        // 闭合填充预览 (属性栏按钮): 一个实心不规则多边形, 一眼看出"填充"是啥效果
+        public static Bitmap MakeFillPreviewBmp(bool forMenu)
+        {
+            int W = forMenu ? 76 : 58, H = forMenu ? 22 : 22;
+            Bitmap bmp = new Bitmap(W, H);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.FromArgb(40, 41, 46));
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(232, 234, 240)))
+                    g.FillPolygon(b, new PointF[] {
+                        new PointF(5, H - 5), new PointF(12, 5), new PointF(W * 0.45f, 9),
+                        new PointF(W * 0.62f, 4), new PointF(W - 5, H - 6) });
+            }
+            return bmp;
+        }
+
+        // 线宽预览 (竖排菜单每行一条按实际粗细的长预览线)
         public static Bitmap MakeWidthPreviewBmp(float lw, bool forMenu)
         {
-            int W = forMenu ? 76 : 46, H = forMenu ? 22 : 18;
+            int W = forMenu ? 76 : 58, H = forMenu ? 22 : 22;
             Bitmap bmp = new Bitmap(W, H);
             using (Graphics g = Graphics.FromImage(bmp))
             {
