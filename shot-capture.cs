@@ -301,6 +301,7 @@ partial class ShotService
         public int Dash = 0;         // 虚线: 0=实线 2/3/4/5 (见 PixPinArrowGeom.SetDash)
         public bool Fill = false;    // 折线闭合填充 (PixPin MarkBar.BrokenLine.Fill: 首尾闭合成多边形纯色填满, 无头型/虚线)
         public int MosaicStrength = 8; // 马赛克块强度 (PixPin MarkBar.Mosaic.MosaicStrength; 越大块越粗)
+        public int MosaicMode = 0;     // 马赛克模式 (PixPin MarkBar.Mosaic.MosaicMode: 0=马赛克 1=模糊)
         public int HlMode = M_NORMAL; // 荧光笔混合模式 (默认半透明: 多笔重叠自然加深不互相擦; 正片叠底单笔质感好但多笔会覆盖, 待画布架构修)
         public int HlAlpha = 102;    // 荧光笔透明度 (0-255; 档位 51/102/153/204/255 = 20/40/60/80/100%, 默认 40%)
         public float Width = 3f;     // 线宽
@@ -502,6 +503,7 @@ partial class ShotService
         static int markShape0 = 0; // 0=PixPin头型 4=细尾实心 5=细尾空心
         static int markMosaicStrength0 = 8; // 马赛克块强度 (PixPin MarkBar.Mosaic.MosaicStrength)
         static int markHlAlpha0 = 102;      // 荧光笔透明度 0-255 (档位 51/102/153/204/255, 默认 40%)
+        static int markMosaicMode0 = 0;     // 马赛克模式 (PixPin MarkBar.Mosaic.MosaicMode: 0=马赛克 1=模糊)
         // 荧光笔透明度合法档位: 配置值吸附到最近档, 保证菜单选中态判定用 == 即可
         static int[] HlAlphaStops = { 51, 102, 153, 204, 255 };
         static int HlAlphaNearest(int v)
@@ -519,6 +521,7 @@ partial class ShotService
                 markLoaded = true;
                 int ms2; if (int.TryParse(Cfg("mark.mosaicStrength", ""), out ms2) && ms2 >= 2 && ms2 <= 40) markMosaicStrength0 = ms2;
                 int ha2; if (int.TryParse(Cfg("mark.hlAlpha", ""), out ha2) && ha2 >= 0 && ha2 <= 255) markHlAlpha0 = HlAlphaNearest(ha2);
+                int mm2; if (int.TryParse(Cfg("mark.mosaicMode", ""), out mm2) && (mm2 == 0 || mm2 == 1)) markMosaicMode0 = mm2;
                 float w; if (float.TryParse(Cfg("mark.width", "3"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out w) && w >= 1 && w <= 20) markWidth0 = w;
                 int st; if (int.TryParse(Cfg("mark.arrowStyle", ""), out st)) markArrowStyle0 = st;
                 int ci; if (int.TryParse(Cfg("mark.color", ""), System.Globalization.NumberStyles.Integer, null, out ci)) markColor0 = Color.FromArgb(ci);
@@ -561,6 +564,7 @@ partial class ShotService
         bool curCallout = markCallout0;
         bool curFill = markFill0;                  // 折线闭合填充开关
         int curMosaicStrength = markMosaicStrength0;               // 马赛克块强度 (PixPin MarkBar.Mosaic.MosaicStrength)
+        int curMosaicMode = markMosaicMode0;                        // 马赛克模式 0=马赛克 1=模糊
         int curHlMode = Annot.M_NORMAL;            // 荧光笔混合模式 (默认半透明: 重叠不互相擦)
         int curHlAlpha = markHlAlpha0;              // 荧光笔透明度 (档位 51/102/153/204/255 = 20/40/60/80/100%)
         int curShape = markShape0;                  // 0=PixPin头型 4=细尾实心 5=细尾空心
@@ -679,6 +683,25 @@ partial class ShotService
                     Log("capture: hover level " + nv + "/" + (hoverChain.Length - 1) + " " + hoverChain[nv].Width + "x" + hoverChain[nv].Height);
                 }
                 return;
+            }
+            // 滚轮调粗细 (PixPin 官方: 画笔/荧光笔滚轮调粗细): 已框选+选了画笔类工具+未落笔
+            if (hasSel && cur == null && !textMode && tool != null)
+            {
+                bool wl = tool == "pen" || tool == "highlight" || tool == "mosaic" || tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "poly" || tool == "curve";
+                if (wl)
+                {
+                    float w = curWidth + (e.Delta > 0 ? 1f : -1f);
+                    float min = tool == "highlight" ? 14f : 1f; // 荧光笔保底高亮条粗度
+                    if (w < min) w = min;
+                    if (w > 40f) w = 40f;
+                    if (w != curWidth)
+                    {
+                        curWidth = w;
+                        MarkProp(); // 刷新属性栏粗细预览 + 落盘
+                        Log("capture: wheel width=" + curWidth + " tool=" + tool);
+                    }
+                    return;
+                }
             }
             base.OnMouseWheel(e);
         }
@@ -863,7 +886,7 @@ partial class ShotService
                 cur.Kind = tool == "rect" ? Annot.K_RECT : tool == "ellipse" ? Annot.K_ELLIPSE :
                            tool == "arrow" ? Annot.K_ARROW : tool == "seq" ? Annot.K_SEQ :
                            tool == "mosaic" ? Annot.K_MOSAIC : tool == "highlight" ? Annot.K_HIGHLIGHT : Annot.K_PEN;
-                cur.MosaicStrength = curMosaicStrength; cur.HlMode = curHlMode; cur.HlAlpha = curHlAlpha;
+                cur.MosaicStrength = curMosaicStrength; cur.MosaicMode = curMosaicMode; cur.HlMode = curHlMode; cur.HlAlpha = curHlAlpha;
                 cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
                 cur.StartType = curStartType; cur.EndType = curEndType; cur.Smooth = curSmooth; cur.Dash = curDash;
                 cur.Style = curCallout ? Annot.S_CALLOUT :
@@ -1241,23 +1264,44 @@ partial class ShotService
             }
         }
 
-        // UIA 子树命中: 在目标窗口辅助功能树里向下找包含 pt 的最小元素 (输入框/气泡/窗格级 = PixPin 手感来源)
-        // 返回整条父子链 [0]=窗口 → [n-1]=最深元素; PixPin「鼠标滚轮切换父子元素」就用这条链 (官方: 配置-截图-UI 检测=检测元素)
-        Rectangle[] UiaChainAt(IntPtr hwnd, Point pt)
+        // UIA 命中: 系统原生 FromPoint 直达最深元素, 再沿控制视图向上爬回窗口根 = 完整父子链
+        // (PixPin 级精度来源: 不逐层 FindAll — 每次 FindAll+N 次 Current 属性都是跨进程往返, 又慢又浅)
+        // 返回 [0]=窗口根 → [n-1]=最深元素 (与 hoverChain 语义一致)
+        public static Rectangle[] UiaProbeChain(Point pt)
+        {
+            List<Rectangle> chain = new List<Rectangle>();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var leaf = System.Windows.Automation.AutomationElement.FromPoint(new System.Windows.Point(pt.X, pt.Y));
+            var walker = System.Windows.Automation.TreeWalker.ControlViewWalker;
+            var e = leaf;
+            Rectangle last = Rectangle.Empty;
+            for (int i = 0; i < 24 && e != null; i++)
+            {
+                Rectangle r = RectOf(e);
+                if (!r.IsEmpty && r != last) { chain.Add(r); last = r; } // 相邻同 rect 去重
+                System.Windows.Automation.AutomationElement par = null;
+                try { par = walker.GetParent(e); } catch { }
+                if (par == null) break;
+                e = par;
+            }
+            chain.Reverse(); // 爬链是 叶子→根 收集, 反转成 根→叶子
+            if (sw.ElapsedMilliseconds > 800) Log("uia probe slow: " + sw.ElapsedMilliseconds + "ms depth=" + chain.Count);
+            return chain.ToArray();
+        }
+
+        // 兜底: FromHandle + 逐层 FindAll 面积最小命中 (FromPoint 对任务栏/Shell/自绘窗口不命中的场景)
+        // 返回 [0]=窗口 → [n-1]=最深
+        public static Rectangle[] UiaFallbackChain(IntPtr hwnd, Point pt)
         {
             var chain = new List<Rectangle>();
             try
             {
-                int dbgWalk = 0;
-                var sw = System.Diagnostics.Stopwatch.StartNew();
                 var cur = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
                 Rectangle rf = RectOf(cur);
                 if (!rf.IsEmpty) chain.Add(rf);
                 for (int depth = 0; depth < 8; depth++)
                 {
                     var kids = cur.FindAll(System.Windows.Automation.TreeScope.Children, System.Windows.Automation.Condition.TrueCondition);
-                    // walk 诊断日志已移除 (5Hz 刷屏)
-                    dbgWalk++;
                     System.Windows.Automation.AutomationElement next = null;
                     double best = double.MaxValue;
                     foreach (System.Windows.Automation.AutomationElement k in kids)
@@ -1281,28 +1325,63 @@ partial class ShotService
                     Rectangle rn = RectOf(cur);
                     if (!rn.IsEmpty) chain.Add(rn); // 这一层也进链 = 滚轮能停在中间层级
                 }
-                if (sw.ElapsedMilliseconds > 500)
-                {
-                    // 首查可能因 Chromium 惰性建树很慢 (实测 1761ms), 连续 5 次才判残废
-                    if (++uiaFailStreak >= 5) { uiaDisabled = 1; Log("hover uia slow x5 -> disabled this session"); }
-                }
-                else uiaFailStreak = 0;
                 if (chain.Count == 0) chain.Add(Rectangle.Empty);
-                return chain.ToArray();
+            }
+            catch { if (chain.Count == 0) chain.Add(Rectangle.Empty); }
+            return chain.ToArray();
+        }
+
+        // UIA 子树命中 (悬停主入口): ① FromPoint 直达叶子 ② 不中回落 FromHandle 逐层下钻
+        // 返回整条父子链 [0]=窗口 → [n-1]=最深元素; PixPin「鼠标滚轮切换父子元素」就用这条链 (官方: 配置-截图-UI 检测=检测元素)
+        Rectangle[] UiaChainAt(IntPtr hwnd, Point pt)
+        {
+            var chain = new List<Rectangle>();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            // ① 首选 FromPoint 原生命中 (直达叶子, 精度=PixPin 同级), 再截取目标窗口以下的链
+            try
+            {
+                Rectangle[] probe = UiaProbeChain(pt);
+                if (probe.Length > 0)
+                {
+                    RECT wr = new RECT(); bool haveWr = false;
+                    try { haveWr = GetWindowRect(hwnd, out wr); } catch { }
+                    Rectangle hr = haveWr ? Rectangle.FromLTRB(wr.Left, wr.Top, wr.Right, wr.Bottom) : Rectangle.Empty;
+                    int start = -1;
+                    for (int i = 0; i < probe.Length; i++)
+                    {
+                        // 链里第一个等于/包住目标窗口 rect 的层 = 窗口根, 从它开始截 (FromPoint 可能命中别的悬浮窗, 丢弃)
+                        Rectangle pr = probe[i];
+                        if (pr == hr || (hr.Width > 0 && hr.Contains(pr.Location) && pr.Contains(new Point(hr.X + hr.Width / 2, hr.Y + hr.Height / 2)))) { start = i; break; }
+                    }
+                    if (start < 0) start = 0; // 比对失败也用全链 (窗口 rect 可能因 DPI/阴影偏差)
+                    for (int i = start; i < probe.Length; i++) chain.Add(probe[i]);
+                }
+                if (chain.Count > 1) // depth<=1 = FromPoint 只命中桌面根/窗口壳 (任务栏/Shell 常见) → 走 FromHandle 兜底
+                {
+                    uiaFailStreak = 0;
+                    return chain.ToArray();
+                }
+                chain.Clear();
             }
             catch (Exception ex)
             {
-                if (++uiaFailStreak >= 5) { uiaDisabled = 1; Log("hover uia err x5: " + ex.Message); }
-                if (chain.Count == 0) chain.Add(Rectangle.Empty);
-                return chain.ToArray();
+                Log("uia probe err: " + ex.Message); // FromPoint 失败回落旧逻辑, 不累计熔断
             }
+            // ② 兜底: FromHandle + 逐层 FindAll
+            chain.AddRange(UiaFallbackChain(hwnd, pt));
+            // 慢只记日志不禁用: 首查慢是 Chromium 惰性建树 (实测 1761ms), 第二笔就走缓存 — 以前"慢5次全局禁UIA"把精度砍没了
+            if (sw.ElapsedMilliseconds > 800) Log("hover uia slow: " + sw.ElapsedMilliseconds + "ms depth=" + chain.Count + " (不禁用, 记录观察)");
+            else uiaFailStreak = 0;
+            return chain.ToArray();
         }
 
         static Rectangle RectOf(System.Windows.Automation.AutomationElement e)
         {
             try
             {
-                var r = e.Current.BoundingRectangle;
+                System.Windows.Rect r;
+                try { r = e.Cached.BoundingRectangle; } // CacheRequest 激活下创建的元素: 缓存直读, 零跨进程往返
+                catch { r = e.Current.BoundingRectangle; } // 无缓存的普通元素
                 if (r.IsEmpty) return Rectangle.Empty;
                 return new Rectangle((int)r.Left, (int)r.Top, (int)r.Width, (int)r.Height);
             }
@@ -1756,7 +1835,8 @@ partial class ShotService
                         break;
                     case Annot.K_MOSAIC:
                     {
-                        // 马赛克 (PixPin EditItemCustom/MarkBar.Mosaic.MosaicStrength): 原图块降采样再最近邻放大
+                        // 马赛克 (PixPin EditItemCustom/MarkBar.Mosaic.MosaicStrength): 原图块降采样再放大
+                        // MosaicMode 0=马赛克(最近邻放大=方块) 1=模糊(双三次放大=平滑糊化), 强度=缩放比
                         if (src != null)
                         {
                             Rectangle mr = a.Rect; mr.Offset(-offset.X, -offset.Y);
@@ -1772,8 +1852,24 @@ partial class ShotService
                                     gs.PixelOffsetMode = PixelOffsetMode.Half;
                                     gs.DrawImage(src, new Rectangle(0, 0, sw, sh), mr, GraphicsUnit.Pixel);
                                     g.PixelOffsetMode = PixelOffsetMode.Half;
-                                    g.InterpolationMode = InterpolationMode.NearestNeighbor;
-                                    g.DrawImage(small, mr); // 最近邻放大 = 方块马赛克
+                                    if (a.MosaicMode == 1)
+                                    {
+                                        // 模糊: 双三次插值放大 (无块感, 平滑糊化); 再过一遍小图强化糊度
+                                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                                        g.DrawImage(small, mr);
+                                        using (Bitmap small2 = new Bitmap(Math.Max(1, sw * 2), Math.Max(1, sh * 2)))
+                                        using (Graphics gs2 = Graphics.FromImage(small2))
+                                        {
+                                            gs2.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                                            gs2.DrawImage(small, new Rectangle(0, 0, small2.Width, small2.Height));
+                                            g.DrawImage(small2, mr);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                                        g.DrawImage(small, mr); // 最近邻放大 = 方块马赛克
+                                    }
                                     g.InterpolationMode = InterpolationMode.Bilinear;
                                     g.PixelOffsetMode = PixelOffsetMode.Default;
                                 }
@@ -2360,6 +2456,7 @@ partial class ShotService
             propBar = new ToolbarPanel();
             string[] lineTools = { "rect", "ellipse", "arrow", "pen", "highlight", "mosaic" }; // 颜色/粗细组 (荧光笔要高亮色; 马赛克用色块边距弱相关但保留一致)
             string[] hlOnly = { "highlight" }; // 荧光笔专属: 透明度
+            string[] mosaicOnly = { "mosaic" }; // 马赛克专属: 模式/强度
             string[] textTools = { "text", "seq" };
             string[] arrowOnly = { "arrow" };
             string[] arrowTools = { "arrow", "poly", "curve" }; // 头型/双向/虚线: 折线曲线也有 (PixPin BrokenLine 同款配置)
@@ -2492,6 +2589,46 @@ partial class ShotService
                 m.Show(propBar, hlAlphaBtn.Rect.X, hlAlphaBtn.Rect.Bottom + 2);
             }, hlOnly);
             hlAlphaBtn.ToolKey = "hlalpha";
+            // ---- 马赛克模式/强度 (mosaicOnly): 马赛克=方块 / 模糊=糊化; 强度档位 ----
+            ToolbarPanel.Btn mosModeBtn = null;
+            mosModeBtn = propBar.AddText(curMosaicMode == 1 ? "模糊" : "马赛克", "马赛克模式", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                string[][] modes = { new string[] { "0", "马赛克" }, new string[] { "1", "模糊" } };
+                foreach (string[] mo in modes)
+                {
+                    string mv = mo[0], ml = mo[1];
+                    ToolStripItem it = m.Items.Add(ml, null, delegate
+                    {
+                        curMosaicMode = int.Parse(mv);
+                        if (mosModeBtn != null) { mosModeBtn.DrawStr = ml; propBar.RelayoutNow(); }
+                        SaveMarkNow();
+                        Log("capture: mosaic mode=" + mv);
+                    });
+                    if (int.Parse(mv) == curMosaicMode) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, mosModeBtn.Rect.X, mosModeBtn.Rect.Bottom + 2);
+            }, mosaicOnly);
+            mosModeBtn.ToolKey = "mosmode";
+            ToolbarPanel.Btn mosStrBtn = null;
+            mosStrBtn = propBar.AddText(curMosaicStrength.ToString(), "马赛克强度 (块大小/模糊度)", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                foreach (int st in new int[] { 4, 8, 12, 20, 32 })
+                {
+                    int captured = st;
+                    ToolStripItem it = m.Items.Add(st.ToString(), null, delegate
+                    {
+                        curMosaicStrength = captured;
+                        if (mosStrBtn != null) { mosStrBtn.DrawStr = captured.ToString(); propBar.RelayoutNow(); }
+                        SaveMarkNow();
+                        Log("capture: mosaic strength=" + captured);
+                    });
+                    if (st == curMosaicStrength) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, mosStrBtn.Rect.X, mosStrBtn.Rect.Bottom + 2);
+            }, mosaicOnly);
+            mosStrBtn.ToolKey = "mosstr";
             propBar.AddSep(seqOnly);
             // ---- 序号组 (图2): [N⇅] [格式▾] ----
             ToolbarPanel.Btn startBtn = null;
@@ -2565,6 +2702,8 @@ partial class ShotService
                 else if (b.ToolKey == "dash") { var po = b.Preview; b.Preview = ToolbarPanel.MakeDashPreviewBmp(curDash, false); if (po != null) po.Dispose(); }
                 else if (b.ToolKey == "fill") b.DrawStr = curFill ? "填充:开" : "填充:关";
                 else if (b.ToolKey == "hlalpha") b.DrawStr = HlAlphaLabel(curHlAlpha) + " ▾";
+                else if (b.ToolKey == "mosmode") b.DrawStr = curMosaicMode == 1 ? "模糊" : "马赛克";
+                else if (b.ToolKey == "mosstr") b.DrawStr = curMosaicStrength.ToString();
                 else if (b.ToolKey == "wd") { var po = b.Preview; b.Preview = ToolbarPanel.MakeWidthPreviewBmp(curWidth, false); if (po != null) po.Dispose(); }
                 else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
             }
@@ -2575,7 +2714,7 @@ partial class ShotService
         // 标注参数落盘 (shot-service.json mark 节)
         void SaveMarkNow()
         {
-            try { SaveMarkCfg(curWidth, curStartType, curEndType, curSmooth, curDash, curCallout, curShape, curFill, curColor, curFontPt, curFontFamily, curSeqFmt, curMosaicStrength, curHlAlpha); } catch { }
+            try { SaveMarkCfg(curWidth, curStartType, curEndType, curSmooth, curDash, curCallout, curShape, curFill, curColor, curFontPt, curFontFamily, curSeqFmt, curMosaicStrength, curMosaicMode, curHlAlpha); } catch { }
         }
 
         void PlacePropBar()

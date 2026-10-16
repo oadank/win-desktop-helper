@@ -43,12 +43,30 @@ partial class ShotService
     static IntPtr WindowFromPointEx(POINT p, IntPtr exclude, bool deep, System.Collections.Generic.List<IntPtr> path)
     {
         IntPtr top = IntPtr.Zero;
-        EnumWindows(delegate (IntPtr h, IntPtr lp)
+        // 任务栏特判 (2026-10-17 实测): EnumWindows 枚举不到 Shell_TrayWnd (diag trayEnumSeen=false),
+        // 任务栏识别全靠这里 — 用常驻快照 (RefreshTaskbarWindows 5s 自刷新) 先查
+        IntPtr[] tbs = taskbarWnds;
+        foreach (IntPtr tw in tbs)
+        {
+            try
+            {
+                if (tw == exclude || tw == IntPtr.Zero || !IsWindowVisible(tw)) continue;
+                RECT tr;
+                if (!GetWindowRect(tw, out tr)) continue;
+                if (p.x >= tr.Left && p.x < tr.Right && p.y >= tr.Top && p.y < tr.Bottom) { top = tw; break; }
+            }
+            catch { }
+        }
+        if (top == IntPtr.Zero) EnumWindows(delegate (IntPtr h, IntPtr lp)
         {
             try
             {
                 if (h == exclude || !IsWindowVisible(h)) return true;
-                if ((GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return true;
+                StringBuilder cn0 = new StringBuilder(64);
+                GetClassNameW(h, cn0, 64);
+                string cname0 = cn0.ToString();
+                bool isShellBar = cname0 == "Shell_TrayWnd"; // 主任务栏: 带 TOOLWINDOW 样式但合法目标 (PixPin 可框可标)
+                if (!isShellBar && (GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return true;
                 // 不再按"自家进程"整锅排除: 否则截图永远认不到自家窗口 (实测: 对着自家设置窗连大框都不出, PixPin 能认到里面的输入框)。
                 // 自家浮窗里该排的各有归属: 遮罩=调用方 exclude 参数; 工具条/属性栏/下拉=遮罩的子 Panel (非顶级窗, 本就不进枚举);
                 // 贴图窗/结果窗 = 合法截图目标, 该认就认。
@@ -59,10 +77,7 @@ partial class ShotService
                 {
                     int cloaked;
                     if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return true; // UWP 幻影窗: rect 在但不可见
-                    StringBuilder cn = new StringBuilder(64);
-                    GetClassNameW(h, cn, 64);
-                    string cname = cn.ToString();
-                    if (cname == "Progman" || cname == "WorkerW") return true; // 桌面: 高亮全屏无意义
+                    if (cname0 == "Progman" || cname0 == "WorkerW") return true; // 桌面: 高亮全屏无意义
                     top = h; return false;
                 }
             }

@@ -3427,6 +3427,77 @@ public partial class ShotService
                     // 回收器挂在首次 /health 上启动(省掉一处 Main 改动; /health 必然是 agent 最先打的端点之一)
                     if (resTimer == null) StartResourceGc();
                 }
+                else if (path == "/uia")
+                {
+                    // UIA 识别自测 (模拟悬停全流程): ?x=&y= → WindowFromPoint 拿 hwnd → FromPoint 链, 不中回落 FromHandle 下钻
+                    // diag=1: 额外列出该点上所有可见顶层窗口 (类名/rect/TOOLWINDOW/cloaked), 识别不到时一眼看到被谁挡
+                    int ux, uy;
+                    if (!TryInt(q, "x", out ux) || !TryInt(q, "y", out uy)) { code = 400; body = "{\"ok\":false,\"error\":\"need ?x=&y= (screen coords)\"}"; }
+                    else
+                    {
+                        var swp = System.Diagnostics.Stopwatch.StartNew();
+                        if (q.ContainsKey("diag"))
+                        {
+                            var sbd = new System.Text.StringBuilder("{\"ok\":true,\"hit\":[");
+                            bool first = true;
+                            Action<IntPtr, string, RECT, bool, int> dump = delegate (IntPtr h, string c, RECT r, bool tw, int cl)
+                            {
+                                if (!first) sbd.Append(",");
+                                first = false;
+                                sbd.Append("{\"hwnd\":" + h.ToInt64() + ",\"class\":\"" + JsonEscape(c) + "\",\"r\":\"" + r.Left + "," + r.Top + " " + (r.Right - r.Left) + "x" + (r.Bottom - r.Top) + "\",\"toolwin\":" + (tw ? "true" : "false") + ",\"cloaked\":" + cl + "}");
+                            };
+                            IntPtr tray = FindWindowW("Shell_TrayWnd", null); // 任务栏无论盖不盖点都先 dump (rect 不含点=坐标系问题, rect 含点=枚举漏)
+                            bool traySeenByEnum = false;
+                            if (tray != IntPtr.Zero)
+                            {
+                                RECT tr; GetWindowRect(tray, out tr);
+                                bool ttw = (GetWindowLong(tray, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
+                                int tcl = 0; try { DwmGetWindowAttribute(tray, 14, out tcl, 4); } catch { }
+                                sbd.Append("{\"hwnd\":" + tray.ToInt64() + ",\"class\":\"Shell_TrayWnd\",\"r\":\"" + tr.Left + "," + tr.Top + " " + (tr.Right - tr.Left) + "x" + (tr.Bottom - tr.Top) + "\",\"toolwin\":" + (ttw ? "true" : "false") + ",\"cloaked\":" + tcl + ",\"visible\":" + (IsWindowVisible(tray) ? "true" : "false") + ",\"enumSeen\":");
+                                first = false;
+                            }
+                            EnumWindows(delegate (IntPtr h, IntPtr lp)
+                            {
+                                try
+                                {
+                                    if (h == tray) traySeenByEnum = true;
+                                    if (!IsWindowVisible(h)) return true;
+                                    RECT r;
+                                    if (!GetWindowRect(h, out r)) return true;
+                                    if (ux < r.Left || ux >= r.Right || uy < r.Top || uy >= r.Bottom) return true;
+                                    StringBuilder cb = new StringBuilder(64); GetClassNameW(h, cb, 64);
+                                    bool tw = (GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
+                                    int cl = 0; try { DwmGetWindowAttribute(h, 14, out cl, 4); } catch { }
+                                    if (!first) sbd.Append(",");
+                                    first = false;
+                                    sbd.Append("{\"hwnd\":" + h.ToInt64() + ",\"class\":\"" + JsonEscape(cb.ToString()) + "\",\"r\":\"" + r.Left + "," + r.Top + " " + (r.Right - r.Left) + "x" + (r.Bottom - r.Top) + "\",\"toolwin\":" + (tw ? "true" : "false") + ",\"cloaked\":" + cl + "}");
+                                }
+                                catch { }
+                                return true;
+                            }, IntPtr.Zero);
+                            if (tray != IntPtr.Zero) sbd.Append((IsWindowVisible(tray) ? "true" : "false") + "},\"trayEnumSeen\":" + (traySeenByEnum ? "true" : "false"));
+                            sbd.Append("]}");
+                            body = sbd.ToString();
+                        }
+                        else
+                        {
+                            IntPtr hw = WindowFromPointEx(new POINT { x = ux, y = uy }, IntPtr.Zero);
+                            Point up = new Point(ux, uy);
+                            Rectangle[] ch = CaptureOverlay.UiaProbeChain(up);
+                            string src = "frompoint";
+                            if (ch.Length <= 1) { ch = CaptureOverlay.UiaFallbackChain(hw, up); src = "fromhandle"; }
+                            System.Text.StringBuilder sb2 = new System.Text.StringBuilder("{\"ok\":true,\"x\":" + ux + ",\"y\":" + uy + ",\"hwnd\":" + hw.ToInt64() + ",\"src\":\"" + src + "\",\"depth\":" + ch.Length + ",\"ms\":" + swp.ElapsedMilliseconds + ",\"chain\":[");
+                            for (int i = 0; i < ch.Length; i++)
+                            {
+                                if (i > 0) sb2.Append(",");
+                                sb2.Append("{\"i\":" + i + ",\"r\":\"" + ch[i].X + "," + ch[i].Y + " " + ch[i].Width + "x" + ch[i].Height + "\"}");
+                            }
+                            sb2.Append("]}");
+                            body = sb2.ToString();
+                            Log("[uia-probe] " + ux + "," + uy + " hwnd=" + hw.ToInt64() + " src=" + src + " depth=" + ch.Length + " " + swp.ElapsedMilliseconds + "ms");
+                        }
+                    }
+                }
                 else if (path == "/diag/resources")
                 {
                     // 明细账本: 每个贴图窗多久了、本服务登记了哪些自造中间文件

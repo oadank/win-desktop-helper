@@ -72,7 +72,7 @@ partial class ShotService
         // 标注参数节 (PixPin MarkBar 同款跨会话记忆); 调用方没塞 mark 键时回读现值, 不丢
         Func<string, string, string> MK = (k, def) => d.ContainsKey("mark." + k) ? d["mark." + k] : Cfg("mark." + k, def);
         sb.Append("  \"mark\": { \"width\": " + J(MK("width", "3")) + ", \"arrowStart\": " + J(MK("arrowStart", "0")) + ", \"arrowEnd\": " + J(MK("arrowEnd", "2")) + ", \"smooth\": " + J(MK("smooth", "0")) + ", \"dash\": " + J(MK("dash", "0")) + ", \"callout\": " + J(MK("callout", "0")) + ", \"arrowStyle\": " + J(MK("arrowStyle", "")) + ", \"color\": " + J(MK("color", "")) +
-                  ", \"fontPt\": " + J(MK("fontPt", "")) + ", \"fontFamily\": " + J(MK("fontFamily", "")) + ", \"seqFmt\": " + J(MK("seqFmt", "1")) + ", \"mosaicStrength\": " + J(MK("mosaicStrength", "8")) + ", \"hlAlpha\": " + J(MK("hlAlpha", "102")) + " }\n");
+                  ", \"fontPt\": " + J(MK("fontPt", "")) + ", \"fontFamily\": " + J(MK("fontFamily", "")) + ", \"seqFmt\": " + J(MK("seqFmt", "1")) + ", \"mosaicStrength\": " + J(MK("mosaicStrength", "8")) + ", \"mosaicMode\": " + J(MK("mosaicMode", "0")) + ", \"hlAlpha\": " + J(MK("hlAlpha", "102")) + " }\n");
         sb.Append("}\n");
         File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
         Log("config saved: " + path + " (provider=" + d["translate.provider"] + ")");
@@ -80,7 +80,7 @@ partial class ShotService
 
     // 标注参数持久化 (PixPin MarkBar 同款): 工具条上改的线宽/箭头样式/颜色/字号/字体/序号格式, 写 shot-service.json mark 节, 下次截图自动恢复
     // 其余配置节原值回填, 不碰设置中心保存的东西
-    static void SaveMarkCfg(float width, int startType, int endType, bool smooth, int dash, bool callout, int shape, bool fill, Color color, int fontPt, string fontFamily, string seqFmt, int mosaicStrength, int hlAlpha)
+    static void SaveMarkCfg(float width, int startType, int endType, bool smooth, int dash, bool callout, int shape, bool fill, Color color, int fontPt, string fontFamily, string seqFmt, int mosaicStrength, int mosaicMode, int hlAlpha)
     {
         try
         {
@@ -115,6 +115,7 @@ partial class ShotService
             d["mark.fontFamily"] = fontFamily == null ? "" : fontFamily;
             d["mark.seqFmt"] = string.IsNullOrEmpty(seqFmt) ? "1" : seqFmt;
             d["mark.mosaicStrength"] = mosaicStrength.ToString();
+            d["mark.mosaicMode"] = mosaicMode.ToString();
             d["mark.hlAlpha"] = hlAlpha.ToString();
             SaveCfgDict(d);
         }
