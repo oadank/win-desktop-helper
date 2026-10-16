@@ -301,7 +301,7 @@ partial class ShotService
         public int Dash = 0;         // 虚线: 0=实线 2/3/4/5 (见 PixPinArrowGeom.SetDash)
         public bool Fill = false;    // 折线闭合填充 (PixPin MarkBar.BrokenLine.Fill: 首尾闭合成多边形纯色填满, 无头型/虚线)
         public int MosaicStrength = 8; // 马赛克块强度 (PixPin MarkBar.Mosaic.MosaicStrength; 越大块越粗)
-        public int HlMode = M_MULTIPLY; // 荧光笔混合模式 (PixPin 默认正片叠底; 深色背景可切半透明)
+        public int HlMode = M_NORMAL; // 荧光笔混合模式 (默认半透明: 多笔重叠自然加深不互相擦; 正片叠底单笔质感好但多笔会覆盖, 待画布架构修)
         public float Width = 3f;     // 线宽
         public int FontPt = 14;      // 文字/序号字号
         public string SeqFmt = "1";  // 序号格式: 1=1.2.3  I=I.II.III  a=a.b.c  A=A.B.C
@@ -548,7 +548,7 @@ partial class ShotService
         bool curCallout = markCallout0;
         bool curFill = markFill0;                  // 折线闭合填充开关
         int curMosaicStrength = markMosaicStrength0;               // 马赛克块强度 (PixPin MarkBar.Mosaic.MosaicStrength)
-        int curHlMode = Annot.M_MULTIPLY;          // 荧光笔混合模式 (PixPin 默认正片叠底)
+        int curHlMode = Annot.M_NORMAL;            // 荧光笔混合模式 (默认半透明: 重叠不互相擦)
         int curShape = markShape0;                  // 0=PixPin头型 4=细尾实心 5=细尾空心
         Point polyHover = Point.Empty;              // 折线绘制中的橡皮筋落点 (屏坐标)
         bool polyHoverOk = false;
