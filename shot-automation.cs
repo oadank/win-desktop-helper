@@ -693,15 +693,12 @@ partial class ShotService
     static string ClipboardSetText(string text)
     {
         string err = null;
-        Thread t = new Thread(new ThreadStart(delegate
+        // 串到全局剪贴板锁, 防与 watcher/历史UI 抢 OpenClipboard 导致系统粘贴挂死
+        ClipDo(delegate
         {
             try { Clipboard.SetText(text); }
             catch (Exception ex) { err = ex.Message; }
-        }));
-        t.SetApartmentState(ApartmentState.STA);
-        t.IsBackground = true;
-        t.Start();
-        t.Join(3000);
+        }, "set-text");
         if (err != null) return "{\"ok\":false,\"error\":\"" + JsonEscape(err) + "\"}";
         return "{\"ok\":true,\"chars\":" + text.Length + "}";
     }
@@ -968,7 +965,7 @@ partial class ShotService
                           ",\"offscreen\":" + (UiaOffscreen(e) ? "true" : "false") +
                           ",\"patterns\":\"" + JsonEscape(string.Join(",", pats.ToArray())) + "\"}");
             }
-            return "{\"ok\":true,\"hwnd\":" + h.ToInt64() + ",\"count\":" + n + (all.Count > n ? ",\"truncated\":true" : "") +
+            return "{\"ok\":true,\"hwnd\":" + h.ToInt64() + ",\"count\":" + n + (all.Count > n ? ",\"truncated\":true,\"hint\":\"树没走完, 只返回前 " + max + " 个元素 —— 加大 max= 参数(本端点上限5000)或换更小的窗口缩小范围\"" : "") +
                    ",\"elements\":[" + string.Join(",", items.ToArray()) + "]}";
         }
         catch (Exception ex)
@@ -1694,9 +1691,14 @@ partial class ShotService
         }
     }
 
-    // ==================== 屏幕录制 (抓帧管道 -> ffmpeg -> MP4 h264) ====================
+    // ==================== 屏幕录制 (抓帧管道 -> ffmpeg) ====================
+    // mp4: 帧流直灌 ffmpeg -> h264。gif: 帧先落盘 raw (palettegen/paletteuse 两遍编码会回吃整段帧, 直灌管道会把整段视频吃进内存), 停止后 ffmpeg 两遍出 GIF
     static System.Diagnostics.Process recProc;
     static System.IO.StreamWriter recStdin;
+    static System.IO.FileStream recRaw;   // gif 模式: 原始帧落盘
+    static string recRawPath;
+    static string recFmt = "mp4";         // mp4 | gif
+    static DateTime recMaxEnd = DateTime.MaxValue; // gif 120s 上限 (防 raw 落盘无限膨胀)
     static Thread recThread;
     static volatile bool recording;
     static string recPath;
@@ -1705,13 +1707,14 @@ partial class ShotService
     static int recFps;
 
     static readonly object recLock = new object();
-    static string RecordStart(int x, int y, int w, int h, int fps)
+    static string RecordStart(int x, int y, int w, int h, int fps, string fmt)
     {
         HookRecExitStop(); // 进程退出时自动收尾录屏 (兜底: 不让 ffmpeg 孤儿/文件烂尾)
         bool fpsNorm = false, sizeClamped = false;
         lock (recLock) // R2: 检查+置位+启动整段互斥 (并发六连曾全回 ok 共用同一路径, ffmpeg 成孤儿)
         {
         if (recording) return "{\"ok\":false,\"error\":\"already recording\",\"file\":\"" + JsonEscape(recPath) + "\"}";
+        recFmt = (fmt == "gif") ? "gif" : "mp4";
         // R1: 像素上限 4M, 超限回退虚拟屏 — 100000x100000(40GB Bitmap) 一条 URL 打挂进程
         bool wantFull = (w <= 0 || h <= 0);
         if (wantFull || (long)w * h > 4000000L)
@@ -1723,30 +1726,44 @@ partial class ShotService
         if (fps <= 0 || fps > 30) { fps = 10; fpsNorm = true; }
         recRect = new Rectangle(x, y, w, h);
         recFps = fps;
-        recPath = System.IO.Path.Combine(ShotDir, "rec_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".mp4"); // 毫秒防同名
-        try
+        string ts = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff");
+        recRaw = null; recRawPath = null;
+        recMaxEnd = (recFmt == "gif") ? DateTime.Now.AddSeconds(120) : DateTime.MaxValue; // gif 上限 120s
+        if (recFmt == "gif")
         {
-            var psi = new System.Diagnostics.ProcessStartInfo("ffmpeg",
-                "-hide_banner -loglevel error -f rawvideo -pixel_format bgra -video_size " + w + "x" + h +
-                " -framerate " + fps + " -i - -c:v libx264 -preset ultrafast -crf 26 -pix_fmt yuv420p -y \"" + recPath + "\"");
-            psi.UseShellExecute = false;
-            psi.RedirectStandardInput = true;
-            psi.CreateNoWindow = true;
-            recProc = System.Diagnostics.Process.Start(psi);
-            recStdin = recProc.StandardInput;
+            // GIF: 帧落盘 raw, 停止后两遍编码 (palettegen 全局调色板 + bayer 抖动, 颜色渐变不出现色带)
+            recPath = System.IO.Path.Combine(ShotDir, "rec_" + ts + ".gif");
+            recRawPath = System.IO.Path.Combine(ShotDir, "rec_" + ts + ".raw");
+            try { recRaw = new System.IO.FileStream(recRawPath, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None, 1 << 20); }
+            catch (Exception ex) { return "{\"ok\":false,\"error\":\"gif raw open failed: " + JsonEscape(ex.Message) + "\"}"; }
         }
-        catch (Exception ex)
+        else
         {
-            return "{\"ok\":false,\"error\":\"ffmpeg start failed: " + JsonEscape(ex.Message) + "\"}";
+            recPath = System.IO.Path.Combine(ShotDir, "rec_" + ts + ".mp4"); // 毫秒防同名
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo("ffmpeg",
+                    "-hide_banner -loglevel error -f rawvideo -pixel_format bgra -video_size " + w + "x" + h +
+                    " -framerate " + fps + " -i - -c:v libx264 -preset ultrafast -crf 26 -pix_fmt yuv420p -y \"" + recPath + "\"");
+                psi.UseShellExecute = false;
+                psi.RedirectStandardInput = true;
+                psi.CreateNoWindow = true;
+                recProc = System.Diagnostics.Process.Start(psi);
+                recStdin = recProc.StandardInput;
+            }
+            catch (Exception ex)
+            {
+                return "{\"ok\":false,\"error\":\"ffmpeg start failed: " + JsonEscape(ex.Message) + "\"}";
+            }
         }
         recording = true;
         recStart = DateTime.Now;
         recThread = new Thread(new ThreadStart(RecordLoop));
         recThread.IsBackground = true;
         recThread.Start();
-        Log("record start: " + recRect.ToString() + " fps=" + fps);
-        return "{\"ok\":true,\"file\":\"" + JsonEscape(recPath) + "\",\"fps\":" + fps + (fpsNorm ? ",\"fpsNormalized\":true" : "") +
-               ",\"video_size\":\"" + w + "x" + h + "\"" + (sizeClamped ? ",\"sizeClamped\":true" : "") + "}";
+        Log("record start: " + recRect.ToString() + " fps=" + fps + " fmt=" + recFmt);
+        return "{\"ok\":true,\"fmt\":\"" + recFmt + "\",\"file\":\"" + JsonEscape(recPath) + "\",\"fps\":" + fps + (fpsNorm ? ",\"fpsNormalized\":true" : "") +
+               ",\"video_size\":\"" + w + "x" + h + "\"" + (sizeClamped ? ",\"sizeClamped\":true" : "") + (recFmt == "gif" ? ",\"maxDurationSec\":120" : "") + "}";
         }
     }
 
@@ -1772,39 +1789,79 @@ partial class ShotService
                         for (int y = 0; y < bh; y++)
                         {
                             Marshal.Copy(new IntPtr(ptr.ToInt64() + y * bd.Stride), row, 0, row.Length);
-                            recStdin.BaseStream.Write(row, 0, row.Length);
-                            recStdin.BaseStream.Flush();
+                            if (recRaw != null) recRaw.Write(row, 0, row.Length); // gif: 落盘
+                            else { recStdin.BaseStream.Write(row, 0, row.Length); recStdin.BaseStream.Flush(); } // mp4: 灌 ffmpeg
                         }
                     }
                     finally { frame.UnlockBits(bd); }
                 }
                 catch (Exception ex) { Log("record frame err: " + ex.Message); break; }
                 Thread.Sleep(1000 / recFps);
+                if (recording && DateTime.Now > recMaxEnd)
+                {
+                    // gif 120s 上限自动停: 自线程收尾 (RecordStop 内部已防自 join), 编码完成后气泡通知
+                    Log("gif max duration reached, auto stop");
+                    recording = false;
+                    string rr = RecordStop();
+                    CaptureOverlay.RunOnHk(delegate
+                    {
+                        try { CaptureOverlay.CloseRecordHud(); } catch { }
+                        try { CloseRecBorder(); } catch { }
+                        try { ShowTrayInfo("GIF 到 2 分钟上限已自动保存: " + recPath.Replace("\\", "/")); } catch { }
+                    });
+                    break;
+                }
             }
         }
-        try { recStdin.BaseStream.Flush(); recStdin.BaseStream.Close(); } catch { }
+        try { if (recStdin != null) { recStdin.BaseStream.Flush(); recStdin.BaseStream.Close(); } } catch { }
     }
 
     static string RecordStop()
     {
         if (!recording) return "{\"ok\":false,\"error\":\"not recording\"}";
         recording = false;
-        if (recThread != null) recThread.Join(4000);
+        if (recThread != null && recThread != Thread.CurrentThread) recThread.Join(6000); // 自线程(120s自动停)调进来不 join 自己
+        bool isGif = (recFmt == "gif");
+        long bytes = 0;
+        double dur = (DateTime.Now - recStart).TotalSeconds;
+        if (isGif)
+        {
+            // GIF: raw 落盘完 -> ffmpeg 两遍编码 (palettegen 全局调色板 -> paletteuse bayer 抖动)
+            try { recRaw.Flush(); recRaw.Close(); } catch { }
+            string err = "";
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo("ffmpeg",
+                    "-hide_banner -loglevel error -f rawvideo -pixel_format bgra -video_size " + recRect.Width + "x" + recRect.Height +
+                    " -framerate " + recFps + " -i \"" + recRawPath +
+                    "\" -vf \"fps=" + recFps + ",split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=bayer:bayer_scale=4\" -loop 0 -y \"" + recPath + "\"");
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                var p = System.Diagnostics.Process.Start(psi);
+                if (!p.WaitForExit(180000)) { try { p.Kill(); } catch { } err = "gif encode timeout"; }
+                p.Dispose();
+            }
+            catch (Exception ex) { err = "gif encode failed: " + JsonEscape(ex.Message); }
+            try { System.IO.File.Delete(recRawPath); } catch { } // raw 中间产物用完即删
+            recRaw = null; recRawPath = null; recThread = null;
+            try { var fi = new System.IO.FileInfo(recPath); bytes = fi.Length; } catch { }
+            Log("record stop(gif): " + recPath + " " + bytes + "B " + (int)dur + "s" + (err != "" ? " ERR:" + err : ""));
+            if (err != "") return "{\"ok\":false,\"fmt\":\"gif\",\"error\":\"" + err + "\",\"file\":\"" + JsonEscape(recPath) + "\"}";
+            return "{\"ok\":true,\"fmt\":\"gif\",\"file\":\"" + JsonEscape(recPath) + "\",\"bytes\":" + bytes + ",\"durationSec\":" + (int)dur + "}";
+        }
         try { recStdin.BaseStream.Close(); } catch { }
         bool exited = recProc.WaitForExit(15000);
         if (!exited) { try { recProc.Kill(); } catch { } }
-        long bytes = 0;
-        double dur = (DateTime.Now - recStart).TotalSeconds;
         try { var fi = new System.IO.FileInfo(recPath); bytes = fi.Length; } catch { }
         Log("record stop: " + recPath + " " + bytes + "B " + (int)dur + "s");
         recProc.Dispose(); recProc = null; recStdin = null; recThread = null;
-        return "{\"ok\":true,\"file\":\"" + JsonEscape(recPath) + "\",\"bytes\":" + bytes + ",\"durationSec\":" + (int)dur + "}";
+        return "{\"ok\":true,\"fmt\":\"mp4\",\"file\":\"" + JsonEscape(recPath) + "\",\"bytes\":" + bytes + ",\"durationSec\":" + (int)dur + "}";
     }
 
     static string RecordStatus()
     {
         if (!recording) return "{\"ok\":true,\"recording\":false}";
-        return "{\"ok\":true,\"recording\":true,\"file\":\"" + JsonEscape(recPath) + "\",\"elapsedSec\":" + (int)(DateTime.Now - recStart).TotalSeconds + ",\"fps\":" + recFps + "}";
+        return "{\"ok\":true,\"recording\":true,\"fmt\":\"" + recFmt + "\",\"file\":\"" + JsonEscape(recPath) + "\",\"elapsedSec\":" + (int)(DateTime.Now - recStart).TotalSeconds + ",\"fps\":" + recFps + "}";
     }
 
     // ---- 录屏可视化: 录制区域红框环 (画在区域外圈 4px, 不遮镜头不入镜; 点击穿透) ----
@@ -1886,6 +1943,7 @@ partial class ShotService
                 if (!recording) return;
                 recording = false;
                 try { recStdin.BaseStream.Close(); } catch { }
+                try { recRaw.Close(); } catch { } // gif: raw 落盘收尾 (来不及编码, 但帧不丢用户可手动转)
                 Log("record finalize on process exit: " + recPath);
             }
             catch { }
@@ -1925,7 +1983,7 @@ partial class ShotService
                 if (val.Length > 1000) val = val.Substring(0, 1000);
                 items.Add("{\"i\":" + i + ",\"type\":\"" + JsonEscape(ctl) + "\",\"name\":\"" + JsonEscape(name) + "\",\"value\":\"" + JsonEscape(val) + "\",\"enabled\":" + (en ? "true" : "false") + "}");
             }
-            return "{\"ok\":true,\"hwnd\":" + h.ToInt64() + ",\"count\":" + n + (all.Count > n ? ",\"truncated\":true" : "") + ",\"elements\":[" + string.Join(",", items.ToArray()) + "]}";
+            return "{\"ok\":true,\"hwnd\":" + h.ToInt64() + ",\"count\":" + n + (all.Count > n ? ",\"truncated\":true,\"hint\":\"树没走完, 只返回前 " + max + " 个元素 —— 加大 max= 参数(本端点上限2000)或换更小的窗口缩小范围\"" : "") + ",\"elements\":[" + string.Join(",", items.ToArray()) + "]}";
         }
         catch (Exception ex)
         {

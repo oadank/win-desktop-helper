@@ -25,6 +25,9 @@ partial class ShotService
         d["ocr.model"] = Cfg("ocr.model", "");
         d["ocr.apiKey"] = Cfg("ocr.apiKey", "");
         d["ocr.apiKeys"] = Cfg("ocr.apiKeys", "");   // 多 key 轮换: "key@endpoint|key@endpoint|..."
+        d["clipboard.ignoreApps"] = Cfg("clipboard.ignoreApps", "keepass,keepassxc,1password,bitwarden,lastpass,dashlane,enpass,roboform,keeper");
+        d["clipboard.peers"] = Cfg("clipboard.peers", "");
+        d["clipboard.syncPush"] = Cfg("clipboard.syncPush", "0");
         d["translate.provider"] = Cfg("translate.provider", "local");
         d["translate.endpoint"] = Cfg("translate.endpoint", "http://127.0.0.1:11434/api/generate");
         d["translate.model"] = Cfg("translate.model", "qwen3-vl:4b-instruct");
@@ -57,7 +60,7 @@ partial class ShotService
         sb.Append("    \"hotkeyFull\": " + J(d["capture.hotkeyFull"]) + ",\n");
         sb.Append("    \"hotkeyPin\": " + J(d["capture.hotkeyPin"]) + "\n");
         sb.Append("  },\n");
-        sb.Append("  \"clipboard\": { \"enabled\": " + J(d["clipboard.enabled"]) + ", \"max\": " + J(d["clipboard.max"]) + " },\n");
+        sb.Append("  \"clipboard\": { \"enabled\": " + J(d["clipboard.enabled"]) + ", \"max\": " + J(d["clipboard.max"]) + ", \"ignoreApps\": " + J(d["clipboard.ignoreApps"]) + ", \"peers\": " + J(d["clipboard.peers"]) + ", \"syncPush\": " + J(d["clipboard.syncPush"]) + " },\n");
         sb.Append("  \"volume\": { \"enabled\": " + J(d["volume.enabled"]) + ", \"step\": " + J(d["volume.step"]) + ", \"reverse\": " + J(d["volume.reverse"]) + " },\n");
         sb.Append("  \"pick\": {\n");
         sb.Append("    \"enabled\": " + J(d["pick.enabled"]) + ",\n");
@@ -65,15 +68,52 @@ partial class ShotService
         sb.Append("    \"askKey\": " + J(d["pick.askKey"]) + ",\n");
         sb.Append("    \"askModel\": " + J(d["pick.askModel"]) + ",\n");
         sb.Append("    \"askPrompt\": " + J(d["pick.askPrompt"]) + "\n");
-        sb.Append("  }\n");
+        sb.Append("  },\n");
+        // 标注参数节 (PixPin MarkBar 同款跨会话记忆); 调用方没塞 mark 键时回读现值, 不丢
+        Func<string, string, string> MK = (k, def) => d.ContainsKey("mark." + k) ? d["mark." + k] : Cfg("mark." + k, def);
+        sb.Append("  \"mark\": { \"width\": " + J(MK("width", "3")) + ", \"arrowStyle\": " + J(MK("arrowStyle", "")) + ", \"color\": " + J(MK("color", "")) +
+                  ", \"fontPt\": " + J(MK("fontPt", "")) + ", \"fontFamily\": " + J(MK("fontFamily", "")) + ", \"seqFmt\": " + J(MK("seqFmt", "1")) + " }\n");
         sb.Append("}\n");
         File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
         Log("config saved: " + path + " (provider=" + d["translate.provider"] + ")");
     }
 
-    // 最小 json 字符串转义
-    static string J(string s)
+    // 标注参数持久化 (PixPin MarkBar 同款): 工具条上改的线宽/箭头样式/颜色/字号/字体/序号格式, 写 shot-service.json mark 节, 下次截图自动恢复
+    // 其余配置节原值回填, 不碰设置中心保存的东西
+    static void SaveMarkCfg(float width, int arrowStyle, Color color, int fontPt, string fontFamily, string seqFmt)
     {
+        try
+        {
+            var d = LoadCfgDict();
+            d["capture.dir"] = Cfg("capture.dir", "");
+            d["capture.hotkeyRegion"] = Cfg("capture.hotkeyRegion", "");
+            d["capture.hotkeyFull"] = Cfg("capture.hotkeyFull", "");
+            d["capture.hotkeyPin"] = Cfg("capture.hotkeyPin", "");
+            d["clipboard.enabled"] = Cfg("clipboard.enabled", "1");
+            d["clipboard.max"] = Cfg("clipboard.max", "50");
+            d["clipboard.peers"] = Cfg("clipboard.peers", "");
+            d["clipboard.syncPush"] = Cfg("clipboard.syncPush", "0");
+            d["volume.enabled"] = Cfg("volume.enabled", "1");
+            d["volume.step"] = Cfg("volume.step", "2");
+            d["volume.reverse"] = Cfg("volume.reverse", "0");
+            d["pick.enabled"] = Cfg("pick.enabled", "1");
+            d["pick.askEndpoint"] = Cfg("pick.askEndpoint", "http://127.0.0.1:4000/chat/completions");
+            d["pick.askKey"] = Cfg("pick.askKey", "");
+            d["pick.askModel"] = Cfg("pick.askModel", "GwV4F");
+            d["pick.askPrompt"] = Cfg("pick.askPrompt", "");
+            d["mark.width"] = ((double)width).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            d["mark.arrowStyle"] = arrowStyle.ToString();
+            d["mark.color"] = color.ToArgb().ToString();
+            d["mark.fontPt"] = fontPt.ToString();
+            d["mark.fontFamily"] = fontFamily == null ? "" : fontFamily;
+            d["mark.seqFmt"] = string.IsNullOrEmpty(seqFmt) ? "1" : seqFmt;
+            SaveCfgDict(d);
+        }
+        catch (Exception ex) { Log("mark cfg save err: " + ex.Message); }
+    }
+
+    // 最小 json 字符串转义
+    static string J(string s)    {
         if (s == null) s = "";
         var b = new StringBuilder();
         b.Append('"');
@@ -102,6 +142,9 @@ partial class ShotService
         d["capture.hotkeyPin"] = Cfg("capture.hotkeyPin", "");
         d["clipboard.enabled"] = Cfg("clipboard.enabled", "1");
         d["clipboard.max"] = Cfg("clipboard.max", "50");
+        d["clipboard.ignoreApps"] = Cfg("clipboard.ignoreApps", "keepass,keepassxc,1password,bitwarden,lastpass,dashlane,enpass,roboform,keeper");
+        d["clipboard.peers"] = Cfg("clipboard.peers", "");
+        d["clipboard.syncPush"] = Cfg("clipboard.syncPush", "0");
         d["volume.enabled"] = Cfg("volume.enabled", "1");
         d["volume.step"] = Cfg("volume.step", "2");
         d["volume.reverse"] = Cfg("volume.reverse", "0");
@@ -331,8 +374,11 @@ partial class ShotService
         clipEn.Checked = d["clipboard.enabled"] == "1";
         mkL(pgClip, "最大条数:", LX, 50);
         TextBox clipMaxT = mkT(pgClip); clipMaxT.Left = FX; clipMaxT.Top = 47; clipMaxT.Width = 80; clipMaxT.Text = d["clipboard.max"];
-        mkDim(pgClip, "5 - 500 条, 超出自动淘汰最旧", FX + 90, 50);
-        mkDim(pgClip, "热键 " + (clipHotkeyName == "" ? "Ctrl+Alt+V" : clipHotkeyName) + " 弹历史 · 保存后条数立即生效", LX, 84);
+        mkDim(pgClip, "5 - 500 条, 超出自动淘汰最旧(收藏除外)", FX + 90, 50);
+        mkL(pgClip, "忽略应用:", LX, 86);
+        TextBox clipIgT = mkT(pgClip); clipIgT.Left = FX; clipIgT.Top = 83; clipIgT.Width = FW; clipIgT.Text = d["clipboard.ignoreApps"];
+        mkDim(pgClip, "逗号分隔进程名(如 keepass,1password)。这些应用复制的内容不进历史, 防密码泄露", LX, 114);
+        mkDim(pgClip, "热键 " + (clipHotkeyName == "" ? "Ctrl+Alt+V" : clipHotkeyName) + " 弹历史 · 输入框可筛选 · Ctrl+P/右键收藏(不淘汰) · 保存后条数立即生效", LX, 138);
 
         // ==================== 页 5: 任务栏音量 ====================
         CheckBox volEn = mkC(pgVol); volEn.Text = "启用任务栏滚轮调音量 (滚轮=音量, 中键=静音)"; volEn.Left = LX; volEn.Top = 14; volEn.AutoSize = true;
@@ -465,6 +511,7 @@ partial class ShotService
             d["capture.hotkeyPin"] = hkPin.Text.Trim();
             d["clipboard.enabled"] = clipEn.Checked ? "1" : "0";
             int cmv; d["clipboard.max"] = (int.TryParse(clipMaxT.Text.Trim(), out cmv) && cmv >= 5 && cmv <= 500) ? cmv.ToString() : "50";
+            d["clipboard.ignoreApps"] = clipIgT.Text.Trim();
             d["volume.enabled"] = volEn.Checked ? "1" : "0";
             int vsv; d["volume.step"] = (int.TryParse(volStepT.Text.Trim(), out vsv) && vsv >= 1 && vsv <= 20) ? vsv.ToString() : "2";
             d["volume.reverse"] = volRev.Checked ? "1" : "0";
@@ -480,6 +527,9 @@ partial class ShotService
                 // 立即生效项
                 clipMax = int.Parse(d["clipboard.max"]);
                 clipEnabled = d["clipboard.enabled"] == "1" ? 1 : 0;
+                clipIgnoreApps = d["clipboard.ignoreApps"];
+                lock (clipLock) { ClipHistEvictLocked(); }
+                SaveClipHistory();
                 volEnabled = d["volume.enabled"] == "1" ? 1 : 0;
                 volStep = int.Parse(d["volume.step"]);
                 volReverse = d["volume.reverse"] == "1" ? 1 : 0;

@@ -39,3 +39,15 @@ _记录日期: 2026-09-19 · 应用: self_
 **验收结论（已实测）**：贴图入账 `pinnedWindows=1` → 明细 `pinLedger=[{"hwnd":2294070,"ageSec":4}]` → 用该句柄 `/win/close` 返回 `closed:true` → 销账 `pinnedWindows=0 / pinClosedTotal=1`，桌面残留 0。回收器 `gcTicks` 随时间递增（首轮 20s 后触发，故刚重启时读到 0 属正常，别误判成没启动）。
 
 **顺带一条判断依据**：截图目录 30 分钟内从 508 涨到 510 个文件，新增的是 `qr_huge.png` —— **不是本服务写的**。这正好证明"按目录扫射删旧文件"有多危险：这个目录里同时有用户的截图、别的 agent 的中间图，谁都不该被自动清理。回收只能针对**自己登记过的**文件。
+
+## helper 掉进 Session 0 的识别与修复（2026-10-15）
+
+_记录日期: 2026-10-15 · 应用: self_
+
+🔴 2026-10-15 10:23:47 出现 helper 被拉进 Session 0 的实例（health 显示 session=0，划词/托盘全废）。父进程已死查不到凶手（疑为某个 agent 在 pwsh 里直接 spawn exe）。修复姿势：schtasks /run /tn WinDesktopHelper（任务带 /RL HIGHEST 且交互式），拉起后 health 必须回 session=1 才算活。判据：session=0 = 划词球根本不在桌面会话里，别去查取词代码。
+
+## Session 0 枚举不到桌面窗口
+
+_记录日期: 2026-10-15 · 应用: self_
+
+🔴 Session 0 窗口盲区（2026-10-15 实锤）：dsh-web 的 pwsh 里 EnumWindows/WindowFromPoint 对桌面（Session 1）窗口全部返回空/0——连正常的浏览器窗口都"看不见"。凡是解剖第三方悬浮 UI（豆包划词球等）想用 Win32 窗口 API 的，必须借 helper（它跑在 Session 1）的 ui/capture 工具，或让对方进程开 CDP 从协议层拿。判据：WindowFromPoint 对明明在屏幕上的窗返回 hwnd=0 = 你在 Session 0，别再怀疑目标软件用了什么黑科技。

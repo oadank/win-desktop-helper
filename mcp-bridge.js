@@ -17,7 +17,7 @@ let guideRead = false; // 强制闸门: 首次操作前必须先读 get_skill
 const TOOLS = [
   {
     "name": "cdp",
-    "description": "Chromium/Electron 桌面应用「界面元素直读」(走它自带的远程调试端口 CDP)——不截图不 OCR，直接拿到按钮的名字/class/矩形，毫秒级。action=scan 扫哪些应用开了通道；targets 列某端口的页面；elements 出一张元素表(穿透影子根 shadowRoot —— WorkBuddy 的「Buddy加油站」菜单就在影子根里，普通查询只读到空字符串，这才是过去只能靠 OCR 的真原因)；eval 跑自定义只读 JS；click 页面内合成点击(需 allowClick=1)。本机已知端口: 9223=WorkBuddy, 9222=MiMo 桌面端。🔴 分工铁律: 读一切用本工具；**开外部浮层(账号菜单之类)必须用 mouse 工具真点物理坐标**，合成事件打不开它。坐标换算: 屏幕 = 窗口原点 + 页面坐标 × dpr(返回值带 dpr，配合 window 工具取窗口原点)。",
+    "description": "Chromium/Electron 桌面应用「界面元素直读」(走它自带的远程调试端口 CDP)——不截图不 OCR，直接拿到按钮的名字/class/矩形，毫秒级。action=scan 扫哪些应用开了通道；targets 列某端口的页面；elements 出一张元素表(穿透影子根 shadowRoot —— WorkBuddy 的「Buddy加油站」菜单就在影子根里，普通查询只读到空字符串，这才是过去只能靠 OCR 的真原因)；eval 跑自定义只读 JS；click 页面内合成点击(需 allowClick=1)。本机已知端口: 9223=WorkBuddy, 9222=MiMo 桌面端。🔴 分工铁律: 读一切用本工具；**开外部浮层(账号菜单之类)必须用 mouse 工具真点物理坐标**，合成事件打不开它。坐标换算: 屏幕 = 窗口原点 + 页面坐标 × dpr(返回值带 dpr，配合 window 工具取窗口原点)。elements 每条还带 cx/cy(页面坐标中心，直接喂给 click，别自己算 x+w/2) 与 vis(1=当前可见，可见的排前)；同一 selector 常回多条(含隐藏/未渲染副本)，认 name 里的文字别认顺序。🔴 点击走的是协议层真实鼠标事件(不是页面 JS 的 el.click()，SVG 元素没那方法)，但只对页面内部元素有效，点完务必回读验证。",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -1183,19 +1183,21 @@ async function callTool(name, args) {
         if (preset) {
           const mt = JSON.stringify(String(a.match || '')); const sl = JSON.stringify(String(a.selector || ''));
           expr = "(() => { const dpr = devicePixelRatio || 1, mt = " + mt + ".toLowerCase(), sel = " + sl + "; const out = []; const seen = new Set();" +
+            " const isVis = (e) => { try { if (e.checkVisibility) return e.checkVisibility() ? 1 : 0; } catch (err) {} return (e.offsetWidth || e.offsetHeight || e.getClientRects().length) ? 1 : 0; };" +
             " const walk = (root, d) => { if (!root || !root.querySelectorAll || d > 9) return; for (const e of root.querySelectorAll(sel || '*')) {" +
             " const r = e.getBoundingClientRect(); if (r.width > 3 && r.height > 3) {" +
-            " const own = [...e.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent.trim()).join(' ');" +
-            " const nm = (own || e.getAttribute('aria-label') || e.getAttribute('title') || '').trim().replace(/\\s+/g,' ');" +
+            " const own = [...e.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent.trim()).join(' ').trim();" +
+            " const nm = (own || e.getAttribute('aria-label') || e.getAttribute('title') || e.innerText || '').trim().replace(/\\s+/g,' ');" +
             " const cls = String((e.className && e.className.baseVal !== undefined) ? e.className.baseVal : (e.className || ''));" +
             " const label = nm || (/^(path|use|svg|img)$/i.test(e.tagName) ? cls.slice(0,24) : '');" +
             " const k = label + '|' + cls + '|' + Math.round(r.x) + ',' + Math.round(r.y);" +
             " if (label && label.length <= 40 && !seen.has(k)) { seen.add(k);" +
             " if (!mt || label.toLowerCase().indexOf(mt) >= 0 || cls.toLowerCase().indexOf(mt) >= 0) {" +
-            " out.push({ name: label, tag: e.tagName + (e.getAttribute('role') ? '[role=' + e.getAttribute('role') + ']' : ''), cls: cls.slice(0,36)," +
+            " out.push({ name: label, tag: e.tagName + (e.getAttribute('role') ? '[role=' + e.getAttribute('role') + ']' : ''), cls: cls.slice(0,36), vis: isVis(e)," +
             " x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)," +
-            " px: Math.round((r.x + r.width/2) * dpr), py: Math.round((r.y + r.height/2) * dpr) }); if (out.length > " + limit + ") return; } } }" +
-            " if (e.shadowRoot) walk(e.shadowRoot, d + 1); } }; walk(document, 0);" +
+            " cx: Math.round(r.x + r.width/2), cy: Math.round(r.y + r.height/2)," +
+            " px: Math.round((r.x + r.width/2) * dpr), py: Math.round((r.y + r.height/2) * dpr) }); if (out.length > " + limit + ") return; } } } }" +
+            " for (const h of root.querySelectorAll('*')) { if (h.shadowRoot) walk(h.shadowRoot, d + 1); } }; walk(document, 0); out.sort((a, b) => b.vis - a.vis);" +
             " return JSON.stringify({ dpr: dpr, viewport: innerWidth + 'x' + innerHeight, count: out.length, items: out.slice(0, " + limit + ") }); })()"
         } else {
           expr = String(a.expr || '');
@@ -1209,7 +1211,7 @@ async function callTool(name, args) {
         const r = await evalIn(Number(a.port), a.target, expr);
         let v = r.value;
         if (typeof v === 'string') { try { v = JSON.parse(v); } catch (e) {} }
-        const note = preset ? 'px/py = 窗口内物理坐标（页面坐标 × dpr）；屏幕绝对坐标 = 窗口原点 + px/py，用 window 工具取原点。' : '';
+        const note = preset ? 'px/py = 窗口内物理坐标（页面坐标 × dpr）；屏幕绝对坐标 = 窗口原点 + px/py，用 window 工具取原点。cx/cy = 页面坐标中心（直接喂给 click，别自己算 x+w/2）；vis=1 表示当前可见，可见的已排在前面。🔴 同一个 selector 常回多条（含隐藏/未渲染副本）—— 认 name 里的文字，别按顺序假定第一条就是你要的。' : '';
         if (preset && v && Array.isArray(v.items)) {
           const dropped = Math.max(0, (v.count || 0) - v.items.length);
           return wrap({ ok: true, port: Number(a.port), page: r.page, dpr: v.dpr, viewport: v.viewport, matched: v.items.length, truncated: dropped, items: v.items, note: note + (dropped ? '（还有 ' + dropped + ' 条被 limit 截掉，加 match/selector 收窄）' : '') });

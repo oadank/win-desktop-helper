@@ -177,6 +177,7 @@ public partial class ShotService
     [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int value);               // 2 = per-monitor
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();   // 读序号不开剪贴板, 零竞争
+    [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();          // 当前剪贴板所有者窗口(判来源应用)
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll", SetLastError = true)]
     static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
@@ -1343,17 +1344,416 @@ public partial class ShotService
     const int MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_SHIFT = 0x4, MOD_WIN = 0x8;
     const int WM_HOTKEY = 0x0312;
     const int HOTKEY_ID = 0x5712; // 'W'+'V' 记号
-    static int clipMax = 50;    // 设置页可配 (剪贴板最大条数)
+    static int clipMax = 50;    // 设置页可配 (剪贴板最大条数, 只淘汰未收藏)
     static int clipEnabled = 1; // 设置页可配: 0 = 暂停剪贴板监听
     static readonly List<string> clipHist = new List<string>();
+    static readonly HashSet<string> clipPinned = new HashSet<string>(); // 收藏: 不淘汰, UI 显示 ★
+    static string clipIgnoreApps = "";  // 逗号分隔进程名, 这些应用放上剪贴板的内容不进历史
+    static string clipPeers = "";       // 跨机: http://ip:18800|http://ip:18800 (Tailscale/局域网)
+    static int clipSyncPush = 0;        // 1=复制后自动推送到 peers
     static readonly object clipLock = new object();
     static string lastClipText = "";
+    static string clipJustSetFromSync = ""; // 从 peer 同步来的文本; watcher 看到后【禁止再广播】, 防 A↔B 推送死循环
+
+    // 跨机同步收件: 只进历史, 绝不改本机剪贴板 —— 否则对面一复制, 你手上要粘贴的内容就被顶掉
+    static void ClipSyncIngest(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        lock (clipLock)
+        {
+            ClipHistRemoveDupLocked(text);
+            clipHist.Insert(0, text);
+            ClipHistEvictLocked();
+        }
+        SaveClipHistory();
+        lastClipText = text; // 防 watcher 再读一遍当成“新复制”往外播
+        Log("clip sync-into-history " + text.Length + " chars (clipboard untouched)");
+    }
+
+    // ── 每日 00:01 清理过期图片 (2026-09-29 老大: 每天自动删, 0.01 分执行) ──
+    // 1) 历史里媒体路径已不存在 → 删条目
+    // 2) Screenshots\clip_*.png 没被历史引用 → 删文件(临时副本)
+    // 3) 被引用但超过 clipboard.cleanupDays(默认7天) 且未收藏 → 删文件+条目
+    static void ClipCleanupExpired()
+    {
+        int removed = 0, deletedFiles = 0;
+        long freed = 0;
+        try
+        {
+            int keepDays = 7;
+            int td; if (int.TryParse(Cfg("clipboard.cleanupDays", "7"), out td) && td >= 1) keepDays = td;
+            DateTime cutoff = DateTime.Now.AddDays(-keepDays);
+            var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            lock (clipLock)
+            {
+                for (int i = clipHist.Count - 1; i >= 0; i--)
+                {
+                    string e = clipHist[i];
+                    if (e.StartsWith("[图片] ") || e.StartsWith("[视频] ") || e.StartsWith("[文件] "))
+                    {
+                        string p = e.Substring(e.IndexOf(' ') + 1).Trim();
+                        referenced.Add(Path.GetFileName(p));
+                        if (!File.Exists(p)) { clipHist.RemoveAt(i); clipPinned.Remove(e); removed++; continue; }
+                        // 过期且未收藏: 连文件一起删
+                        try
+                        {
+                            FileInfo fi = new FileInfo(p);
+                            if (fi.LastWriteTime < cutoff && !clipPinned.Contains(e))
+                            {
+                                clipHist.RemoveAt(i); clipPinned.Remove(e); removed++;
+                                try { freed += fi.Length; fi.Delete(); deletedFiles++; } catch { }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                ClipHistEvictLocked();
+            }
+            // 未引用的临时图 clip_*.png
+            try
+            {
+                string[] dirs = new string[] {
+                    ShotDir,
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Screenshots")
+                };
+                foreach (string dir in dirs)
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    foreach (string fp in Directory.GetFiles(dir, "clip_*.png"))
+                    {
+                        try
+                        {
+                            string name = Path.GetFileName(fp);
+                            if (referenced.Contains(name)) continue;
+                            FileInfo fi = new FileInfo(fp);
+                            if (fi.LastWriteTime >= cutoff) continue; // 刚生成的先留一天
+                            freed += fi.Length; fi.Delete(); deletedFiles++;
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+            if (removed > 0 || deletedFiles > 0) SaveClipHistory();
+            Log("clip cleanup: removed " + removed + " history items, deleted " + deletedFiles + " files, freed " + (freed / 1048576) + "MB (keep " + keepDays + "d)");
+        }
+        catch (Exception ex) { Log("clip cleanup err: " + ex.Message); }
+    }
+
+    // 每天 00:01 跑一次 ClipCleanupExpired
+    static void ClipCleanupLoop()
+    {
+        try { ClipCleanupExpired(); } catch { } // 启动先扫一遍孤儿
+        while (true)
+        {
+            try
+            {
+                DateTime now = DateTime.Now;
+                DateTime next = now.Date.AddDays(1).AddMinutes(1); // 次日 00:01
+                int wait = (int)Math.Min(int.MaxValue, (next - now).TotalMilliseconds);
+                if (wait > 1000) Thread.Sleep(wait);
+                ClipCleanupExpired();
+            }
+            catch { Thread.Sleep(60000); }
+        }
+    }
+
+    static string lastPushedText = "";      // 去重: 同文只推一次
+    static int clipPushing = 0;             // 推送进行中计数, 防重入
     static string lastClipImgHash = ""; // 剪贴板图片 MD5 (精确去重, 轮询防重复入库)
     static string clipHotkeyName = "";   // 实际注册成功的组合(候选自动降级)
     static Form clipHistWin;             // 当前打开的剪贴板历史窗(单例: 再按热键=关闭, 不叠窗)
     static readonly string ClipStorePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "clipboard-history.json");
 
-    // ---- 剪贴板历史持久化: 每行一条 JSON 字符串(完整转义), UTF-8 ----
+    // 淘汰: 只从尾部找未收藏条目删, 全是收藏则允许超上限 (调用方已持 clipLock)
+    static void ClipHistEvictLocked()
+    {
+        while (clipHist.Count > clipMax)
+        {
+            int removeIdx = -1;
+            for (int i = clipHist.Count - 1; i >= 0; i--)
+                if (!clipPinned.Contains(clipHist[i])) { removeIdx = i; break; }
+            if (removeIdx < 0) break;
+            clipHist.RemoveAt(removeIdx);
+        }
+    }
+
+    // 去重键: 归一化换行(\r\n|\r → \n), 防"同文不同换行"占两条
+    static string ClipNormKey(string s) { return s.Replace("\r\n", "\n").Replace("\r", "\n"); }
+
+    // 近似重复键: 归一化后前 40 字 —— 仅供调试/日志
+    static string ClipNearKey(string s)
+    {
+        string k = ClipNormKey(s);
+        return k.Length <= 40 ? k : k.Substring(0, 40);
+    }
+
+    // 是否近似重复: 归一化后逐字比, 首个差异必须落在较长串的最后 5% 内(=同稿小修订/尾巴不同)
+    // 图片路径在哈希处(约第 50 字)就分叉 → 不会误合并
+    static bool ClipLooksNearDup(string a, string b)
+    {
+        string ka = ClipNormKey(a), kb = ClipNormKey(b);
+        if (ka == kb) return true;
+        int la = ka.Length, lb = kb.Length;
+        if (la == 0 || lb == 0) return false;
+        int mn = la < lb ? la : lb, mx = la > lb ? la : lb;
+        int i = 0;
+        while (i < mn && ka[i] == kb[i]) i++;
+        // 首个差异位置 i; 要求 i 已覆盖较长串的 95% 以上, 且长度差也在 5% 内
+        if (i * 100 < mx * 95) return false;
+        return (mx - mn) * 20 <= mx;
+    }
+
+    // 删掉所有与 entry 同内容(含换行差异)的旧条目 (调用方已持 clipLock); 返回删除条数
+    static int ClipHistRemoveDupLocked(string entry)
+    {
+        string key = ClipNormKey(entry);
+        int n = 0;
+        for (int i = clipHist.Count - 1; i >= 0; i--)
+        {
+            if (ClipNormKey(clipHist[i]) == key) { clipHist.RemoveAt(i); n++; }
+        }
+        return n;
+    }
+
+    // 合并重复: ①完全同文(含换行) ②前缀相同+长度差≤5% 的近似重复(保留较新一条)
+    // 从新到旧扫, 遇到与已保留条近似/相同的就丢掉旧的。调用方已持 clipLock。返回合并条数
+    static int ClipHistMergeDupLocked(bool includeNear)
+    {
+        int removed = 0;
+        List<string> kept = new List<string>();
+        for (int i = 0; i < clipHist.Count; i++)
+        {
+            string cur = clipHist[i];
+            bool dup = false;
+            for (int j = 0; j < kept.Count; j++)
+            {
+                if (ClipNormKey(kept[j]) == ClipNormKey(cur)) { dup = true; break; }
+                if (includeNear && ClipLooksNearDup(kept[j], cur)) { dup = true; break; }
+            }
+            if (dup) removed++;
+            else kept.Add(cur);
+        }
+        if (removed > 0)
+        {
+            // 收藏状态跟着保留条走(重复内容同键)
+            clipHist.Clear();
+            clipHist.AddRange(kept);
+        }
+        return removed;
+    }
+
+    // 文件类条目前缀: [图片] / [视频] / [文件]
+    static string ClipFileEntry(string path)
+    {
+        string ext = Path.GetExtension(path).ToLowerInvariant();
+        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".bmp" || ext == ".webp" || ext == ".tif" || ext == ".tiff")
+            return "[图片] " + path;
+        if (ext == ".mp4" || ext == ".mov" || ext == ".avi" || ext == ".mkv" || ext == ".webm" || ext == ".m4v" || ext == ".wmv" || ext == ".flv")
+            return "[视频] " + path;
+        return "[文件] " + path;
+    }
+
+    // 视频预览图: ffmpeg 抽一帧到临时 png, 回路径; 失败回 ""
+    static string ClipVideoThumb(string path)
+    {
+        try
+        {
+            string ff = "ffmpeg";
+            string outp = Path.Combine(Path.GetTempPath(), "clipv_" + Math.Abs(path.GetHashCode()).ToString("x8") + ".png");
+            if (File.Exists(outp)) return outp;
+            var psi = new ProcessStartInfo(ff, "-y -ss 00:00:01 -i \"" + path + "\" -frames:v 1 -vf scale=480:-1 \"" + outp + "\"");
+            psi.CreateNoWindow = true; psi.UseShellExecute = false; psi.RedirectStandardError = true; psi.RedirectStandardOutput = true;
+            using (var p = Process.Start(psi))
+            {
+                p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd();
+                if (!p.WaitForExit(4000)) { try { p.Kill(); } catch { } }
+            }
+            return File.Exists(outp) ? outp : "";
+        }
+        catch { return ""; }
+    }
+
+    // 自动发现 Tailscale 在线 peer（去掉手机/本机），拼成 peers 串 —— 装了 helper 就能同步, 不用手填
+    static string ClipAutoPeers()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("tailscale", "status");
+            psi.UseShellExecute = false;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.CreateNoWindow = true;
+            string output = "";
+            using (var p = Process.Start(psi))
+            {
+                output = p.StandardOutput.ReadToEnd();
+                p.StandardError.ReadToEnd();
+                if (!p.WaitForExit(4000)) { try { p.Kill(); } catch { } }
+            }
+            string selfIp = "";
+            try
+            {
+                var psi2 = new ProcessStartInfo("tailscale", "ip -4");
+                psi2.UseShellExecute = false; psi2.RedirectStandardOutput = true; psi2.CreateNoWindow = true;
+                using (var p2 = Process.Start(psi2)) { selfIp = p2.StandardOutput.ReadToEnd().Trim(); p2.WaitForExit(2000); }
+            }
+            catch { }
+            ClipSelfTailIp = selfIp;
+            var sb = new StringBuilder();
+            foreach (string line in output.Split('\n'))
+            {
+                // 形如: 100.119.140.33   cszg   oadank@   windows   active; ...
+                string[] parts = line.Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 3) continue;
+                string ip = parts[0];
+                if (!ip.StartsWith("100.")) continue;
+                if (ip == selfIp) continue;
+                // 跳过手机/电视等非电脑（按名字粗滤）; 名字在第2段
+                string name = parts.Length > 1 ? parts[1].ToLowerInvariant() : "";
+                if (name.Contains("iphone") || name.Contains("ipad") || name.Contains("mitv") || name.Contains("android")) continue;
+                // offline 的也填上: 上线后自然就能收
+                string url = "http://" + ip + ":18800";
+                if (sb.Length > 0) sb.Append("|");
+                sb.Append(url);
+            }
+            return sb.ToString();
+        }
+        catch (Exception ex) { Log("tailscale auto peers err: " + ex.Message); return ""; }
+    }
+
+    // 跨机推送: 复制后把文本发到 peers 的 /clipboard/set (POST body, 支持长文)
+    // peers = 配置里的 + Tailscale 自动发现的并集（去重）
+    // 🔴 绝不能推给自己: POST /clipboard/set 会用纯文本覆盖本机剪贴板, 表格/图纸的图就没了
+    static void ClipSyncPushToPeers(string text)
+    {
+        if (clipSyncPush != 1) return;
+        var all = new List<string>();
+        if (clipPeers != null && clipPeers.Trim().Length > 0)
+            foreach (string p in clipPeers.Split('|')) if (p.Trim().Length > 0) all.Add(p.Trim());
+        string auto = ClipAutoPeers();
+        if (auto.Length > 0)
+            foreach (string p in auto.Split('|'))
+            {
+                if (p.Trim().Length == 0) continue;
+                bool dup = false;
+                for (int i = 0; i < all.Count; i++) if (all[i].TrimEnd('/') == p.TrimEnd('/')) { dup = true; break; }
+                if (!dup) all.Add(p.Trim());
+            }
+        if (all.Count == 0) return;
+        if (text == null || text.Length == 0) return;
+        string payload = text.Length > 200000 ? text.Substring(0, 200000) : text;
+        for (int i = 0; i < all.Count; i++)
+        {
+            string peer = all[i];
+            if (!peer.StartsWith("http")) peer = "http://" + peer;
+            // 跳过自己: 127.x / localhost / 本机 Tailscale IP
+            string peerIp = peer;
+            try { peerIp = new Uri(peer).Host; } catch { }
+            if (peerIp == "127.0.0.1" || peerIp == "localhost" || peerIp == "0.0.0.0") continue;
+            if (peerIp == ClipSelfTailIp) continue;
+            string url = peer.TrimEnd('/') + "/clipboard/set?sync=1"; // sync=1: 对端收下后不得再广播
+            string bodyTxt = payload;
+            Interlocked.Increment(ref clipPushing);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    byte[] data = Encoding.UTF8.GetBytes("text=" + Uri.EscapeDataString(bodyTxt));
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                    req.Method = "POST";
+                    req.ContentType = "application/x-www-form-urlencoded";
+                    req.Timeout = 2500;
+                    req.ReadWriteTimeout = 2500;
+                    req.ContentLength = data.Length;
+                    using (var s = req.GetRequestStream()) s.Write(data, 0, data.Length);
+                    using (var r = (HttpWebResponse)req.GetResponse()) { }
+                    Log("clip push ok → " + url);
+                }
+                catch (Exception ex) { Log("clip push fail " + url + ": " + ex.Message); }
+                finally { Interlocked.Decrement(ref clipPushing); }
+            });
+        }
+    }
+
+    static string ClipSelfTailIp = ""; // 本机 Tailscale IP, 推送时跳过自己
+
+    // 从 peer 拉取当前剪贴板到本机 (菜单/AI 用); peer 形如 http://ip:18800
+    static string ClipSyncPullFrom(string peer)
+    {
+        try
+        {
+            if (peer == null || peer.Trim().Length == 0) return "{\"ok\":false,\"error\":\"need peer\"}";
+            if (!peer.StartsWith("http")) peer = "http://" + peer;
+            string url = peer.TrimEnd('/') + "/clipboard/get";
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+            req.Timeout = 4000;
+            string raw;
+            using (var r = (HttpWebResponse)req.GetResponse())
+            using (var sr = new StreamReader(r.GetResponseStream(), Encoding.UTF8))
+                raw = sr.ReadToEnd();
+            // {"ok":true,"type":"text","chars":N,"text":"..."} — 简易抠 text
+            int ti = raw.IndexOf("\"text\":\"");
+            if (ti < 0) return "{\"ok\":false,\"error\":\"peer no text\",\"raw\":" + JsonEscape(raw.Length > 200 ? raw.Substring(0, 200) : raw) + "}";
+            int start = ti + 8;
+            var sb = new StringBuilder();
+            for (int i = start; i < raw.Length; i++)
+            {
+                char c = raw[i];
+                if (c == '\\' && i + 1 < raw.Length)
+                {
+                    char n = raw[++i];
+                    if (n == 'n') sb.Append('\n');
+                    else if (n == 'r') sb.Append('\r');
+                    else if (n == 't') sb.Append('\t');
+                    else if (n == '"') sb.Append('"');
+                    else if (n == '\\') sb.Append('\\');
+                    else if (n == 'u' && i + 4 < raw.Length)
+                    {
+                        string hex = raw.Substring(i + 1, 4); i += 4;
+                        int cp; if (int.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out cp)) sb.Append((char)cp);
+                    }
+                    else sb.Append(n);
+                }
+                else if (c == '"') break;
+                else sb.Append(c);
+            }
+            string txt = sb.ToString();
+            if (txt.Length == 0) return "{\"ok\":false,\"error\":\"peer text empty\"}";
+            string setr = ClipboardSetText(txt);
+            Log("clip pull from " + peer + " " + txt.Length + " chars");
+            return "{\"ok\":true,\"from\":\"" + JsonEscape(peer) + "\",\"chars\":" + txt.Length + ",\"set\":" + setr + "}";
+        }
+        catch (Exception ex)
+        {
+            Log("clip pull fail " + peer + ": " + ex.Message);
+            return "{\"ok\":false,\"error\":\"" + JsonEscape(ex.Message) + "\"}";
+        }
+    }
+
+    // 来源应用是否在忽略名单 (密码管理器等, 不记历史)。owner 查不到 = 不忽略(fail-open)
+    static bool ClipFromIgnoredApp()
+    {
+        try
+        {
+            if (clipIgnoreApps.Trim().Length == 0) return false;
+            IntPtr owner = GetClipboardOwner();
+            if (owner == IntPtr.Zero) return false;
+            uint pid; GetWindowThreadProcessId(owner, out pid);
+            if (pid == 0) return false;
+            string name = Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
+            string[] parts = clipIgnoreApps.Split(',');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string n = parts[i].Trim().ToLowerInvariant();
+                if (n.Length > 0 && name == n) return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // ---- 剪贴板历史持久化: 每行一条; 收藏行前缀 P, 例 P"escaped" / "escaped"; UTF-8 ----
     static string ClipStoreEscape(string s)
     {
         return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n");
@@ -1382,10 +1782,18 @@ public partial class ShotService
         try
         {
             List<string> snap;
-            lock (clipLock) { snap = new List<string>(clipHist); }
+            HashSet<string> pins;
+            lock (clipLock)
+            {
+                snap = new List<string>(clipHist);
+                pins = new HashSet<string>(clipPinned);
+            }
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < snap.Count; i++)
+            {
+                if (pins.Contains(snap[i])) sb.Append("P");
                 sb.Append("\"").Append(ClipStoreEscape(snap[i])).Append("\"\r\n");
+            }
             File.WriteAllText(ClipStorePath, sb.ToString(), Encoding.UTF8);
         }
         catch (Exception ex) { Log("clip save err: " + ex.Message); }
@@ -1399,18 +1807,31 @@ public partial class ShotService
             lock (clipLock)
             {
                 clipHist.Clear();
+                clipPinned.Clear();
                 for (int i = 0; i < lines.Length; i++)
                 {
                     string l = lines[i].Trim();
+                    bool pinned = false;
+                    if (l.StartsWith("P\"") && l.EndsWith("\"") && l.Length >= 3) { pinned = true; l = l.Substring(1); }
                     if (l.Length >= 2 && l[0] == '"' && l[l.Length - 1] == '"')
                     {
                         string v = ClipStoreUnescape(l.Substring(1, l.Length - 2));
-                        if (!string.IsNullOrEmpty(v) && !clipHist.Contains(v)) clipHist.Add(v);
+                        if (string.IsNullOrEmpty(v)) continue;
+                        // 去重: 同文(含换行变体)只留文件里第一条
+                        bool dup = false;
+                        string vkey = ClipNormKey(v);
+                        for (int j = 0; j < clipHist.Count; j++)
+                            if (ClipNormKey(clipHist[j]) == vkey) { dup = true; break; }
+                        if (dup) continue;
+                        clipHist.Add(v);
+                        if (pinned) clipPinned.Add(v);
                     }
                 }
-                if (clipHist.Count > clipMax) clipHist.RemoveRange(clipMax, clipHist.Count - clipMax);
+                ClipHistEvictLocked();
+                int merged = ClipHistMergeDupLocked(true); // 载入即合并完全重复+近似重复(同前缀同长度档)
+                if (merged > 0) Log("clip load merged " + merged + " dup/near-dup items");
             }
-            Log("clip history loaded: " + clipHist.Count + " items");
+            Log("clip history loaded: " + clipHist.Count + " items (" + clipPinned.Count + " pinned)");
         }
         catch (Exception ex) { Log("clip load err: " + ex.Message); }
     }
@@ -1419,6 +1840,83 @@ public partial class ShotService
     static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
     [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool OpenClipboard(IntPtr hWndNewOwner);
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern IntPtr GetOpenClipboardWindow();
+
+    // ── 剪贴板访问总闸 ─────────────────────────────────────────
+    // 症状: 用一会儿 Ctrl+V 就失效。根因=watcher/HTTP/历史UI/划词 多线程同时
+    //   Clipboard.Get/Set → 抢 OpenClipboard；再叠 UU/GameViewer 的剪贴板同步，一方不 Close 就全系统粘贴挂。
+    // 对策: 全局一把锁 + 失败重试 + 强制 CloseClipboard；卡住>3s 记下占用者。
+    static readonly object clipApiLock = new object();
+    static void ClipForceClose()
+    {
+        try { OpenClipboard(IntPtr.Zero); CloseClipboard(); } catch { }
+    }
+    static void ClipDo(Action act, string tag)
+    {
+        lock (clipApiLock) // 全局串行: 同时只允许一个剪贴板操作
+        {
+            Exception err = null;
+            Thread t = new Thread(new ThreadStart(delegate
+            {
+                for (int i = 0; i < 5; i++)
+                {
+                    try { act(); err = null; return; }
+                    catch (Exception ex)
+                    {
+                        err = ex;
+                        ClipForceClose();
+                        Thread.Sleep(40 * (i + 1));
+                    }
+                }
+            }));
+            t.SetApartmentState(ApartmentState.STA); // Clipboard 必须 STA
+            t.IsBackground = true;
+            t.Start();
+            t.Join(5000);
+            if (err != null) { Log("clip " + tag + " err: " + err.Message); ClipLogHolder(tag); }
+        }
+    }
+    // 诊断: 剪贴板被谁占着 (卡死时看日志)
+    static void ClipLogHolder(string why)
+    {
+        try
+        {
+            IntPtr h = GetOpenClipboardWindow();
+            if (h == IntPtr.Zero) return;
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            string pn = "?";
+            try { pn = Process.GetProcessById((int)pid).ProcessName; } catch { }
+            Log("clip locked by " + pn + " pid=" + pid + " hwnd=" + h + " (" + why + ")");
+        }
+        catch { }
+    }
+
+    // 自动清理「卡死的 OpenWith」: 系统“选择打开方式”一旦无标题常驻并抢前台,
+    // 全部 Ctrl+C/V 都被吃掉。装了助手的机器都会撞上, 所以启动+定时自愈。
+    static void KillStuckOpenWith()
+    {
+        try
+        {
+            foreach (var p in Process.GetProcessesByName("OpenWith"))
+            {
+                try
+                {
+                    // 有正常窗口标题的对话框不杀; 空标题/无窗=卡死
+                    string title = p.MainWindowTitle;
+                    if (p.MainWindowHandle != IntPtr.Zero && title != null && title.Trim().Length > 0) continue;
+                    Log("kill stuck OpenWith pid=" + p.Id);
+                    p.Kill();
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }
 
     static void ClipWatcherLoop()
     {
@@ -1434,9 +1932,72 @@ public partial class ShotService
                 if (seq == lastClipSeq) { Thread.Sleep(300); continue; }
                 if (pickBusy == 1) { Thread.Sleep(150); continue; } // 划词取词中: 跳过本轮(不更新序号, 取词完仍会补读), 别把临时内容记进剪贴板历史
                 lastClipSeq = seq;
-                if (clipEnabled == 1 && Clipboard.ContainsImage())
+                // 双格式同时入库(2026-09-27 修): Office 表格/CAD 图纸复制时剪贴板同时有「文字+图」。
+                //   只存文字 → 表格/图纸复制不出来; 只存图 → 纯文字被截成图。现在两种都进历史, 用户自己挑。
+                if (clipEnabled == 1 && Clipboard.ContainsText())
                 {
-                    // 图片入历史: MD5 命名入库(同图去重精确到字节, 3采样点漏检已根治), 条目 "[图片] 路径" (AI 可 Read 该图/OCR/传多模态)
+                    string t = null;
+                    ClipDo(delegate { t = Clipboard.GetText(); }, "get-text");
+                    if (!string.IsNullOrEmpty(t) && t != lastClipText)
+                    {
+                        lastClipText = t; // 忽略名单也更新, 防同内容反复重判
+                        // 同步来的文本只入库、不再往外推 —— 否则 A→B→A 死循环把系统剪贴板打死
+                        bool fromSync = (t == clipJustSetFromSync);
+                        if (fromSync) { clipJustSetFromSync = ""; }
+                        if (ClipFromIgnoredApp())
+                        {
+                            Log("clip text ignored (deny-list): " + ClipDisplay(t));
+                        }
+                        else
+                        {
+                            lock (clipLock)
+                            {
+                                ClipHistRemoveDupLocked(t); // 同文(含换行变体)合并到顶部, 不占多条
+                                clipHist.Insert(0, t);
+                                ClipHistEvictLocked();
+                            }
+                            SaveClipHistory(); // 新记录落盘持久化
+                            if (!fromSync)
+                            {
+                                if (t != lastPushedText) { lastPushedText = t; ClipSyncPushToPeers(t); }
+                            }
+                            else Log("clip text from sync (" + t.Length + " chars), skip rebroadcast");
+                            if (Clipboard.ContainsImage())
+                                Log("clip text captured " + t.Length + " chars (+image also below)");
+                        }
+                    }
+                    // 有图也存图(表格/图纸场景) —— 不再因有文字就丢图
+                    if (clipEnabled == 1 && Clipboard.ContainsImage())
+                    {
+                        Image img = null;
+                        ClipDo(delegate { img = Clipboard.GetImage(); }, "get-image");
+                        if (img != null)
+                        {
+                            string hash;
+                            string path = SaveClipboardImage(img, out hash);
+                            if (hash != "" && hash != lastClipImgHash)
+                            {
+                                lastClipImgHash = hash;
+                                if (!ClipFromIgnoredApp())
+                                {
+                                    string entry = "[图片] " + path;
+                                    lock (clipLock)
+                                    {
+                                        ClipHistRemoveDupLocked(entry);
+                                        clipHist.Insert(0, entry);
+                                        ClipHistEvictLocked();
+                                    }
+                                    SaveClipHistory();
+                                    Log("clip image captured (with text) " + img.Width + "x" + img.Height);
+                                }
+                            }
+                            img.Dispose();
+                        }
+                    }
+                }
+                else if (clipEnabled == 1 && Clipboard.ContainsImage())
+                {
+                    // 纯图片(无文本)
                     Image img = Clipboard.GetImage();
                     if (img != null)
                     {
@@ -1444,34 +2005,63 @@ public partial class ShotService
                         string path = SaveClipboardImage(img, out hash);
                         if (hash != "" && hash != lastClipImgHash)
                         {
-                            lastClipImgHash = hash;
-                            string entry = "[图片] " + path;
-                            lock (clipLock)
+                            lastClipImgHash = hash; // 忽略名单也更新, 防同内容反复重判
+                            if (ClipFromIgnoredApp())
                             {
-                                clipHist.Remove(entry);
-                                clipHist.Insert(0, entry);
-                                while (clipHist.Count > clipMax) clipHist.RemoveAt(clipHist.Count - 1);
+                                Log("clip image ignored (deny-list): " + path);
                             }
-                            SaveClipHistory(); // 图片条目即时持久化 (此前只在文本复制时被顺带保存, 重启即丢)
-                            Log("clip image captured " + img.Width + "x" + img.Height + " md5=" + (hash.Length > 8 ? hash.Substring(0, 8) : hash));
+                            else
+                            {
+                                string entry = "[图片] " + path;
+                                lock (clipLock)
+                                {
+                                    ClipHistRemoveDupLocked(entry);
+                                    clipHist.Insert(0, entry);
+                                    ClipHistEvictLocked();
+                                }
+                                SaveClipHistory(); // 图片条目即时持久化
+                                Log("clip image captured " + img.Width + "x" + img.Height + " md5=" + (hash.Length > 8 ? hash.Substring(0, 8) : hash));
+                            }
                         }
                         img.Dispose();
                     }
                 }
-                else if (clipEnabled == 1 && Clipboard.ContainsText())
+                else if (clipEnabled == 1 && Clipboard.ContainsFileDropList())
                 {
-                    string t = Clipboard.GetText();
-                    if (!string.IsNullOrEmpty(t) && t != lastClipText)
+                    // 文件/视频复制入历史: 每个路径一条 [视频]/[图片]/[文件] 条目
+                    try
                     {
-                        lastClipText = t;
-                        lock (clipLock)
+                        var files = Clipboard.GetFileDropList();
+                        if (files != null && files.Count > 0)
                         {
-                            clipHist.Remove(t);
-                            clipHist.Insert(0, t);
-                            while (clipHist.Count > clipMax) clipHist.RemoveAt(clipHist.Count - 1);
+                            string marker = "FILES:" + files.Count + ":" + files[0];
+                            if (marker != lastClipText)
+                            {
+                                lastClipText = marker;
+                                if (ClipFromIgnoredApp())
+                                {
+                                    Log("clip files ignored (deny-list): " + files.Count);
+                                }
+                                else
+                                {
+                                    lock (clipLock)
+                                    {
+                                        // 逆序插入, 保持文件列表原顺序在上
+                                        for (int fi = files.Count - 1; fi >= 0; fi--)
+                                        {
+                                            string entry = ClipFileEntry(files[fi]);
+                                            ClipHistRemoveDupLocked(entry);
+                                            clipHist.Insert(0, entry);
+                                        }
+                                        ClipHistEvictLocked();
+                                    }
+                                    SaveClipHistory();
+                                    Log("clip files captured " + files.Count + ": " + files[0]);
+                                }
+                            }
                         }
-                        SaveClipHistory(); // 新记录落盘持久化
                     }
+                    catch (Exception ex) { Log("clip files err: " + ex.Message); }
                 }
             }
             catch (Exception ex) { Log("clip watcher err: " + ex.Message); }
@@ -1483,6 +2073,13 @@ public partial class ShotService
     {
         s = s.Replace("\r", " ").Replace("\n", " ");
         return s.Length > 80 ? s.Substring(0, 77) + "..." : s;
+    }
+
+    // 列表行: 摘要 + 字数(区分开头相同的不同长文)
+    static string ClipDisplayRow(string s)
+    {
+        string d = ClipDisplay(s);
+        return d + "  · " + s.Length + "字";
     }
 
     // 弹历史窗口: 在钩子线程调用(同 STA 消息循环), 单击=复制 双击=粘贴 右键=菜单, Enter/Esc 键盘
@@ -1511,21 +2108,22 @@ public partial class ShotService
             f.StartPosition = FormStartPosition.CenterScreen;
             f.TopMost = true;
             f.ShowInTaskbar = false;
-            f.Size = new Size(600, 430);
+            f.Size = new Size(760, 1000);   // 2026-10-01: 660x560→760x1000 (预览区加高后列表被挤没, 老大反馈"内容看不见")
+            f.MinimumSize = new Size(560, 420);
 
-            // ---- 自绘标题栏: 小标题 + 小关闭 ×, 按住可拖动窗口 ----
+            // ---- 标题栏: 只放标题 + 关闭 ----
             Panel title = new Panel();
             title.Dock = DockStyle.Top;
-            title.Height = 36;
+            title.Height = 42;
             title.BackColor = Color.FromArgb(22, 23, 26);
             Label tl = new Label();
-            tl.Text = "剪贴板历史 (" + snaps.Count + ")   ·   单击复制  双击粘贴  右键菜单  Esc 关闭";
-            tl.ForeColor = Color.FromArgb(190, 195, 200);
-            tl.Font = new Font("Microsoft YaHei UI", 9f);
+            tl.Text = "剪贴板历史 (" + snaps.Count + ")";
+            tl.ForeColor = Color.FromArgb(210, 215, 220);
+            tl.Font = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
             tl.AutoSize = false;
             tl.Dock = DockStyle.Fill;
             tl.TextAlign = ContentAlignment.MiddleLeft;
-            tl.Padding = new Padding(12, 0, 0, 0);
+            tl.Padding = new Padding(14, 0, 48, 0);
             Button bx = new Button();
             bx.Text = "×";
             bx.FlatStyle = FlatStyle.Flat;
@@ -1533,8 +2131,8 @@ public partial class ShotService
             bx.FlatAppearance.MouseOverBackColor = Color.FromArgb(200, 60, 60);
             bx.BackColor = Color.Transparent;
             bx.ForeColor = Color.FromArgb(210, 215, 220);
-            bx.Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
-            bx.Size = new Size(34, 36);
+            bx.Font = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold);
+            bx.Size = new Size(42, 42);
             bx.Dock = DockStyle.Right;
             bx.Click += delegate { f.Close(); };
             title.Controls.Add(tl);
@@ -1556,109 +2154,607 @@ public partial class ShotService
                     SendMessage(f.Handle, (uint)WM_NCLBUTTONDOWN, (IntPtr)2, IntPtr.Zero);
                 }
             };
-            f.Controls.Add(title);
+            // title 最后统一挂载(见下方 Layout)
 
-            // ---- 列表: 深色 + 自绘(选中高亮蓝条, 交替行色) ----
+            // ---- 筛选行: 输入框 + [全部|★收藏] ----
+            Panel searchPanel = new Panel();
+            searchPanel.Dock = DockStyle.Top;
+            searchPanel.Height = 42;
+            searchPanel.BackColor = Color.FromArgb(28, 29, 33);
+            searchPanel.Padding = new Padding(12, 8, 12, 8);
+            Label searchLb = new Label();
+            searchLb.Text = "筛选";
+            searchLb.ForeColor = Color.FromArgb(120, 128, 140);
+            searchLb.Font = new Font("Microsoft YaHei UI", 9.5f);
+            searchLb.AutoSize = false;
+            searchLb.Width = 40;
+            searchLb.Dock = DockStyle.Left;
+            searchLb.TextAlign = ContentAlignment.MiddleLeft;
+            TextBox searchBox = new TextBox();
+            searchBox.Dock = DockStyle.Fill;
+            searchBox.BackColor = Color.FromArgb(22, 23, 27);
+            searchBox.ForeColor = Color.FromArgb(225, 228, 232);
+            searchBox.BorderStyle = BorderStyle.FixedSingle;
+            searchBox.Font = new Font("Microsoft YaHei UI", 10f);
+            // 右侧标签页: 全部 / ★收藏
+            Panel tabPanel = new Panel();
+            tabPanel.Dock = DockStyle.Right;
+            tabPanel.Width = 140;
+            tabPanel.BackColor = Color.FromArgb(28, 29, 33);
+            Button btnTabAll = new Button();
+            btnTabAll.Text = "全部";
+            btnTabAll.FlatStyle = FlatStyle.Flat;
+            btnTabAll.FlatAppearance.BorderSize = 0;
+            btnTabAll.Font = new Font("Microsoft YaHei UI", 9.5f);
+            btnTabAll.Size = new Size(68, 26);
+            btnTabAll.Location = new Point(2, 0);
+            btnTabAll.Cursor = Cursors.Hand;
+            Button btnTabFav = new Button();
+            btnTabFav.Text = "★收藏";
+            btnTabFav.FlatStyle = FlatStyle.Flat;
+            btnTabFav.FlatAppearance.BorderSize = 0;
+            btnTabFav.Font = new Font("Microsoft YaHei UI", 9.5f);
+            btnTabFav.Size = new Size(68, 26);
+            btnTabFav.Location = new Point(72, 0);
+            btnTabFav.Cursor = Cursors.Hand;
+            // onlyPinned: true=只看收藏
+            bool onlyPinned = false;
+            Action applyTabStyle = delegate
+            {
+                Color actBg = Color.FromArgb(45, 100, 175), actFg = Color.White;
+                Color idleBg = Color.FromArgb(40, 42, 48), idleFg = Color.FromArgb(150, 158, 168);
+                btnTabAll.BackColor = onlyPinned ? idleBg : actBg;
+                btnTabAll.ForeColor = onlyPinned ? idleFg : actFg;
+                btnTabFav.BackColor = onlyPinned ? actBg : idleBg;
+                btnTabFav.ForeColor = onlyPinned ? actFg : idleFg;
+            };
+            applyTabStyle();
+            tabPanel.Controls.Add(btnTabAll);
+            tabPanel.Controls.Add(btnTabFav);
+            searchPanel.Controls.Add(searchBox);
+            searchPanel.Controls.Add(tabPanel);
+            searchPanel.Controls.Add(searchLb);
+            // 注意: 先不挂到 f, 等列表/预览/状态都建好后按固定顺序一次挂载
+
+            // ---- 列表: 深色 + 自绘(选中高亮蓝条, 交替行色, 收藏 ★) ----
+            // view = 当前可见条目的原文(过滤后); lb.Items 只放显示串
+            List<string> view = new List<string>();
             ListBox lb = new ListBox();
             lb.Dock = DockStyle.Fill;
             lb.DrawMode = DrawMode.OwnerDrawFixed;
-            lb.ItemHeight = 30;
+            lb.ItemHeight = 32;
+            lb.IntegralHeight = false;
+            lb.ScrollAlwaysVisible = true; // ListBox 无 ScrollBars 属性, 用这个保证出滚动条
             lb.BackColor = Color.FromArgb(35, 36, 40);
             lb.ForeColor = Color.FromArgb(225, 228, 232);
             lb.BorderStyle = BorderStyle.None;
             lb.Font = new Font("Microsoft YaHei UI", 9.5f);
             lb.DrawItem += delegate(object s, DrawItemEventArgs e)
             {
-                if (e.Index < 0) return;
+                if (e.Index < 0 || e.Index >= view.Count) return;
                 bool sel = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
                 Color bg = sel ? Color.FromArgb(45, 100, 175) : (e.Index % 2 == 0 ? Color.FromArgb(35, 36, 40) : Color.FromArgb(31, 32, 36));
                 using (SolidBrush b2 = new SolidBrush(bg)) e.Graphics.FillRectangle(b2, e.Bounds);
-                string txt = lb.Items[e.Index].ToString();
-                Color numColor = sel ? Color.FromArgb(190, 215, 255) : Color.FromArgb(110, 120, 135);
+                bool pinned = clipPinned.Contains(view[e.Index]);
+                Color starColor = sel ? Color.FromArgb(255, 220, 120) : Color.FromArgb(220, 180, 80);
                 Color txtColor = sel ? Color.White : Color.FromArgb(225, 228, 232);
-                Rectangle nb = e.Bounds; nb.Offset(10, 0); nb.Width = 44;
-                TextRenderer.DrawText(e.Graphics, txt.Length > 3 ? txt.Substring(0, 4) : txt, lb.Font, nb, numColor, TextFormatFlags.VerticalCenter);
-                Rectangle tb = e.Bounds; tb.Offset(58, 0); tb.Width -= 66;
-                TextRenderer.DrawText(e.Graphics, txt.Length > 4 ? txt.Substring(4) : "", lb.Font, tb, txtColor, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                Rectangle sb = e.Bounds; sb.Offset(8, 0); sb.Width = 18;
+                TextRenderer.DrawText(e.Graphics, pinned ? "★" : " ", lb.Font, sb, starColor, TextFormatFlags.VerticalCenter);
+                Rectangle tb = e.Bounds; tb.Offset(30, 0); tb.Width -= 38;
+                TextRenderer.DrawText(e.Graphics, ClipDisplayRow(view[e.Index]), lb.Font, tb, txtColor, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             };
-            for (int i = 0; i < snaps.Count; i++) lb.Items.Add("[" + i + "] " + ClipDisplay(snaps[i]));
-            lb.SelectedIndex = 0;
-            f.Controls.Add(lb);
-            lb.BringToFront();
+
+            // 过滤重建列表; q 空 = 全量; onlyPinned 时只显示收藏
+            Action syncPreview = null; // 后面赋值, refreshView 里空安全调用
+            string previewPath = "";   // 当前预览媒体路径
+            bool previewIsVideo = false;
+            Action<string> refreshView = delegate(string q)
+            {
+                string qq = q == null ? "" : q.Trim();
+                view.Clear();
+                lb.BeginUpdate();
+                lb.Items.Clear();
+                for (int i = 0; i < snaps.Count; i++)
+                {
+                    if (onlyPinned && !clipPinned.Contains(snaps[i])) continue;
+                    if (qq.Length > 0 && snaps[i].IndexOf(qq, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    view.Add(snaps[i]);
+                    lb.Items.Add(ClipDisplayRow(snaps[i])); // 仅占位, 真绘制在 DrawItem
+                }
+                lb.EndUpdate();
+                if (lb.Items.Count > 0) lb.SelectedIndex = 0;
+                string tabName = onlyPinned ? "★收藏" : "全部";
+                tl.Text = "剪贴板历史 [" + tabName + "]   " + view.Count + " / " + snaps.Count;
+                if (syncPreview != null) syncPreview();
+            };
+            Action reFilter = delegate { refreshView(searchBox.Text); };
+            btnTabAll.Click += delegate { onlyPinned = false; applyTabStyle(); reFilter(); };
+            btnTabFav.Click += delegate { onlyPinned = true; applyTabStyle(); reFilter(); };
+            // 列表装进独立容器, 避免 Dock.Fill 和 Top/Bottom 抢位导致头几行被裁掉
+            Panel listHost = new Panel();
+            listHost.Dock = DockStyle.Fill;
+            listHost.BackColor = Color.FromArgb(35, 36, 40);
+            lb.Dock = DockStyle.Fill;
+            listHost.Controls.Add(lb);
 
             // ---- 底部状态条 ----
             Panel status = new Panel();
             status.Dock = DockStyle.Bottom;
-            status.Height = 28;
+            status.Height = 32;
             status.BackColor = Color.FromArgb(22, 23, 26);
             Label sl = new Label();
-            sl.Text = "热键 " + (clipHotkeyName == "" ? "?" : clipHotkeyName) + "   ·   单击=复制到剪贴板   双击=粘贴   右键=删除/清空";
+            sl.Text = "单击=预览   双击=填入   Ctrl+C=复制   Ctrl+P=收藏   Esc=关闭";
             sl.ForeColor = Color.FromArgb(130, 138, 148);
-            sl.Font = new Font("Microsoft YaHei UI", 8.5f);
+            sl.Font = new Font("Microsoft YaHei UI", 9f);
             sl.Dock = DockStyle.Fill;
             sl.TextAlign = ContentAlignment.MiddleLeft;
-            sl.Padding = new Padding(12, 0, 0, 0);
+            sl.Padding = new Padding(14, 0, 8, 0);
             status.Controls.Add(sl);
+
+            // ---- 预览区: 顶部小标题 + 内容 ----
+            Panel preview = new Panel();
+            preview.Dock = DockStyle.Bottom;
+            preview.Height = 500;   // 2026-10-01: 170→500(老大反馈框太小), 底部=译文框(130)+翻译条(30)+标题(24), 原文框吃剩余 ~316
+            preview.BackColor = Color.FromArgb(28, 29, 33);
+            preview.Padding = new Padding(0, 0, 0, 0);
+            Label pvHead = new Label();
+            pvHead.Text = "  预览（单击条目切换 · 点图片可放大）";
+            pvHead.Dock = DockStyle.Top;
+            pvHead.Height = 24;
+            pvHead.ForeColor = Color.FromArgb(110, 118, 130);
+            pvHead.Font = new Font("Microsoft YaHei UI", 8.5f);
+            pvHead.TextAlign = ContentAlignment.MiddleLeft;
+            pvHead.BackColor = Color.FromArgb(24, 25, 29);
+            Panel pvBody = new Panel();
+            pvBody.Dock = DockStyle.Fill;
+            pvBody.Padding = new Padding(10, 6, 10, 8);
+            pvBody.BackColor = Color.FromArgb(22, 23, 27);
+            TextBox pv = new TextBox();
+            pv.Multiline = true;
+            pv.ReadOnly = true;
+            pv.ScrollBars = ScrollBars.Vertical;
+            pv.BorderStyle = BorderStyle.None;
+            pv.BackColor = Color.FromArgb(22, 23, 27);
+            pv.ForeColor = Color.FromArgb(225, 228, 232);
+            pv.Font = new Font("Microsoft YaHei UI", 9.5f);
+            pv.Dock = DockStyle.Fill;
+            pv.WordWrap = true;
+            pv.Text = "选中条目后显示完整内容";
+            PictureBox pvImg = new PictureBox();
+            pvImg.Dock = DockStyle.Fill;
+            pvImg.SizeMode = PictureBoxSizeMode.Zoom;
+            pvImg.BackColor = Color.FromArgb(22, 23, 27);
+            pvImg.Visible = false;
+            // ---- 译文框 + 翻译条 (2026-10-01: 预览直接翻译, 不碰剪贴板) ----
+            // 场景: 有的软件不支持划词, 只能复制进剪贴板 → 在预览区点「翻译」直接看译文。
+            // 复用现有翻译引擎 TranslateProvider() (local=Ollama 零key / openai / baidu, 设置页可配)。
+            TextBox pvTrans = new TextBox();
+            pvTrans.Multiline = true;
+            pvTrans.ReadOnly = true;
+            pvTrans.ScrollBars = ScrollBars.Vertical;
+            pvTrans.BorderStyle = BorderStyle.None;
+            pvTrans.BackColor = Color.FromArgb(22, 23, 27);
+            pvTrans.ForeColor = Color.FromArgb(140, 200, 160);   // 淡绿: 与原文区分
+            pvTrans.Font = new Font("Microsoft YaHei UI", 9.5f);
+            pvTrans.Dock = DockStyle.Bottom;
+            pvTrans.Height = 130;
+            pvTrans.Visible = false;
+            pvTrans.WordWrap = true;
+            Panel pvOps = new Panel();
+            pvOps.Dock = DockStyle.Bottom;
+            pvOps.Height = 30;
+            pvOps.BackColor = Color.FromArgb(24, 25, 29);
+            Button pvBtnTr = new Button();
+            pvBtnTr.Text = "翻译";
+            pvBtnTr.FlatStyle = FlatStyle.Flat;
+            pvBtnTr.FlatAppearance.BorderSize = 0;
+            pvBtnTr.BackColor = Color.FromArgb(40, 42, 48);
+            pvBtnTr.ForeColor = Color.FromArgb(225, 228, 232);
+            pvBtnTr.Font = new Font("Microsoft YaHei UI", 8.5f);
+            pvBtnTr.Size = new Size(56, 24);
+            pvBtnTr.Location = new Point(10, 3);
+            pvBtnTr.Cursor = Cursors.Hand;
+            Button pvBtnRev = new Button();
+            pvBtnRev.Text = "反转";
+            pvBtnRev.FlatStyle = FlatStyle.Flat;
+            pvBtnRev.FlatAppearance.BorderSize = 0;
+            pvBtnRev.BackColor = Color.FromArgb(40, 42, 48);
+            pvBtnRev.ForeColor = Color.FromArgb(225, 228, 232);
+            pvBtnRev.Font = new Font("Microsoft YaHei UI", 8.5f);
+            pvBtnRev.Size = new Size(56, 24);
+            pvBtnRev.Location = new Point(70, 3);
+            pvBtnRev.Cursor = Cursors.Hand;
+            pvBtnRev.Enabled = false;                            // 翻出译文后才可用
+            Label pvSt = new Label();
+            pvSt.Text = "";
+            pvSt.Size = new Size(360, 24);
+            pvSt.Location = new Point(136, 4);
+            pvSt.ForeColor = Color.FromArgb(110, 118, 130);
+            pvSt.Font = new Font("Microsoft YaHei UI", 8.5f);
+            pvSt.TextAlign = ContentAlignment.MiddleLeft;
+            pvOps.Controls.Add(pvBtnTr);
+            pvOps.Controls.Add(pvBtnRev);
+            pvOps.Controls.Add(pvSt);
+
+            bool pvTrBusy = false;
+            string pvTrTo = "";      // 上次翻译的目标语言 ("en"/"zh"), 反转用
+            // 当前预览条目的全文(仅文本条目; 图片/视频/文件返回 null)
+            Func<string> pvTrSource = delegate()
+            {
+                int idx = lb.SelectedIndex;
+                if (idx < 0 || idx >= view.Count) return null;
+                string full = view[idx];
+                if (full.StartsWith("[图片] ") || full.StartsWith("[视频] ") || full.StartsWith("[文件] ")) return null;
+                return full;
+            };
+            // 长文保护: Ollama 本地模型上下文有限, 与预览显示同样截到 4000 字
+            Func<string, string> pvTrClip = delegate(string s)
+            {
+                return s.Length > 4000 ? s.Substring(0, 4000) : s;
+            };
+            pvBtnTr.Click += delegate
+            {
+                if (pvTrBusy) return;
+                string src = pvTrSource();
+                if (src == null) { pvSt.Text = "图片/视频/文件条目不支持翻译"; return; }
+                if (string.IsNullOrWhiteSpace(src)) { pvSt.Text = "内容为空"; return; }
+                string to = PickHasCJK(src) ? "en" : "zh";       // 方向自动判(同划词翻译)
+                string trSrc = pvTrClip(src);
+                pvTrBusy = true;
+                pvBtnTr.Enabled = false; pvBtnRev.Enabled = false;
+                pvSt.Text = src.Length > 4000 ? "翻译中…(长文已截 4000 字)" : "翻译中…";
+                pvTrans.Visible = true;
+                pvTrans.Text = "翻译中…";
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    string outText;
+                    try { outText = TranslateProvider().TranslateAsync(trSrc, to).Result; }
+                    catch (Exception ex) { outText = "翻译失败: " + ex.Message; }
+                    try
+                    {
+                        f.BeginInvoke((MethodInvoker)delegate
+                        {
+                            pvTrBusy = false;
+                            pvBtnTr.Enabled = true; pvBtnRev.Enabled = true;
+                            if (outText.StartsWith("翻译失败")) { pvSt.Text = "翻译失败"; }
+                            else
+                            {
+                                pvSt.Text = "完成 (" + (to == "en" ? "中→英" : "英→中") + ")";
+                                pvTrTo = to;
+                            }
+                            pvTrans.Text = outText;
+                            pvTrans.SelectionStart = 0; pvTrans.SelectionLength = 0;
+                        });
+                    }
+                    catch { }
+                });
+            };
+            pvBtnRev.Click += delegate
+            {
+                // 反转: 以当前译文为源, 方向取反 (对齐划词卡片的反转翻译)
+                if (pvTrBusy) return;
+                string body = pvTrans.Text;
+                if (string.IsNullOrWhiteSpace(body) || body == "翻译中…") return;
+                string to = pvTrTo == "en" ? "zh" : "en";
+                string trSrc = pvTrClip(body);
+                pvTrBusy = true;
+                pvBtnTr.Enabled = false; pvBtnRev.Enabled = false;
+                pvSt.Text = "反转中…";
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    string outText;
+                    try { outText = TranslateProvider().TranslateAsync(trSrc, to).Result; }
+                    catch (Exception ex) { outText = "翻译失败: " + ex.Message; }
+                    try
+                    {
+                        f.BeginInvoke((MethodInvoker)delegate
+                        {
+                            pvTrBusy = false;
+                            pvBtnTr.Enabled = true; pvBtnRev.Enabled = true;
+                            if (outText.StartsWith("翻译失败")) { pvSt.Text = "翻译失败"; }
+                            else
+                            {
+                                pvSt.Text = "完成 (" + (to == "en" ? "中→英" : "英→中") + " 反转)";
+                                pvTrTo = to;
+                            }
+                            pvTrans.Text = outText;
+                            pvTrans.SelectionStart = 0; pvTrans.SelectionLength = 0;
+                        });
+                    }
+                    catch { }
+                });
+            };
+
+            pvBody.Controls.Add(pv);
+            pvBody.Controls.Add(pvImg);
+            // Dock 布局: 后加的先布局 → pv/pvImg(Fill) 先 Add, pvTrans/pvOps(Bottom) 后 Add;
+            // pvOps 要贴最底 → 比 pvTrans 更晚 Add
+            pvBody.Controls.Add(pvTrans);
+            pvBody.Controls.Add(pvOps);
+            preview.Controls.Add(pvBody);
+            preview.Controls.Add(pvHead);
+            // 点预览区 = 灯箱放大/播放 (对齐 dsh-input-tools: zoom-in → 光箱)
+            Action openLightbox = delegate
+            {
+                if (previewPath == null || previewPath.Length == 0 || !File.Exists(previewPath)) return;
+                string pth = previewPath; bool isV = previewIsVideo;
+                Thread lt = new Thread(new ThreadStart(delegate { MediaLightboxShow(pth, isV); }));
+                lt.SetApartmentState(ApartmentState.STA);
+                lt.IsBackground = true;
+                lt.Start();
+            };
+            pvImg.Click += delegate { openLightbox(); };
+            pv.Click += delegate
+            {
+                // 文本预览点着不弹; 仅媒体(视频用文本兜底时)弹灯箱
+                if (previewIsVideo && previewPath != null && previewPath.Length > 0) openLightbox();
+            };
+
+            // ── 布局一次挂载 ─────────────────────────────────────────
+            // 顺序决定 Dock: 后加的先布局。要自上而下 = 标题/筛选/列表/预览/状态
+            // 反推挂载序: 列表(填充) → 状态(底) → 预览(底) → 筛选(顶) → 标题(顶)
+            f.Controls.Add(listHost);
             f.Controls.Add(status);
+            f.Controls.Add(preview);
+            f.Controls.Add(searchPanel);
+            f.Controls.Add(title);
+
+            syncPreview = delegate
+            {
+                // 切换条目: 清翻译区(2026-10-01, 防上一条的译文串到这一条)
+                pvTrans.Visible = false; pvTrans.Text = "";
+                pvSt.Text = ""; pvBtnRev.Enabled = false;
+                pvTrTo = "";
+                int idx = lb.SelectedIndex;
+                // 释放旧图, 防句柄泄漏
+                if (pvImg.Image != null) { var old = pvImg.Image; pvImg.Image = null; old.Dispose(); }
+                if (idx < 0 || idx >= view.Count) { pv.Visible = true; pvImg.Visible = false; pv.Text = ""; return; }
+                string full = view[idx];
+                // 图片条目: "[图片] 路径" → 显示图
+                if (full.StartsWith("[图片] ") || full.StartsWith("[视频] ") || full.StartsWith("[文件] "))
+                {
+                    string ipath = full.Substring(full.IndexOf(' ') + 1).Trim();
+                    previewPath = File.Exists(ipath) ? ipath : "";
+                    previewIsVideo = full.StartsWith("[视频] ");
+                    // 视频: 先尝试抽帧预览
+                    if (full.StartsWith("[视频] "))
+                    {
+                        string thumb = File.Exists(ipath) ? ClipVideoThumb(ipath) : "";
+                        if (thumb.Length > 0 && File.Exists(thumb))
+                        {
+                            try
+                            {
+                                byte[] bytes = File.ReadAllBytes(thumb);
+                                var ms = new MemoryStream(bytes);
+                                pvImg.Image = Image.FromStream(ms);
+                                pvImg.Visible = true;
+                                pv.Visible = false;
+                                pvImg.Cursor = Cursors.Hand;
+                                return;
+                            }
+                            catch { }
+                        }
+                        pv.Text = "视频文件: " + ipath + "\r\n" +
+                            (File.Exists(ipath) ? ("大小: " + new FileInfo(ipath).Length + " 字节  点此处播放") : "文件不存在") +
+                            "\r\n(双击列表=粘贴路径)";
+                        pv.Visible = true; pvImg.Visible = false;
+                        return;
+                    }
+                    if (File.Exists(ipath))
+                    {
+                        try
+                        {
+                            // 拷进内存再 FromStream, 避免 Image.FromFile 锁住文件
+                            byte[] bytes = File.ReadAllBytes(ipath);
+                            var ms = new MemoryStream(bytes);
+                            pvImg.Image = Image.FromStream(ms);
+                            pvImg.Visible = true;
+                            pv.Visible = false;
+                            pvImg.Cursor = Cursors.Hand;
+                            pv.Text = ipath;
+                            return;
+                        }
+                        catch (Exception ex) { pv.Text = "图片加载失败: " + ex.Message + "\r\n" + ipath; }
+                    }
+                    else pv.Text = "文件不存在: " + ipath;
+                    pv.Visible = true; pvImg.Visible = false;
+                    return;
+                }
+                previewPath = ""; previewIsVideo = false;
+                pvImg.Visible = false;
+                pv.Visible = true;
+                pv.Text = full.Length > 4000 ? full.Substring(0, 4000) + "\r\n…(过长已截断，共 " + full.Length + " 字)" : full;
+                pv.SelectionStart = 0;
+                pv.SelectionLength = 0;
+            };
+            refreshView(""); // 首次填充 (syncPreview 已就绪)
 
             // ---- 交互 ----
+            // 写剪贴板: 文本=SetText; 图片条目=真正把图放进剪贴板(不是路径字符串); 文件=文件列表
+            Action<string> clipSetSmart = delegate(string pick)
+            {
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    try
+                    {
+                        if (pick.StartsWith("[图片] "))
+                        {
+                            string p = pick.Substring(7).Trim();
+                            if (File.Exists(p))
+                            {
+                                byte[] bytes = File.ReadAllBytes(p);
+                                ClipDo(delegate
+                                {
+                                    using (var ms = new MemoryStream(bytes))
+                                    using (var img = Image.FromStream(ms))
+                                        Clipboard.SetImage(new Bitmap(img));
+                                }, "set-image");
+                                return;
+                            }
+                        }
+                        if (pick.StartsWith("[文件] ") || pick.StartsWith("[视频] "))
+                        {
+                            string p = pick.Substring(pick.IndexOf(' ') + 1).Trim();
+                            if (File.Exists(p))
+                            {
+                                ClipDo(delegate
+                                {
+                                    var sc = new System.Collections.Specialized.StringCollection();
+                                    sc.Add(p);
+                                    Clipboard.SetFileDropList(sc);
+                                }, "set-file");
+                                return;
+                            }
+                        }
+                        string txt = pick;
+                        ClipDo(delegate { Clipboard.SetText(txt); }, "set-pick");
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("clip set try" + attempt + ": " + ex.Message);
+                        System.Threading.Thread.Sleep(80);
+                    }
+                }
+            };
+            // 单击 = 只预览, 绝不碰剪贴板 (以前单击就复制, 浏览切换时把图纸/表格覆盖成文字, 是灾难)
             Action copyAction = delegate
             {
                 int idx = lb.SelectedIndex;
-                string pick = (idx >= 0 && idx < snaps.Count) ? snaps[idx] : null;
+                string pick = (idx >= 0 && idx < view.Count) ? view[idx] : null;
                 if (pick == null) return;
-                try { Clipboard.SetText(pick); }
-                catch (Exception ex) { Log("clip set err: " + ex.Message); }
-                sl.Text = "✓ 已复制第 " + idx + " 条 (" + ClipDisplay(pick).Length + " 字)，去目标窗口按 Ctrl+V";
+                clipSetSmart(pick);
+                sl.Text = "✓ 已复制 (" + pick.Length + " 字) → Ctrl+V 可粘贴";
             };
+            // 双击 = 填入目标窗口 + 复制; 没有可填入框则只进剪贴板
             Action pasteAction = delegate
             {
                 int idx = lb.SelectedIndex;
-                string pick = (idx >= 0 && idx < snaps.Count) ? snaps[idx] : null;
+                string pick = (idx >= 0 && idx < view.Count) ? view[idx] : null;
                 if (pick == null) return;
-                try { Clipboard.SetText(pick); } catch (Exception ex) { Log("clip set err: " + ex.Message); }
+                clipSetSmart(pick); // 一定先落剪贴板(=复制)
+                bool tryPaste = prevFg != IntPtr.Zero && prevFg != f.Handle;
                 f.Close();
+                if (!tryPaste)
+                {
+                    Log("clip dblclick: no target hwnd, copy only");
+                    return;
+                }
                 try
                 {
-                    if (prevFg != IntPtr.Zero) SetForegroundWindow(prevFg);
-                    System.Threading.Thread.Sleep(120);
+                    SetForegroundWindow(prevFg);
+                    System.Threading.Thread.Sleep(150);
                     PressCombo("ctrl+v");
+                    Log("clip dblclick: pasted to prev fg");
                 }
                 catch (Exception ex) { Log("paste err: " + ex.Message); }
             };
-            lb.Click += delegate { copyAction(); };                       // 单击 = 复制
-            lb.DoubleClick += delegate { pasteAction(); };                // 双击 = 复制+粘贴
+            Action togglePin = delegate
+            {
+                int idx = lb.SelectedIndex;
+                if (idx < 0 || idx >= view.Count) return;
+                string t = view[idx];
+                bool nowPinned;
+                lock (clipLock)
+                {
+                    if (clipPinned.Contains(t)) { clipPinned.Remove(t); nowPinned = false; }
+                    else { clipPinned.Add(t); nowPinned = true; }
+                }
+                SaveClipHistory();
+                refreshView(searchBox.Text);
+                sl.Text = nowPinned ? "★ 已收藏，超出条数时不会被淘汰" : "已取消收藏";
+            };
+            // 🔴 单击=只看预览(不碰剪贴板); 双击=填入+复制; 右键=复制/粘贴/收藏
+            lb.Click += delegate
+            {
+                sl.Text = "预览中 · 双击=填入+复制 · 右键=复制/收藏 · Ctrl+C=只复制";
+            };
+            lb.DoubleClick += delegate { pasteAction(); };
+            lb.SelectedIndexChanged += delegate { syncPreview(); };
             lb.KeyDown += delegate(object s, KeyEventArgs e)
             {
-                if (e.KeyData == Keys.Enter) pasteAction();               // Enter = 粘贴
-                else if (e.KeyData == Keys.Escape) f.Close();             // Esc = 关闭
+                if (e.KeyData == Keys.Enter) pasteAction();               // Enter = 填入+复制
+                else if (e.KeyData == (Keys.C | Keys.Control)) { copyAction(); e.Handled = true; e.SuppressKeyPress = true; }
+                else if (e.KeyData == Keys.Escape)                        // Esc: 先清筛选再关窗
+                {
+                    if (searchBox.Text.Length > 0) { searchBox.Text = ""; }
+                    else f.Close();
+                }
+                else if (e.KeyData == (Keys.P | Keys.Control)) togglePin();
+                else if (e.KeyData == Keys.Up || e.KeyData == Keys.Down) { /* 列表自带 */ }
+                else if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down) { /* 让 ListBox 默认处理 */ }
+            };
+            searchBox.TextChanged += delegate { refreshView(searchBox.Text); };
+            searchBox.KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.KeyData == Keys.Enter) { pasteAction(); e.Handled = true; e.SuppressKeyPress = true; }
+                else if (e.KeyData == Keys.Escape)
+                {
+                    if (searchBox.Text.Length > 0) { searchBox.Text = ""; e.Handled = true; e.SuppressKeyPress = true; }
+                    else f.Close();
+                }
+                else if (e.KeyCode == Keys.Down && lb.Items.Count > 0) { lb.Focus(); e.Handled = true; }
             };
             f.KeyPreview = true;
-            f.KeyDown += delegate(object s, KeyEventArgs e) { if (e.KeyData == Keys.Escape) f.Close(); };
+            f.KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.KeyData == Keys.Escape)
+                {
+                    if (searchBox.Text.Length > 0) { searchBox.Text = ""; e.Handled = true; e.SuppressKeyPress = true; }
+                    else f.Close();
+                }
+                else if (e.KeyData == (Keys.P | Keys.Control)) { togglePin(); e.Handled = true; e.SuppressKeyPress = true; }
+            };
 
-            // 右键菜单: 复制 / 粘贴 / 删除此项 / 清空全部
+            // 右键菜单: 复制 / 粘贴 / 收藏 / 删除 / 清空未收藏
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.BackColor = Color.FromArgb(40, 41, 46);
             menu.ForeColor = Color.FromArgb(225, 228, 232);
             menu.Items.Add("复制此项", null, delegate { copyAction(); });
             menu.Items.Add("粘贴此项", null, delegate { pasteAction(); });
+            menu.Items.Add("收藏/取消收藏  (Ctrl+P)", null, delegate { togglePin(); });
             menu.Items.Add("删除此项", null, delegate
             {
                 int idx = lb.SelectedIndex;
-                if (idx >= 0 && idx < snaps.Count)
+                if (idx >= 0 && idx < view.Count)
                 {
-                    lock (clipLock) clipHist.Remove(snaps[idx]);
-                    lb.Items.RemoveAt(idx);
+                    string t = view[idx];
+                    lock (clipLock)
+                    {
+                        clipHist.Remove(t);
+                        clipPinned.Remove(t);
+                    }
                     SaveClipHistory(); // 删除后落盘
-                    if (lb.Items.Count > 0) lb.SelectedIndex = Math.Min(idx, lb.Items.Count - 1);
-                    else f.Close();
+                    snaps.Remove(t);
+                    refreshView(searchBox.Text);
+                    if (lb.Items.Count == 0) f.Close();
                 }
             });
-            menu.Items.Add("清空全部", null, delegate
+            menu.Items.Add("清空未收藏", null, delegate
             {
-                lock (clipLock) { clipHist.Clear(); lastClipText = ""; }
+                int kept;
+                lock (clipLock)
+                {
+                    for (int i = clipHist.Count - 1; i >= 0; i--)
+                        if (!clipPinned.Contains(clipHist[i])) clipHist.RemoveAt(i);
+                    kept = clipHist.Count;
+                    lastClipText = "";
+                }
                 SaveClipHistory(); // 清空后落盘
-                f.Close();
+                snaps.Clear();
+                lock (clipLock) snaps.AddRange(clipHist);
+                refreshView(searchBox.Text);
+                sl.Text = kept > 0 ? ("已清空未收藏，保留收藏 " + kept + " 条") : "已清空";
+            });
+            menu.Items.Add("合并重复项(含近似)", null, delegate
+            {
+                int removed = 0;
+                lock (clipLock) { removed = ClipHistMergeDupLocked(true); }
+                SaveClipHistory();
+                snaps.Clear();
+                lock (clipLock) snaps.AddRange(clipHist);
+                refreshView(searchBox.Text);
+                sl.Text = removed > 0 ? ("✓ 已合并 " + removed + " 条重复/近似，剩 " + snaps.Count + " 条") : "没有重复项";
             });
             lb.ContextMenuStrip = menu;
             lb.MouseUp += delegate(object s, MouseEventArgs e)
@@ -1673,7 +2769,9 @@ public partial class ShotService
             // 窗口关闭时清单例引用(下次热键可重新打开)
             f.FormClosed += delegate { if (clipHistWin == f) clipHistWin = null; };
 
-            f.ShowDialog();
+            // 非模态: 用户要能点到别的输入框去粘贴。模态 ShowDialog 会把操作卡在本窗上
+            f.Show();
+            f.Activate();
         }
         catch (Exception ex) { Log("clip hist err: " + ex.Message); }
     }
@@ -1681,6 +2779,162 @@ public partial class ShotService
     static void TrayNotify(string title, string msg)
     {
         try { if (TrayIcon != null) TrayIcon.ShowBalloonTip(2500, title, msg, ToolTipIcon.Info); } catch { }
+    }
+
+    // 简易输入框 (不依赖 Microsoft.VisualBasic); 取消返回 null
+    static string ClipPrompt(string title, string hint, string initial)
+    {
+        using (Form f = new Form())
+        {
+            f.Text = title;
+            f.FormBorderStyle = FormBorderStyle.FixedDialog;
+            f.StartPosition = FormStartPosition.CenterScreen;
+            f.ClientSize = new Size(520, 180);
+            f.MinimizeBox = false; f.MaximizeBox = false; f.TopMost = true;
+            Label lb = new Label();
+            lb.Text = hint; lb.Location = new Point(12, 10); lb.Size = new Size(496, 70);
+            TextBox tb = new TextBox();
+            tb.Location = new Point(12, 85); tb.Size = new Size(496, 26); tb.Text = initial == null ? "" : initial;
+            Button ok = new Button(); ok.Text = "确定"; ok.DialogResult = DialogResult.OK;
+            ok.Location = new Point(332, 130); ok.Size = new Size(85, 28);
+            Button cancel = new Button(); cancel.Text = "取消"; cancel.DialogResult = DialogResult.Cancel;
+            cancel.Location = new Point(423, 130); cancel.Size = new Size(85, 28);
+            f.Controls.Add(lb); f.Controls.Add(tb); f.Controls.Add(ok); f.Controls.Add(cancel);
+            f.AcceptButton = ok; f.CancelButton = cancel;
+            return f.ShowDialog() == DialogResult.OK ? tb.Text : null;
+        }
+    }
+
+    [DllImport("winmm.dll")] static extern int mciSendString(string cmd, StringBuilder ret, int retLen, IntPtr hwnd);
+
+    // ── 媒体灯箱(交互对齐 dsh-input-tools VideoLightbox/ImageLightbox) ──
+    // 图片: 缩略图 zoom-in → 点开放大; 点图在「适应/1:1」间切换; 点黑边/×/Esc 关
+    // 视频: 点开播放窗(可缩放); 点视频暂停/继续; 点黑边/×/Esc 关并停止
+    static void MediaLightboxShow(string path, bool isVideo)
+    {
+        try
+        {
+            Form f = new Form();
+            f.Text = isVideo ? "视频播放" : "图片预览";
+            f.BackColor = Color.FromArgb(18, 18, 20);
+            f.StartPosition = FormStartPosition.CenterScreen;
+            f.Size = isVideo ? new Size(960, 600) : new Size(1000, 720);
+            f.KeyPreview = true;
+            f.TopMost = true;
+            // 可缩放: 视频「再缩小」靠拖窗口边
+            f.MinimumSize = new Size(320, 240);
+
+            // 右上角 ×
+            Button bx = new Button();
+            bx.Text = "×";
+            bx.FlatStyle = FlatStyle.Flat;
+            bx.FlatAppearance.BorderSize = 0;
+            bx.FlatAppearance.MouseOverBackColor = Color.FromArgb(200, 60, 60);
+            bx.BackColor = Color.FromArgb(60, 60, 66);
+            bx.ForeColor = Color.White;
+            bx.Font = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold);
+            bx.Size = new Size(40, 40);
+            bx.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            bx.Location = new Point(f.ClientSize.Width - 48, 10);
+            bx.Click += delegate { f.Close(); };
+            f.Controls.Add(bx);
+
+            Label hint = new Label();
+            hint.Text = isVideo ? "点视频=暂停/继续  ·  点黑边/×/Esc 关闭  ·  拖窗口可缩小" : "点图=适应/原始大小切换  ·  点黑边/×/Esc 关闭";
+            hint.ForeColor = Color.FromArgb(150, 155, 165);
+            hint.Font = new Font("Microsoft YaHei UI", 9f);
+            hint.Height = 24;
+            hint.Dock = DockStyle.Bottom;
+            hint.TextAlign = ContentAlignment.MiddleCenter;
+            f.Controls.Add(hint);
+
+            if (isVideo)
+            {
+                // MCI 播放(系统解码); 点击暂停/继续; 窗口缩放时视频跟着缩
+                string alias = "clipv" + Math.Abs(path.GetHashCode()).ToString("x8");
+                Action stop = delegate
+                {
+                    try { mciSendString("stop " + alias, null, 0, IntPtr.Zero); mciSendString("close " + alias, null, 0, IntPtr.Zero); } catch { }
+                };
+                f.FormClosed += delegate { stop(); };
+                f.Shown += delegate
+                {
+                    try
+                    {
+                        mciSendString("close " + alias, null, 0, IntPtr.Zero);
+                        string cmd = "open \"" + path + "\" type mpegvideo alias " + alias;
+                        int r = mciSendString(cmd, null, 0, IntPtr.Zero);
+                        if (r != 0) r = mciSendString("open \"" + path + "\" alias " + alias, null, 0, IntPtr.Zero);
+                        if (r != 0)
+                        {
+                            // 不再 ShellExecute 打开视频: 无关联程序时会弹 OpenWith 并卡死前台, 键盘全废
+                            MessageBox.Show("无法用内置播放器打开该视频。\n请手动用播放器打开（不要交给系统选打开方式）:\n" + path, "视频预览");
+                            f.Close();
+                            return;
+                        }
+                        mciSendString("play " + alias, null, 0, IntPtr.Zero);
+                        // 视频区: 客户区留出边距
+                        Action layout = delegate
+                        {
+                            var rct = f.ClientRectangle;
+                            mciSendString("put " + alias + " window at 8 36 " + Math.Max(80, rct.Width - 16) + " " + Math.Max(60, rct.Height - 70), null, 0, IntPtr.Zero);
+                        };
+                        layout();
+                        f.Resize += delegate { layout(); };
+                    }
+                    catch (Exception ex) { MessageBox.Show("播放失败: " + ex.Message); f.Close(); }
+                };
+                bool paused = false;
+                f.MouseDown += delegate(object s, MouseEventArgs e)
+                {
+                    // 点客户区中部(视频区) = 暂停/继续; 点靠边黑条 = 关闭
+                    var rct = f.ClientRectangle;
+                    bool inVideo = e.X > 20 && e.X < rct.Width - 20 && e.Y > 30 && e.Y < rct.Height - 40;
+                    if (!inVideo) { f.Close(); return; }
+                    try
+                    {
+                        if (paused) { mciSendString("resume " + alias, null, 0, IntPtr.Zero); paused = false; }
+                        else { mciSendString("pause " + alias, null, 0, IntPtr.Zero); paused = true; }
+                    }
+                    catch { }
+                };
+            }
+            else
+            {
+                PictureBox pb = new PictureBox();
+                pb.Dock = DockStyle.Fill;
+                pb.SizeMode = PictureBoxSizeMode.Zoom;
+                pb.BackColor = Color.FromArgb(18, 18, 20);
+                pb.Cursor = Cursors.Hand;
+                byte[] bytes = File.ReadAllBytes(path);
+                var ms = new MemoryStream(bytes);
+                pb.Image = Image.FromStream(ms);
+                f.Controls.Add(pb);
+                pb.BringToFront();
+                bx.BringToFront();
+                hint.BringToFront();
+                bool fit = true;
+                pb.MouseClick += delegate(object s, MouseEventArgs e)
+                {
+                    if (e.Button != MouseButtons.Left) return;
+                    fit = !fit;
+                    pb.SizeMode = fit ? PictureBoxSizeMode.Zoom : PictureBoxSizeMode.CenterImage;
+                    pb.Cursor = Cursors.Hand;
+                };
+                // 点窗体黑边关闭 (PictureBox 已处理点击缩放)
+                f.MouseDown += delegate(object s, MouseEventArgs e)
+                {
+                    if (e.X < 20 || e.Y < 20 || e.X > f.ClientSize.Width - 20 || e.Y > f.ClientSize.Height - 40) f.Close();
+                };
+            }
+            f.KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Escape) f.Close();
+                else if (!isVideo && e.KeyCode == Keys.Space) { /* 预留 */ }
+            };
+            f.ShowDialog();
+        }
+        catch (Exception ex) { Log("media lightbox err: " + ex.Message); }
     }
 
     // 热键接收窗口: 注册 Ctrl+Win+V, 收到 WM_HOTKEY 弹历史; 收到 WM_DISPLAYCHANGE 立即刷新任务栏(分辨率切换)
@@ -1766,6 +3020,7 @@ public partial class ShotService
             Thread.Sleep(30000);
             try
             {
+                KillStuckOpenWith(); // 卡死 OpenWith 会抢前台吃掉全部 Ctrl+C/V, 定时清
                 // 任务栏窗口句柄/矩形定期刷新(分辨率变更/explorer 重启自适应)
                 RefreshTaskbarWindows();
                 // 重装钩子必须回到钩子线程执行 — 通过钩子线程同步控件 Invoke
@@ -2444,6 +3699,18 @@ public partial class ShotService
                 else if (path == "/clipboard/get") { body = ClipboardGet(); Log("[ctrl] clipboard get"); }
                 else if (path == "/clipboard/set")
                 {
+                    // POST form "text=..." 或 query ?text=; 长文走 POST body
+                    if (!q.ContainsKey("text") && reqBody != null && reqBody.Length > 0)
+                    {
+                        if (reqBody.StartsWith("text="))
+                        {
+                            string rawv = reqBody.Substring(5);
+                            // form-urlencoded: 一次 Unescape
+                            try { q["text"] = Uri.UnescapeDataString(rawv.Replace("+", " ")); }
+                            catch { q["text"] = rawv; }
+                        }
+                        else q["text"] = reqBody;
+                    }
                     if (!q.ContainsKey("text")) { code = 400; body = "{\"ok\":false,\"error\":\"need text\"}"; }
                     else
                     {
@@ -2451,9 +3718,45 @@ public partial class ShotService
                         // 默认 \r\n→\n: 聊天框粘贴遇 \r(回车) 同样触发连发 (12:55 事故); keep_cr=1 保留原样
                         if (!(q.ContainsKey("keep_cr") && q["keep_cr"] == "1") && ct.IndexOf('\r') >= 0)
                         { ct = ct.Replace("\r\n", "\n").Replace("\r", "\n"); crn = true; }
-                        body = ClipboardSetText(ct);
-                        if (crn) body = body.Substring(0, body.Length - 1) + ",\"crNormalized\":true}";
-                        Log("[ctrl] clipboard set " + ct.Length + " chars" + (crn ? " (CR normalized)" : ""));
+                        if (q.ContainsKey("sync") && q["sync"] == "1")
+                        {
+                            // 🔴 只入库, 不写剪贴板: 保护本机原有待粘贴内容
+                            clipJustSetFromSync = ct;
+                            ClipSyncIngest(ct);
+                            body = "{\"ok\":true,\"chars\":" + ct.Length + ",\"sync\":true,\"clipboard\":\"untouched\"}";
+                            Log("[ctrl] clipboard sync ingest " + ct.Length + " chars");
+                        }
+                        else
+                        {
+                            body = ClipboardSetText(ct);
+                            if (crn) body = body.Substring(0, body.Length - 1) + ",\"crNormalized\":true}";
+                            Log("[ctrl] clipboard set " + ct.Length + " chars" + (crn ? " (CR normalized)" : ""));
+                        }
+                    }
+                }
+                else if (path == "/clipboard/pull")
+                {
+                    // 跨机拉取: ?peer=http://ip:18800  把对方当前剪贴板拉到本机
+                    string peer = q.ContainsKey("peer") ? q["peer"] : (q.ContainsKey("from") ? q["from"] : "");
+                    body = ClipSyncPullFrom(peer);
+                    Log("[ctrl] clipboard pull " + peer);
+                }
+                else if (path == "/clipboard/push")
+                {
+                    // 跨机推送: ?peer=...&text=...  或 POST text= 推到指定 peer(不带 peer=推全部 peers)
+                    string peer = q.ContainsKey("peer") ? q["peer"] : "";
+                    string ct2 = q.ContainsKey("text") ? q["text"] : reqBody;
+                    if (ct2 != null && ct2.StartsWith("text=")) ct2 = Uri.UnescapeDataString(ct2.Substring(5).Replace("+", " "));
+                    if (string.IsNullOrEmpty(ct2)) { code = 400; body = "{\"ok\":false,\"error\":\"need text\"}"; }
+                    else
+                    {
+                        string savedPeers = clipPeers; int savedPush = clipSyncPush;
+                        if (peer.Length > 0) { clipPeers = peer; clipSyncPush = 1; }
+                        else clipSyncPush = 1;
+                        ClipSyncPushToPeers(ct2);
+                        clipPeers = savedPeers; clipSyncPush = savedPush;
+                        body = "{\"ok\":true,\"chars\":" + ct2.Length + ",\"to\":\"" + JsonEscape(peer.Length > 0 ? peer : clipPeers) + "\"}";
+                        Log("[ctrl] clipboard push " + ct2.Length + " chars to " + (peer.Length > 0 ? peer : "(all peers)"));
                     }
                 }
                 // UiCall 第 4 参传 q: 启用按进程隔离的熔断记账 + UIA 应用策略拦截 (P1-2)
@@ -2480,7 +3783,8 @@ public partial class ShotService
                 {
                     int rx = 0, ry = 0, rw = 0, rh = 0, rf = 10;
                     TryInt(q, "x", out rx); TryInt(q, "y", out ry); TryInt(q, "w", out rw); TryInt(q, "h", out rh); TryInt(q, "fps", out rf);
-                    body = RecordStart(rx, ry, rw, rh, rf); // RecordStart 内部: w/h<=0 用全屏, fps 越界用默认
+                    string rfmt; if (!q.TryGetValue("fmt", out rfmt) || rfmt != "gif") rfmt = "mp4";
+                    body = RecordStart(rx, ry, rw, rh, rf, rfmt); // RecordStart 内部: w/h<=0 用全屏, fps 越界用默认
                     if (body.Contains("\"ok\":true")) ShowRecBorder(); // agent 发起的录制也给用户红框可见性
                     Log("[rec] start " + target);
                 }
@@ -2543,11 +3847,15 @@ public partial class ShotService
             }
             int cm; if (int.TryParse(Cfg("clipboard.max", "50"), out cm) && cm >= 5 && cm <= 500) clipMax = cm;
             int ce; if (int.TryParse(Cfg("clipboard.enabled", "1"), out ce)) clipEnabled = ce == 1 ? 1 : 0;
+            clipIgnoreApps = Cfg("clipboard.ignoreApps", "keepass,keepassxc,1password,bitwarden,lastpass,dashlane,enpass,roboform,keeper");
+            clipPeers = Cfg("clipboard.peers", "");
+            int sp; if (int.TryParse(Cfg("clipboard.syncPush", "0"), out sp)) clipSyncPush = sp == 1 ? 1 : 0;
             int ve; if (int.TryParse(Cfg("volume.enabled", "1"), out ve)) volEnabled = ve == 1 ? 1 : 0;
             int vs; if (int.TryParse(Cfg("volume.step", "2"), out vs) && vs >= 1 && vs <= 20) volStep = vs;
             int vr; if (int.TryParse(Cfg("volume.reverse", "0"), out vr)) volReverse = vr == 1 ? 1 : 0;
             int pe; if (int.TryParse(Cfg("pick.enabled", "1"), out pe)) pickEnabled = pe == 1 ? 1 : 0;
             Log("runtime settings: dir=" + ShotDir + " clipMax=" + clipMax + " clipEnabled=" + clipEnabled +
+                " clipIgnore=" + clipIgnoreApps + " peers=[" + clipPeers + "] syncPush=" + clipSyncPush +
                 " vol[en=" + volEnabled + " step=" + volStep + " rev=" + volReverse + "]" +
                 " pick[en=" + pickEnabled + " ask=" + Cfg("pick.askModel", "GwV4F") + "]");
         }
@@ -3094,9 +4402,10 @@ public partial class ShotService
         TcpListener listener = null;
         try
         {
-            listener = new TcpListener(IPAddress.Loopback, PORT);
+            // 绑 0.0.0.0: 跨机同步(peers)要能从 Tailscale/局域网连进来; 以前只绑 Loopback 别的机器连不上
+            listener = new TcpListener(IPAddress.Any, PORT);
             listener.Start();
-            Log("listening on 127.0.0.1:" + PORT);
+            Log("listening on 0.0.0.0:" + PORT);
         }
         catch (Exception ex) { Log("listen failed: " + ex.Message); return; }
         while (true)
@@ -3583,7 +4892,8 @@ public partial class ShotService
                     int.TryParse(McpParam(a, "x"), out rx); int.TryParse(McpParam(a, "y"), out ry);
                     int.TryParse(McpParam(a, "w"), out rw); int.TryParse(McpParam(a, "h"), out rh);
                     int.TryParse(McpParam(a, "fps"), out rf);
-                    return McpText(RecordStart(rx, ry, rw, rh, rf), false);
+                    string fmt2 = McpParam(a, "fmt"); if (fmt2 != "gif") fmt2 = "mp4";
+                    return McpText(RecordStart(rx, ry, rw, rh, rf, fmt2), false);
                 }
                 case "record_stop": return McpText(RecordStop(), false);
                 case "record_status": return McpText(RecordStatus(), false);
@@ -3628,8 +4938,8 @@ public partial class ShotService
             "{\"name\":\"ocr_image\",\"description\":\"对截图文件跑OCR(qwen3-vl本地)。path=PNG(须截图目录内), 返回chars+text; 可选wait毫秒\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"wait\":{\"type\":\"number\"}},\"required\":[\"path\"]}}" +
             "{\"name\":\"pin_image\",\"description\":\"图片文件钉到桌面(贴图窗,同截图工具条贴图): 左键拖动/滚轮缩放/双击关闭。path=PNG, x/y缺省居中\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"path\"]}}" +
             "{\"name\":\"ui_readall\",\"description\":\"批量读整棵元素树的 Name/Value(输入框内容)/类型 — 找输入框里的值/页面文本时用这个, 比 ui_read 逐个快。title=窗口标题, max=上限(默认300)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"max\":{\"type\":\"number\"}}}," +
-            "{\"name\":\"record_start\",\"description\":\"开始录屏(抓屏管道喂ffmpeg出MP4 h264)。x,y,w,h=区域(默认全屏), fps=帧率(默认10,上限30)。无音频。用 record_stop 结束\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"fps\":{\"type\":\"number\"}}}}," +
-            "{\"name\":\"record_stop\",\"description\":\"停止录屏, 返回 MP4 文件路径\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
+            "{\"name\":\"record_start\",\"description\":\"开始录屏/录GIF。x,y,w,h=区域(默认全屏), fps=帧率(默认10,上限30), fmt=mp4|gif(gif上限120s自动停, 停止后需数秒编码)。无音频。用 record_stop 结束\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"fps\":{\"type\":\"number\"},\"fmt\":{\"type\":\"string\",\"enum\":[\"mp4\",\"gif\"]}}}}," +
+            "{\"name\":\"record_stop\",\"description\":\"停止录屏/录GIF, 返回文件路径\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"record_status\",\"description\":\"查录屏状态(是否在录/已录秒数/文件)\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}}," +
             "{\"name\":\"app_runas\",\"description\":\"以管理员运行程序(触发UAC, 用户点确认才执行; AI无法静默提权)。path=程序, args=参数\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"path\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},\"required\":[\"path\"]}}," +
             "{\"name\":\"ui_click\",\"description\":\"按ui_tree索引语义点击元素(Invoke/Toggle/Expand/Select优先,无模式退坐标中心)。title=窗口标题,i=元素索引\",\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"title\":{\"type\":\"string\"},\"hwnd\":{\"type\":\"number\"},\"i\":{\"type\":\"number\"}},\"required\":[\"i\"]}," +
@@ -3646,7 +4956,7 @@ public partial class ShotService
     // 所以这里统一截断, 宁可少显示几个字符也绝不让它把服务带崩
     static string TrayTip()
     {
-        string s = "Win Desktop Helper v" + APP_VERSION + (IsElevated() ? "【管理员】" : "【普通权限】") + "\nbuild " + BuildStamp() + " | :18800";
+        string s = "Win Desktop Helper v" + APP_VERSION + (IsElevated() ? "【管理员】" : "【普通权限】") + "\n" + BuildStamp() + " | :18800"; // [2026-10-16] 去掉"build "前缀: 63 字符上限内 :18800 才显示得全(之前被截成 :188)
         return s.Length > 62 ? s.Substring(0, 62) : s;
     }
     static void InitTray()
@@ -3675,6 +4985,142 @@ public partial class ShotService
         {
             try { ShowClipHistory(); } catch (Exception ex) { Log("clip history menu err: " + ex.Message); }
         });
+
+        // 跨机同步 (Tailscale/局域网 peers, 解 UU 远程复制难)
+        ToolStripMenuItem mSync = new ToolStripMenuItem("跨机同步");
+        mSync.DropDownItems.Add("推送到其他电脑", null, delegate
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    string txt = "";
+                    string gr = ClipboardGet();
+                    // 从 get 结果抠 text, 或直接取剪贴板文本
+                    Thread sta = new Thread(new ThreadStart(delegate
+                    {
+                        try { if (Clipboard.ContainsText()) txt = Clipboard.GetText(); } catch { }
+                    }));
+                    sta.SetApartmentState(ApartmentState.STA); sta.IsBackground = true; sta.Start(); sta.Join(2000);
+                    if (txt.Length == 0) { TrayNotify("跨机同步", "当前剪贴板没有文本"); return; }
+                    ClipSyncPushToPeers(txt);
+                    TrayNotify("跨机同步", "已推送到 " + (clipPeers.Trim().Length == 0 ? "(未配置 peers)" : clipPeers) + " (" + txt.Length + " 字)");
+                }
+                catch (Exception ex) { Log("sync push menu err: " + ex.Message); }
+            });
+        });
+        // 每个 peer 一个拉取项
+        Action buildPullMenus = delegate
+        {
+            // 清掉旧的拉取项(保留前两项)
+            while (mSync.DropDownItems.Count > 2) mSync.DropDownItems.RemoveAt(2);
+            string[] ps = (clipPeers == null ? "" : clipPeers).Split('|');
+            for (int i = 0; i < ps.Length; i++)
+            {
+                string peer = ps[i].Trim();
+                if (peer.Length == 0) continue;
+                string label = "从 " + peer + " 拉取";
+                mSync.DropDownItems.Add(label, null, delegate
+                {
+                    ThreadPool.QueueUserWorkItem(delegate
+                    {
+                        string r = ClipSyncPullFrom(peer);
+                        bool ok = r != null && r.StartsWith("{\"ok\":true");
+                        TrayNotify("跨机同步", ok ? ("已从 " + peer + " 拉取到本机剪贴板") : ("拉取失败: " + (r == null ? "" : r)));
+                    });
+                });
+            }
+        };
+        buildPullMenus();
+        mSync.DropDownItems.Add(new ToolStripSeparator());
+        mSync.DropDownItems.Add("设置 peers…", null, delegate
+        {
+            string cur = clipPeers;
+            string input = ClipPrompt("跨机同步 · peers", "每行或用 | 分隔一台电脑的 helper 地址\n例: http://100.119.140.33:18800|http://100.108.133.82:18800\n(走 Tailscale IP, 两台都需装 win-desktop-helper)", cur);
+            if (input != null)
+            {
+                clipPeers = input.Replace("\r\n", "|").Replace("\n", "|").Trim();
+                try
+                {
+                    // 写进 shot-service.json
+                    var d = LoadCfgDict();
+                    d["capture.dir"] = Cfg("capture.dir", "");
+                    d["capture.hotkeyRegion"] = Cfg("capture.hotkeyRegion", "");
+                    d["capture.hotkeyFull"] = Cfg("capture.hotkeyFull", "");
+                    d["capture.hotkeyPin"] = Cfg("capture.hotkeyPin", "");
+                    d["clipboard.enabled"] = Cfg("clipboard.enabled", "1");
+                    d["clipboard.max"] = Cfg("clipboard.max", "50");
+                    d["clipboard.ignoreApps"] = Cfg("clipboard.ignoreApps", "");
+                    d["clipboard.peers"] = clipPeers;
+                    d["clipboard.syncPush"] = clipSyncPush == 1 ? "1" : "0";
+                    d["volume.enabled"] = Cfg("volume.enabled", "1");
+                    d["volume.step"] = Cfg("volume.step", "2");
+                    d["volume.reverse"] = Cfg("volume.reverse", "0");
+                    d["pick.enabled"] = Cfg("pick.enabled", "1");
+                    d["pick.askEndpoint"] = Cfg("pick.askEndpoint", "");
+                    d["pick.askKey"] = Cfg("pick.askKey", "");
+                    d["pick.askModel"] = Cfg("pick.askModel", "GwV4F");
+                    d["pick.askPrompt"] = Cfg("pick.askPrompt", "");
+                    d["translate.provider"] = Cfg("translate.provider", "local");
+                    d["translate.endpoint"] = Cfg("translate.endpoint", "");
+                    d["translate.model"] = Cfg("translate.model", "");
+                    d["translate.apiKey"] = Cfg("translate.apiKey", "");
+                    d["translate.to"] = Cfg("translate.to", "zh");
+                    d["translate.baiduAppId"] = Cfg("translate.baiduAppId", "");
+                    d["translate.baiduKey"] = Cfg("translate.baiduKey", "");
+                    d["ocr.provider"] = Cfg("ocr.provider", "qwen3vl");
+                    d["ocr.endpoint"] = Cfg("ocr.endpoint", "");
+                    d["ocr.model"] = Cfg("ocr.model", "");
+                    d["ocr.apiKey"] = Cfg("ocr.apiKey", "");
+                    d["ocr.apiKeys"] = Cfg("ocr.apiKeys", "");
+                    SaveCfgDict(d);
+                }
+                catch (Exception ex) { Log("peers save err: " + ex.Message); }
+                buildPullMenus();
+                TrayNotify("跨机同步", "peers 已更新: " + clipPeers);
+            }
+        });
+        mSync.DropDownItems.Add(clipSyncPush == 1 ? "✓ 自动推送(点此关)" : "自动推送(点此开)", null, delegate
+        {
+            clipSyncPush = clipSyncPush == 1 ? 0 : 1;
+            try
+            {
+                var d = LoadCfgDict();
+                d["capture.dir"] = Cfg("capture.dir", "");
+                d["capture.hotkeyRegion"] = Cfg("capture.hotkeyRegion", "");
+                d["capture.hotkeyFull"] = Cfg("capture.hotkeyFull", "");
+                d["capture.hotkeyPin"] = Cfg("capture.hotkeyPin", "");
+                d["clipboard.enabled"] = Cfg("clipboard.enabled", "1");
+                d["clipboard.max"] = Cfg("clipboard.max", "50");
+                d["clipboard.ignoreApps"] = Cfg("clipboard.ignoreApps", "");
+                d["clipboard.peers"] = clipPeers;
+                d["clipboard.syncPush"] = clipSyncPush == 1 ? "1" : "0";
+                d["volume.enabled"] = Cfg("volume.enabled", "1");
+                d["volume.step"] = Cfg("volume.step", "2");
+                d["volume.reverse"] = Cfg("volume.reverse", "0");
+                d["pick.enabled"] = Cfg("pick.enabled", "1");
+                d["pick.askEndpoint"] = Cfg("pick.askEndpoint", "");
+                d["pick.askKey"] = Cfg("pick.askKey", "");
+                d["pick.askModel"] = Cfg("pick.askModel", "GwV4F");
+                d["pick.askPrompt"] = Cfg("pick.askPrompt", "");
+                d["translate.provider"] = Cfg("translate.provider", "local");
+                d["translate.endpoint"] = Cfg("translate.endpoint", "");
+                d["translate.model"] = Cfg("translate.model", "");
+                d["translate.apiKey"] = Cfg("translate.apiKey", "");
+                d["translate.to"] = Cfg("translate.to", "zh");
+                d["translate.baiduAppId"] = Cfg("translate.baiduAppId", "");
+                d["translate.baiduKey"] = Cfg("translate.baiduKey", "");
+                d["ocr.provider"] = Cfg("ocr.provider", "qwen3vl");
+                d["ocr.endpoint"] = Cfg("ocr.endpoint", "");
+                d["ocr.model"] = Cfg("ocr.model", "");
+                d["ocr.apiKey"] = Cfg("ocr.apiKey", "");
+                d["ocr.apiKeys"] = Cfg("ocr.apiKeys", "");
+                SaveCfgDict(d);
+            }
+            catch (Exception ex) { Log("syncPush save err: " + ex.Message); }
+            TrayNotify("跨机同步", clipSyncPush == 1 ? "自动推送已开：本机复制会推到 peers" : "自动推送已关");
+        });
+        menu.Items.Add(mSync);
 
         // 工具 二级菜单 (MCP/更新/日志等低频项折叠)
         ToolStripMenuItem mTools = new ToolStripMenuItem("工具");
@@ -3759,6 +5205,15 @@ public partial class ShotService
         // 启动气泡报构建指纹: 用户每次启动肉眼确认"跑的是不是刚编的" (部署自验证)
         TrayNotify("已启动 v" + APP_VERSION + (IsElevated() ? "（管理员）" : "（普通权限，受限）"), "build " + BuildStamp() + " — 与编译时间一致即新代码生效");
         Log("tray icon ready, build=" + BuildStamp());
+        try { KillStuckOpenWith(); } catch { } // 启动即清一次卡死的 OpenWith
+        try
+        {
+            Thread clipClean = new Thread(new ThreadStart(ClipCleanupLoop));
+            clipClean.IsBackground = true;
+            clipClean.Start();
+            Log("clip cleanup loop started (daily 00:01)");
+        }
+        catch (Exception ex) { Log("clip cleanup start err: " + ex.Message); }
     }
 
     // 代码绘制托盘图标: 深蓝圆底 + 白色镜头圈 + 青色核心

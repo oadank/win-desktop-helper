@@ -122,14 +122,161 @@ partial class ShotService
         catch { }
     }
 
-    // 保存截图到 ShotDir (类级: 遮罩工具栏共用)
-    static string SaveToShotDir(Bitmap bmp)
+    // ==================== 新保存管线 (平搬自 WinControl wc-shot.cs 4.3; 默认名沿用 shot_ 前缀, 不加 PixPin) ====================
+    // save.saveTypes 位掩码 → 7 种扩展名 (bit0..bit6 = png,jpg,jpeg,bmp,gif,tif,webp)
+    static readonly string[] SaveTypeExts = { "png", "jpg", "jpeg", "bmp", "gif", "tif", "webp" };
+
+    static System.Drawing.Imaging.ImageFormat FormatForExt(string ext)
+    {
+        switch (ext)
+        {
+            case "jpg":
+            case "jpeg": return System.Drawing.Imaging.ImageFormat.Jpeg;
+            case "bmp": return System.Drawing.Imaging.ImageFormat.Bmp;
+            case "gif": return System.Drawing.Imaging.ImageFormat.Gif;
+            case "tif":
+            case "tiff": return System.Drawing.Imaging.ImageFormat.Tiff;
+            case "webp": return System.Drawing.Imaging.ImageFormat.Png; // GDI+ 无 WebP 编码器, 降级 PNG
+            case "png":
+            default: return System.Drawing.Imaging.ImageFormat.Png;
+        }
+    }
+
+    // 文件名模板展开: $...$ 段按 DateTime.ToString 格式展开
+    static string ExpandSaveTemplate(string tmpl, DateTime now)
+    {
+        if (string.IsNullOrEmpty(tmpl)) tmpl = "shot_$yyyy-MM-dd_HH-mm-ss-fff$.png";
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        int i = 0;
+        while (i < tmpl.Length)
+        {
+            int s = tmpl.IndexOf('$', i);
+            if (s < 0) { sb.Append(tmpl.Substring(i)); break; }
+            int e = tmpl.IndexOf('$', s + 1);
+            if (e < 0) { sb.Append(tmpl.Substring(i)); break; }
+            sb.Append(tmpl.Substring(i, s - i));
+            string fmt = tmpl.Substring(s + 1, e - s - 1);
+            try { sb.Append(now.ToString(fmt)); }
+            catch { sb.Append(fmt); }
+            i = e + 1;
+        }
+        return sb.ToString();
+    }
+
+    static string SaveTypeExt()
+    {
+        int types;
+        if (!int.TryParse(Cfg("save.saveTypes", "127"), out types)) types = 127;
+        for (int i = 0; i < SaveTypeExts.Length; i++)
+            if ((types & (1 << i)) != 0) return SaveTypeExts[i];
+        return "png";
+    }
+
+    // 冲突策略 save.whenConflict: 0=自动重命名绝不覆盖 (默认), 1=覆盖
+    static string ResolveSaveConflict(string path)
+    {
+        int wc;
+        if (!int.TryParse(Cfg("save.whenConflict", "0"), out wc)) wc = 0;
+        if (wc == 1) return path;
+        if (!System.IO.File.Exists(path)) return path;
+        string dir = System.IO.Path.GetDirectoryName(path), name = System.IO.Path.GetFileNameWithoutExtension(path), ext = System.IO.Path.GetExtension(path);
+        for (int n = 1; n < 1000; n++)
+        {
+            string cand = System.IO.Path.Combine(dir, name + "-" + n + ext);
+            if (!System.IO.File.Exists(cand)) return cand;
+        }
+        return System.IO.Path.Combine(dir, name + "-" + System.Guid.NewGuid().ToString("N").Substring(0, 8) + ext);
+    }
+
+    static DateTime lastShotCleanup = DateTime.MinValue;
+    const int ShotCleanupThrottleMinutes = 5;
+    static bool shotCleanupLoopStarted = false;
+
+    static void ShotCleanupLoop()
+    {
+        while (true)
+        {
+            try
+            {
+                DateTime now = DateTime.Now;
+                DateTime next = now.Date.AddDays(1).AddMinutes(5);
+                double ms = (next - now).TotalMilliseconds;
+                System.Threading.Thread.Sleep(ms > 0 && ms < int.MaxValue ? (int)ms : 60000);
+                if (Cfg("save.autoCleanupEnabled", "true") != "true") continue;
+                RunShotCleanup("daily-0005");
+            }
+            catch (System.Threading.ThreadInterruptedException) { }
+            catch (Exception ex) { Log("shot cleanup loop err: " + ex.Message); try { System.Threading.Thread.Sleep(60000); } catch { } }
+        }
+    }
+
+    static void RunShotCleanup(string trigger)
+    {
+        try
+        {
+            lastShotCleanup = DateTime.Now;
+            int days;
+            if (!int.TryParse(Cfg("save.cleanupDays", "2"), out days)) days = 2;
+            if (days < 0) days = 0;
+            int types;
+            if (!int.TryParse(Cfg("save.saveTypes", "127"), out types)) types = 127;
+            if (!System.IO.Directory.Exists(ShotDir)) return;
+            // 只清理与当前保存模板同前缀的截图文件, 绝不误删 shot 目录里其它东西
+            string tmpl = Cfg("save.filename", "shot_$yyyy-MM-dd_HH-mm-ss-fff$.png");
+            int dpos = tmpl.IndexOf('$');
+            string prefix = dpos > 0 ? tmpl.Substring(0, dpos) : "shot_";
+            DateTime cutoff = DateTime.Now.AddDays(-days);
+            int deleted = 0; long freed = 0;
+            foreach (string f in System.IO.Directory.GetFiles(ShotDir))
+            {
+                try
+                {
+                    string fn = System.IO.Path.GetFileName(f);
+                    if (!fn.StartsWith(prefix)) continue; // 只删自己生成的截图
+                    DateTime age = System.IO.File.GetLastWriteTime(f);
+                    if (age >= cutoff) continue;
+                    long sz = new System.IO.FileInfo(f).Length;
+                    System.IO.File.Delete(f);
+                    deleted++; freed += sz;
+                    Log("shot cleanup delete: " + f + " (" + sz + " bytes)");
+                }
+                catch (Exception ex1) { Log("shot cleanup file err: " + f + " " + ex1.Message); }
+            }
+            Log("shot cleanup done (" + trigger + "): deleted=" + deleted + " freed=" + freed + " dir=" + ShotDir + " days=" + days);
+        }
+        catch (Exception ex) { Log("shot cleanup err: " + ex.Message); }
+    }
+
+    static void ShotCleanupAfterSave()
+    {
+        try
+        {
+            if (!shotCleanupLoopStarted) { shotCleanupLoopStarted = true; System.Threading.Thread t = new System.Threading.Thread(ShotCleanupLoop); t.IsBackground = true; t.Start(); }
+            if (Cfg("save.autoCleanupEnabled", "true") != "true") return;
+            if ((DateTime.Now - lastShotCleanup).TotalMinutes < ShotCleanupThrottleMinutes) return;
+            RunShotCleanup("after-save");
+        }
+        catch (Exception ex) { Log("shot cleanup throttle err: " + ex.Message); }
+    }
+
+    // 保存管线核心: 建目录 → 模板命名 → 冲突处理 → 落盘 → 自动清理
+    static string SaveImagePipelined(Bitmap bmp)
     {
         try { if (!System.IO.Directory.Exists(ShotDir)) System.IO.Directory.CreateDirectory(ShotDir); } catch { }
-        string name = "shot_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff") + ".png";
-        string path = System.IO.Path.Combine(ShotDir, name);
-        bmp.Save(path, ImageFormat.Png);
+        string ext = SaveTypeExt();
+        string name = ExpandSaveTemplate(Cfg("save.filename", "shot_$yyyy-MM-dd_HH-mm-ss-fff$.png"), DateTime.Now);
+        if (string.IsNullOrEmpty(System.IO.Path.GetExtension(name))) name = name + "." + ext;
+        string path = ResolveSaveConflict(System.IO.Path.Combine(ShotDir, name));
+        bmp.Save(path, FormatForExt(ext));
+        Log("shot saved: " + path + " (saveTypes ext=" + ext + ")");
+        ShotCleanupAfterSave();
         return path;
+    }
+
+    // 保存截图到 ShotDir (类级: 遮罩工具栏共用) — 换新管线, 签名不变
+    static string SaveToShotDir(Bitmap bmp)
+    {
+        return SaveImagePipelined(bmp);
     }
 
     // ---- 标注数据模型 (PixPin 基础款: 矩形/椭圆/箭头/画笔/文字/序号; 一条记录一个笔画) ----
@@ -312,9 +459,32 @@ partial class ShotService
         readonly List<Annot> redoStack = new List<Annot>(); // 撤销弹出的标注 (重做用, 新笔画清空)
         Annot cur;               // 正在绘制的标注
         string tool = null;      // 当前标注工具: rect/ellipse/arrow/pen/text/seq; null=未选
-        int curArrowStyle = Annot.S_ARROW;          // 属性栏: 箭头样式
-        float curWidth = 3f;                        // 属性栏: 线宽 (细2/中3.5/粗6)
-        Color curColor = Color.FromArgb(242, 80, 59); // 属性栏: 颜色 (PixPin 默认红)
+        // ---- 标注参数持久化 (PixPin MarkBar 同款): 首次截图前从 shot-service.json mark 节恢复 ----
+        static bool markLoaded = false;
+        static float markWidth0 = 3f;
+        static int markArrowStyle0 = Annot.S_ARROW;
+        static Color markColor0 = Color.FromArgb(242, 80, 59);
+        static int markFontPt0 = 14;
+        static string markSeqFmt0 = "1";
+        static string markFontFamily0 = "Microsoft YaHei UI";
+        static CaptureOverlay()
+        {
+            try
+            {
+                markLoaded = true;
+                float w; if (float.TryParse(Cfg("mark.width", "3"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out w) && w >= 1 && w <= 20) markWidth0 = w;
+                int st; if (int.TryParse(Cfg("mark.arrowStyle", ""), out st)) markArrowStyle0 = st;
+                int ci; if (int.TryParse(Cfg("mark.color", ""), System.Globalization.NumberStyles.Integer, null, out ci)) markColor0 = Color.FromArgb(ci);
+                int fp; if (int.TryParse(Cfg("mark.fontPt", ""), out fp) && fp >= 8 && fp <= 72) markFontPt0 = fp;
+                string sf = Cfg("mark.seqFmt", "1"); if (sf.Length == 1 && "1IaA".IndexOf(sf) >= 0) markSeqFmt0 = sf;
+                string ff = Cfg("mark.fontFamily", ""); if (ff.Length > 0) markFontFamily0 = ff;
+                Log("mark cfg loaded: w=" + markWidth0 + " style=" + markArrowStyle0 + " color=" + markColor0.ToArgb() + " pt=" + markFontPt0 + " fam=" + markFontFamily0 + " seq=" + markSeqFmt0);
+            }
+            catch (Exception ex) { Log("mark cfg load err: " + ex.Message); }
+        }
+        int curArrowStyle = markArrowStyle0;        // 属性栏: 箭头样式
+        float curWidth = markWidth0;                // 属性栏: 线宽 (细2/中3.5/粗6)
+        Color curColor = markColor0;                // 属性栏: 颜色 (PixPin 默认红)
         int seqNext = 1;
         // text annotation: self-drawn input (TextBox white opaque bg; BackgroundImage ignored by system EDIT control)
         // focus stays on overlay; chars arrive via WM_CHAR/KeyPress (IME works); text+caret painted in OnPaint = truly transparent
@@ -341,9 +511,9 @@ partial class ShotService
         Point downPt;
         Rectangle pendingWin = Rectangle.Empty;       // 文字标注的行内输入框
         Point textPt;
-        int curFontPt = 14; // 属性栏: 字号 (文字/序号)
-        string curSeqFmt = "1"; // 属性栏: 序号格式 (1/I/a/A)
-        string curFontFamily = "Microsoft YaHei UI"; // 属性栏: 字体
+        int curFontPt = markFontPt0; // 属性栏: 字号 (文字/序号)
+        string curSeqFmt = markSeqFmt0; // 属性栏: 序号格式 (1/I/a/A)
+        string curFontFamily = markFontFamily0; // 属性栏: 字体
         static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
         static Font GetAnnotFont(int pt) { return GetAnnotFont("Microsoft YaHei UI", pt); }
         static Font GetAnnotFont(string family, int pt)
@@ -1719,6 +1889,8 @@ partial class ShotService
             bar.AddSep();
             // [功能组]
             bar.Add("ocr", "OCR 文字识别", delegate { ActOcr(); });
+            bar.Add("table", "表格识别 (出 Markdown, 可贴 Excel)", delegate { ActTable(); });
+            bar.Add("latex", "公式识别 (出 LaTeX)", delegate { ActLatex(); });
             bar.Add("translate", "翻译", delegate { ActTranslate(); });
             bar.Add("pin", "贴图 (钉到桌面)", delegate { ActPin(); });
             bar.Add("rec", "录屏 (延迟可选)", delegate { ShowRecMenu(); });
@@ -1842,6 +2014,7 @@ partial class ShotService
                     {
                         curSeqFmt = f;
                         if (fmtBtn != null) { fmtBtn.DrawStr = label + " ▾"; propBar.RelayoutNow(); }
+                        SaveMarkNow();
                     });
                     if (f == curSeqFmt) it.Font = new Font(it.Font, FontStyle.Bold);
                 }
@@ -1890,6 +2063,13 @@ partial class ShotService
                 else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
             }
             propBar.RelayoutNow();
+            SaveMarkNow(); // PixPin 同款: 改完即记, 下次截图恢复
+        }
+
+        // 标注参数落盘 (shot-service.json mark 节)
+        void SaveMarkNow()
+        {
+            try { SaveMarkCfg(curWidth, curArrowStyle, curColor, curFontPt, curFontFamily, curSeqFmt); } catch { }
         }
 
         void PlacePropBar()
@@ -1929,6 +2109,7 @@ partial class ShotService
                 {
                     curFontPt = captured;
                     if (fontBtn != null) { fontBtn.DrawStr = captured.ToString(); propBar.RelayoutNow(); }
+                    SaveMarkNow();
                     Log("capture: font pt=" + captured);
                 });
                 if (pt == curFontPt) it.Font = new Font(it.Font, FontStyle.Bold);
@@ -1954,6 +2135,7 @@ partial class ShotService
                 {
                     curFontFamily = fam;
                     if (familyBtn != null) { familyBtn.DrawStr = FamilyShort(fam); propBar.RelayoutNow(); }
+                    SaveMarkNow();
                     Log("capture: font family=" + fam);
                 });
                 if (fam == curFontFamily) it.Font = new Font(it.Font, FontStyle.Bold);
@@ -2028,25 +2210,27 @@ partial class ShotService
             }
             else
             {
-                m.Items.Add("● 录制选区 (立即)", null, delegate { StartDelayedRecording(0, false); });
-                m.Items.Add("● 录制全屏 (立即)", null, delegate { StartDelayedRecording(0, true); });
+                m.Items.Add("● 录制选区 (立即)", null, delegate { StartDelayedRecording(0, false, "mp4"); });
+                m.Items.Add("● 录制全屏 (立即)", null, delegate { StartDelayedRecording(0, true, "mp4"); });
+                m.Items.Add("◉ GIF 录制选区 (立即)", null, delegate { StartDelayedRecording(0, false, "gif"); });
+                m.Items.Add("◉ GIF 录制全屏 (立即)", null, delegate { StartDelayedRecording(0, true, "gif"); });
                 m.Items.Add(new ToolStripSeparator());
                 int[] delays = { 1, 2, 3, 5, 10 };
                 foreach (int dsec in delays)
                 {
                     int captured = dsec;
-                    m.Items.Add("-" + dsec + "s 后录制选区", null, delegate { StartDelayedRecording(captured, false); });
+                    m.Items.Add("-" + dsec + "s 后录制选区", null, delegate { StartDelayedRecording(captured, false, "mp4"); });
                 }
             }
             m.Show(bar, 8, bar.Bottom - bar.Top + 2);
         }
 
-        // 延迟后录: 倒计时期间遮罩关闭让屏幕可用; 结束后 HUD 计时
-        void StartDelayedRecording(int delaySec, bool fullScreen)
+        // 延迟后录: 倒计时期间遮罩关闭让屏幕可用; 结束后 HUD 计时。fmt: mp4 | gif
+        void StartDelayedRecording(int delaySec, bool fullScreen, string fmt)
         {
             CommitTextInput();
             Rectangle area = fullScreen ? SystemInformation.VirtualScreen : sel;
-            if (delaySec > 0) ShowTrayInfo(delaySec + " 秒后开始录制" + (fullScreen ? "全屏" : "选区") + "...");
+            if (delaySec > 0) ShowTrayInfo(delaySec + " 秒后开始" + (fmt == "gif" ? "GIF 录制" : "录制") + (fullScreen ? "全屏" : "选区") + "...");
             bool barMode = !fullScreen && delaySec == 0; // 立即选区录制: 遮罩转录制条 (PixPin 式, 选区框不消失)
             if (!barMode) Close(); // 延迟倒计时/全屏: 关遮罩走 HUD+红框
             Rectangle areaC = area;
@@ -2056,12 +2240,12 @@ partial class ShotService
                 try
                 {
                     if (delaySec > 0) System.Threading.Thread.Sleep(delaySec * 1000);
-                    string r = RecordStart(areaC.X, areaC.Y, areaC.Width, areaC.Height, 10);
+                    string r = RecordStart(areaC.X, areaC.Y, areaC.Width, areaC.Height, 10, fmt);
                     Log("record via toolbar: " + r);
                     bool ok = r.Contains("\"ok\":true");
                     RunOnHk(() =>
                     {
-                        if (!ok) { ShowTrayInfo("录屏启动失败: " + r); return; }
+                        if (!ok) { ShowTrayInfo((fmt == "gif" ? "GIF 录制" : "录屏") + "启动失败: " + r); return; }
                         if (barMode)
                         {
                             EnterRecModeUI(); // 工具条变录制条, 选区框保留, 选区内可自由操作
@@ -2070,7 +2254,7 @@ partial class ShotService
                         {
                             ShowRecordHud();
                             ShowRecBorder();
-                            ShowTrayInfo("已开始录制 " + areaC.Width + "x" + areaC.Height + " — 右下角红色 HUD 的 ⏹ 或托盘菜单可停止");
+                            ShowTrayInfo("已开始" + (fmt == "gif" ? " GIF" : "录制") + " " + areaC.Width + "x" + areaC.Height + " — 右下角红色 HUD 的 ⏹ 或托盘菜单可停止");
                         }
                     });
                 }
@@ -2157,7 +2341,7 @@ partial class ShotService
                 int p2 = r.IndexOf("\"", p1 + 9);
                 file = r.Substring(p1 + 9, p2 - p1 - 9).Replace("\\", "/");
             }
-                ShowTrayInfo("录屏已保存: " + file);
+                ShowTrayInfo((recFmt == "gif" ? "GIF 已保存: " : "录屏已保存: ") + file);
             });
         }
 
@@ -2181,7 +2365,7 @@ partial class ShotService
             hud.MaximizeBox = false; hud.MinimizeBox = false;
             hud.ShowInTaskbar = false;
 
-            Label rec = new Label(); rec.Text = "● REC 00:00"; rec.Left = 12; rec.Top = 10; rec.AutoSize = true;
+            Label rec = new Label(); rec.Text = (recFmt == "gif" ? "● GIF 00:00" : "● REC 00:00"); rec.Left = 12; rec.Top = 10; rec.AutoSize = true;
             rec.ForeColor = Color.FromArgb(255, 90, 80); rec.Font = new Font("Consolas", 11f, FontStyle.Bold);
             hud.Controls.Add(rec);
             Button stop = new Button(); stop.Text = "⏹ 停止"; stop.FlatStyle = FlatStyle.Flat; stop.FlatAppearance.BorderSize = 0;
@@ -2199,7 +2383,7 @@ partial class ShotService
                 try
                 {
                     var el = DateTime.Now - t0;
-                    rec.Text = "● REC " + ((int)el.TotalSeconds / 60).ToString("00") + ":" + ((int)el.TotalSeconds % 60).ToString("00");
+                    rec.Text = (recFmt == "gif" ? "● GIF " : "● REC ") + ((int)el.TotalSeconds / 60).ToString("00") + ":" + ((int)el.TotalSeconds % 60).ToString("00");
                 }
                 catch { }
             };
@@ -2218,7 +2402,7 @@ partial class ShotService
         }
 
         // 回 hk UI 线程执行 (WinForms 窗体/控件只能在创建线程访问; 后台线程异常直接弹崩溃框)
-        static void RunOnHk(Action a)
+        internal static void RunOnHk(Action a)
         {
             try
             {
@@ -2265,8 +2449,7 @@ partial class ShotService
             {
                 CommitTextInput();
                 using (Bitmap bmp = CropTaken()) { try { Clipboard.SetImage(bmp); } catch { } }
-                Log("capture copied to clipboard");
-                ShowTrayInfo("已复制图片到剪贴板");
+                Log("capture copied to clipboard"); // [2026-10-16 老大要求] 复制不弹气泡提醒
             }
             catch (Exception ex) { Log("capture copy err: " + ex.Message); ShowTrayInfo("复制失败: " + ex.Message); }
             Close();
@@ -2301,6 +2484,69 @@ partial class ShotService
                     else ShowTrayInfo("未识别到文字");
                 });
             });
+        }
+
+        // 表格/公式识别 (PixPin 同款): 区域 -> VLM 定制提示词 -> 结果浮窗; 表格额外给「贴 Excel」按钮 (Markdown 转 TSV)
+        void ActTable() { RunStructuredOcr("表格识别中...", TableOcrPrompt, "表格识别结果 (Markdown)", true); }
+        void ActLatex() { RunStructuredOcr("公式识别中...", LatexOcrPrompt, "LaTeX 公式", false); }
+
+        void RunStructuredOcr(string busy, string prompt, string title, bool withTsv)
+        {
+            CommitTextInput();
+            SetBusy(busy);
+            Bitmap bmp = CropTaken();
+            Task.Run(async () =>
+            {
+                string text = null, err = null;
+                try { text = await OcrProvider().RecognizeAsync(bmp, prompt); }
+                catch (Exception ex) { err = ex.Message; }
+                finally { try { bmp.Dispose(); } catch { } }
+                string got = text, e2 = err;
+                bool delivered = BeginOnUi(() =>
+                {
+                    SetBusy(null);
+                    if (e2 != null) { Log("structured ocr err: " + e2); ShowTrayInfo(title + "失败: " + e2); return; }
+                    if (string.IsNullOrEmpty(got)) { ShowTrayInfo("未识别到内容"); return; }
+                    Log("capture: " + title + " ok (" + got.Length + " chars)");
+                    if (withTsv) new ResultForm(title, got, MarkdownToTsv(got)).Show();
+                    else new ResultForm(title, got).Show();
+                });
+                if (!delivered) StructuredFallback(title, got, e2); // 遮罩已关: 剪贴板+气泡兜底, 结果不静默丢
+            });
+        }
+
+        // Markdown 表 -> TSV (剪贴板文本进 Excel 自动分列; 引号/换行按 Excel 规则转义)
+        static string MarkdownToTsv(string md)
+        {
+            try
+            {
+                var rows = new List<string[]>();
+                foreach (string rawLine in md.Replace("\r\n", "\n").Split('\n'))
+                {
+                    string line = rawLine.Trim();
+                    if (line.Length == 0 || line.IndexOf('|') < 0) continue;
+                    if (System.Text.RegularExpressions.Regex.IsMatch(line, @"^[\s|:\-]+$")) continue; // 跳过 |---|---| 分隔行
+                    if (line.StartsWith("|")) line = line.Substring(1);
+                    if (line.EndsWith("|")) line = line.Substring(0, line.Length - 1);
+                    string[] cells = line.Split('|');
+                    for (int i = 0; i < cells.Length; i++) cells[i] = cells[i].Trim().Replace("`", "");
+                    rows.Add(cells);
+                }
+                if (rows.Count == 0) return md;
+                var sb = new System.Text.StringBuilder();
+                for (int r = 0; r < rows.Count; r++)
+                {
+                    string[] cells = rows[r];
+                    for (int c = 0; c < cells.Length; c++)
+                    {
+                        if (c > 0) sb.Append('\t');
+                        sb.Append(cells[c]);
+                    }
+                    sb.Append("\r\n");
+                }
+                return sb.ToString();
+            }
+            catch { return md; }
         }
 
         void ActTranslate()
@@ -2364,16 +2610,34 @@ partial class ShotService
         // 忙碌: 禁用全部按钮; 空参=恢复
         void SetBusy(string msg)
         {
-            if (bar == null) return;
+            if (bar == null || bar.IsDisposed) return; // 遮罩已关时后台回调仍会调 SetBusy(null), 炸 ObjectDisposedException 会吞掉后面的结果展示
             bar.SetEnabledAll(msg == null);
             bar.Invalidate();
         }
 
-        // 回 hk UI 线程 (遮罩所在线程), BeginInvoke 不等待 — 任何情况不卡后台任务
-        void BeginOnUi(Action a)
+        // 回 hk UI 线程 (遮罩所在线程), BeginInvoke 不等待 — 任何情况不卡后台任务。
+        // 返回 false = 遮罩句柄已没(用户识别期间关了遮罩), 调用方必须自己兜底投递, 不许静默丢结果
+        // (2026-10-15 实锤: 云 key#1 超时 45s 期间用户关遮罩 → 回调炸 "句柄未创建" → 表格识别结果无声消失, 用户以为卡死)
+        bool BeginOnUi(Action a)
         {
-            try { BeginInvoke(new MethodInvoker(delegate { try { a(); } catch (Exception ex) { Log("capture ui err: " + ex.Message); } })); }
-            catch (Exception ex) { Log("capture beginui err: " + ex.Message); }
+            try
+            {
+                if (!IsHandleCreated || IsDisposed) { Log("capture beginui skip: overlay gone"); return false; }
+                BeginInvoke(new MethodInvoker(delegate { try { a(); } catch (Exception ex) { Log("capture ui err: " + ex.Message); } }));
+                return true;
+            }
+            catch (Exception ex) { Log("capture beginui err: " + ex.Message); return false; }
+        }
+
+        // 遮罩已关后的结果兜底: 直接进剪贴板 + 托盘气泡 (ResultForm 需要活的消息循环, 遮罩没了就不弹窗)
+        static void StructuredFallback(string title, string got, string e2)
+        {
+            if (e2 != null) { ShowTrayInfo(title + "失败: " + e2); Log("structured fallback err: " + e2); return; }
+            if (string.IsNullOrEmpty(got)) { ShowTrayInfo("未识别到内容"); return; }
+            System.Threading.Thread t = new System.Threading.Thread(() => { try { System.Windows.Forms.Clipboard.SetText(got); } catch (Exception ex) { Log("fallback clipboard err: " + ex.Message); } });
+            t.SetApartmentState(System.Threading.ApartmentState.STA); t.IsBackground = true; t.Start();
+            // [2026-10-16 老大要求] 复制不弹气泡提醒 (复制动作本身就是反馈)
+            Log("structured fallback delivered: " + got.Length + " chars");
         }
 
         void ShowResult(string text, string title)
@@ -2457,6 +2721,19 @@ partial class ShotService
                         g.DrawLine(w, 16.5f, 12.5f, 16.5f, 16.5f); g.DrawLine(w, 16.5f, 16.5f, 12.5f, 16.5f);
                         g.DrawLine(w, 6.5f, 6, 11.5f, 6);
                         g.DrawLine(w, 9, 6, 9, 13);
+                        break;
+                    case "table": // 表格识别: 3x3 网格
+                        g.DrawRectangle(w, 2.5f, 2.5f, 13, 13);
+                        g.DrawLine(w, 2.5f, 7f, 15.5f, 7f);
+                        g.DrawLine(w, 2.5f, 11.5f, 15.5f, 11.5f);
+                        g.DrawLine(w, 7f, 2.5f, 7f, 15.5f);
+                        g.DrawLine(w, 11.5f, 2.5f, 11.5f, 15.5f);
+                        break;
+                    case "latex": // 公式识别: Σ 求和符
+                        g.DrawLine(w, 14, 3.5f, 5.5f, 3.5f);
+                        g.DrawLine(w, 5.5f, 3.5f, 10.5f, 9f);
+                        g.DrawLine(w, 10.5f, 9f, 5.5f, 14.5f);
+                        g.DrawLine(w, 5.5f, 14.5f, 14, 14.5f);
                         break;
                     case "save": // 纯软盘 (无箭头, 用户要求)
                         g.DrawRectangle(w, 2.5f, 2.5f, 13, 13);
@@ -3232,15 +3509,20 @@ partial class ShotService
     {
         readonly string text;
         readonly Button copyBtn;
+        readonly string tsvText;   // 非空 = 底栏多一个「贴 Excel」按钮 (复制 TSV)
+        Button tsvBtn;
 
         protected override CreateParams CreateParams
         {
             get { CreateParams cp = base.CreateParams; cp.ClassStyle |= 0x20000; return cp; } // 阴影
         }
 
-        public ResultForm(string title, string text)
+        public ResultForm(string title, string text) : this(title, text, null) { }
+
+        public ResultForm(string title, string text, string tsv)
         {
             this.text = text;
+            tsvText = tsv;
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
             Size = new Size(560, 320);
@@ -3263,7 +3545,7 @@ partial class ShotService
             tb.BringToFront();
 
             Panel bottom = new Panel(); bottom.Dock = DockStyle.Bottom; bottom.Height = 48; bottom.BackColor = DarkUI.BgPanel;
-            Label info = new Label(); info.Text = "已自动复制到剪贴板 · Ctrl+C 再复制 · Esc 关闭"; info.Left = 14;
+            Label info = new Label(); info.Text = (tsvText != null ? "已自动复制 Markdown · " : "已自动复制到剪贴板 · ") + "Ctrl+C 再复制 · Esc 关闭"; info.Left = 14;
             info.AutoSize = true; info.ForeColor = DarkUI.TextDim; info.Font = new Font("Microsoft YaHei UI", 9f);
             info.Dock = DockStyle.Fill;
             copyBtn = new Button(); copyBtn.Text = "复制"; copyBtn.FlatStyle = FlatStyle.Flat; copyBtn.FlatAppearance.BorderSize = 0;
@@ -3273,8 +3555,23 @@ partial class ShotService
             copyBtn.Dock = DockStyle.Right;
             copyBtn.Click += (s, e) => CopyNow();
             bottom.Controls.Add(info); bottom.Controls.Add(copyBtn);
+            if (tsvText != null)
+            {
+                tsvBtn = new Button(); tsvBtn.Text = "贴 Excel (TSV)"; tsvBtn.FlatStyle = FlatStyle.Flat; tsvBtn.FlatAppearance.BorderSize = 0;
+                tsvBtn.BackColor = DarkUI.BgField; tsvBtn.ForeColor = DarkUI.Text;
+                tsvBtn.Font = new Font("Microsoft YaHei UI", 9f);
+                tsvBtn.Size = new Size(130, 34); tsvBtn.Cursor = Cursors.Hand;
+                tsvBtn.Dock = DockStyle.Right;
+                tsvBtn.Click += (s, e) =>
+                {
+                    try { Clipboard.SetText(tsvText); } catch { }
+                    tsvBtn.Text = "✓ 已复制 TSV"; tsvBtn.BackColor = Color.FromArgb(40, 130, 80);
+                };
+                bottom.Controls.Add(tsvBtn);
+            }
             Controls.Add(bottom);
             bottom.BringToFront();
+            if (tsvBtn != null) tsvBtn.BringToFront();
             copyBtn.BringToFront();
 
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };

@@ -51,8 +51,15 @@ partial class ShotService
             {
                 wc.Encoding = Encoding.UTF8;
                 string resp = await wc.DownloadStringTaskAsync(url);
-                // 百度返回 {"trans_result":[{"src":"...","dst":"..."}]}
-                return ExtractField(resp, "dst").Trim();
+                // 百度返回 {"trans_result":[{"src":"...","dst":"..."},...]} —— 多行/多段文本是多对象数组,
+                // 必须逐段取 dst 按原序拼接。旧代码 ExtractField 只抓第一个 dst = 多行只翻第一行
+                // (2026-10-15 老大实测 bug: 划选两行只译出第一行)。
+                var ms = System.Text.RegularExpressions.Regex.Matches(resp, "\"dst\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+                if (ms.Count == 0)
+                    throw new Exception("baidu translate error: " + resp.Substring(0, Math.Min(200, resp.Length)));
+                var parts = new string[ms.Count];
+                for (int i = 0; i < ms.Count; i++) parts[i] = System.Text.RegularExpressions.Regex.Unescape(ms[i].Groups[1].Value);
+                return string.Join("\n", parts).Trim();
             }
         }
     }

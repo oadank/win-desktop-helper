@@ -14,20 +14,30 @@ partial class ShotService
     interface IOcrProvider
     {
         Task<string> RecognizeAsync(Bitmap bmp);
+        // prompt=null 用默认 OCR 提示词; 传定制提示词用于表格识别/公式转 LaTeX 等
+        Task<string> RecognizeAsync(Bitmap bmp, string prompt);
     }
+
+    // 表格/公式识别的提示词 (PixPin 同款两功能)
+    internal const string TableOcrPrompt =
+        "Convert the table in this image to a Markdown table. Output ONLY the Markdown table itself, no explanations, no code fences. Keep every row and column exactly. If the image has no table, output its text content as plain lines instead. If text contains Chinese, output Simplified Chinese (简体中文).";
+    internal const string LatexOcrPrompt =
+        "Convert the mathematical formula(s) in this image to LaTeX source code. Output ONLY the LaTeX code, no explanations, no $ signs, no code fences. Multiple formulas = one per line, in top-to-bottom order. If there is no formula, output empty.";
 
     // 默认实现: 本地 qwen3-vl (本机 Ollama :11434 常驻, 零花费零 key, 中文混排/表格最聪明)
     class QwenVlOcrProvider : IOcrProvider
     {
         readonly string endpoint;
         public QwenVlOcrProvider(string ep) { endpoint = ep; }
-        public async Task<string> RecognizeAsync(Bitmap bmp)
+        public Task<string> RecognizeAsync(Bitmap bmp) { return RecognizeAsync(bmp, null); }
+        public async Task<string> RecognizeAsync(Bitmap bmp, string prompt)
         {
+            if (string.IsNullOrEmpty(prompt)) prompt = "OCR all text in this image. Output ONLY the recognized text, keep original line breaks and layout. If the text contains Chinese, output Simplified Chinese (简体中文), never Traditional (禁止繁体). If no text is present, output empty.";
             string b64 = BitmapToBase64(bmp);
-            string prompt = "OCR all text in this image. Output ONLY the recognized text, keep original line breaks and layout. If the text contains Chinese, output Simplified Chinese (简体中文), never Traditional (禁止繁体). If no text is present, output empty.";
             // keep_alive 60m: Ollama 默认 5 分钟卸载模型, 划词间隔一长就重新加载 4B 模型(核显 5s+), 划词慢的大头;
-            // num_predict 300: 划词是短文本, 防模型幻觉输出长文拖时间
-            string json = "{\"model\":\"qwen3-vl:4b-instruct\",\"prompt\":" + EscapeJson(prompt) + ",\"images\":[\"" + b64 + "\"],\"stream\":false,\"options\":{\"num_predict\":300},\"keep_alive\":\"60m\"}";
+            // num_predict: 划词是短文本 300 防幻觉; 表格/公式提示词是长输出(整张 Markdown 表), 放到 1500
+            int np = (prompt == TableOcrPrompt || prompt == LatexOcrPrompt) ? 1500 : 300;
+            string json = "{\"model\":\"qwen3-vl:4b-instruct\",\"prompt\":" + EscapeJson(prompt) + ",\"images\":[\"" + b64 + "\"],\"stream\":false,\"options\":{\"num_predict\":" + np + "},\"keep_alive\":\"60m\"}";
             using (var wc = new WebClient())
             {
                 wc.Encoding = Encoding.UTF8; // ⚠️ Ollama 返回的 application/json 不带 charset, WebClient 默认按 Latin-1 解码 → 中文全乱码 (实测踩坑)
@@ -75,16 +85,17 @@ partial class ShotService
         readonly List<OcrKeyEndpoint> eps;
         // 需换 key 重试的 HTTP 状态: 限流/额度/鉴权临时失败 (与 N5105 同口径)
         static readonly int[] RetryStatus = { 429, 402, 403, 500, 502, 503, 504 };
-        const int PerKeyTimeoutMs = 45000;   // 单 key 请求上限(超时即换下一个); 留足量, .cn 大图最坏见过 33s
+        const int PerKeyTimeoutMs = 20000;   // 单 key 请求上限(超时即换下一个); 45s 太久 — 用户等 45s 才见 failover 像"卡死"(2026-10-15 表格识别被骂卡), 20s 内换 key 更快
         const int MaxSide = 1400;            // 送图最长边
         const long MaxBytes = 500 * 1024;
 
         public OpenAiVisionOcrProvider(string m, List<OcrKeyEndpoint> list) { model = m; eps = list; }
 
-        public async Task<string> RecognizeAsync(Bitmap bmp)
+        public Task<string> RecognizeAsync(Bitmap bmp) { return RecognizeAsync(bmp, null); }
+        public async Task<string> RecognizeAsync(Bitmap bmp, string prompt)
         {
+            if (string.IsNullOrEmpty(prompt)) prompt = "OCR all text in this image. Output ONLY the recognized text, keep original line breaks and layout. If the text contains Chinese, output Simplified Chinese (简体中文), never Traditional (禁止繁体). If no text is present, output empty.";
             string b64 = BitmapToBase64Jpeg(bmp, MaxSide, MaxBytes);
-            string prompt = "OCR all text in this image. Output ONLY the recognized text, keep original line breaks and layout. If the text contains Chinese, output Simplified Chinese (简体中文), never Traditional (禁止繁体). If no text is present, output empty.";
             string json = "{\"model\":" + EscapeJson(model) +
                 ",\"messages\":[{\"role\":\"user\",\"content\":[" +
                 "{\"type\":\"text\",\"text\":" + EscapeJson(prompt) + "}," +

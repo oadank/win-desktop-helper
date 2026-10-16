@@ -10,10 +10,18 @@ using System.Windows.Forms;
 // 交互契约 (老大定): 选中文字 → 光标旁出现小圆点; 鼠标**划过不展开**, 停上去计时 300ms 才展开工具条;
 // 直接点小点 = 立即翻译出卡片。全程不抢焦点(所有窗体 ShowWithoutActivation + WS_EX_NOACTIVATE)。
 //
-// 取词两级降级:
-//   1) UIA TextPattern.GetSelection() — 无副作用, 浏览器/Office/Explorer 可用
-//   2) 剪贴板法 — 备份剪贴板 → Ctrl+C → 读 → 还原; 期间置 pickBusy 让剪贴板监听跳过(不污染历史)
+// ★ 取词架构 (2026-10-15 对标豆包二次收口, 老大拍板"照搬豆包别偷工减料"): 豆包划词两大件都在 Doubao.dll
+//   原生层实锤(SetWinEventHook + TEXTSELECTIONCHANGED 字面量 / IUIAutomationElement / enable_* 配置键):
+//   ①【触发】WinEvent 选区广播监听(EVENT_OBJECT_TEXTSELECTIONCHANGED) —— 键盘选词/选区取消都收得到,
+//     本版已照搬: WinEvent 为主触发, 鼠标手势降级为兜底; I-beam 光标门卫废除(豆包不看光标形状, 看选区是否存在)。
+//   ②【取词】UIA(IUIAutomationElement.GetSelection) 直读选中文本, 零按键零剪贴板; 剪贴板/Ctrl+C 只是可配置兜底
+//     (豆包 enable_get_text_by_clipboard/ctrl_c 键, 本实现 pick.clipChain 默认关)。
+//   取词链 = CDP直读(Electron: WorkBuddy/MiMo/ZCode, 动态探测活端口) → UIA选区/UIA词 → 剪贴板兜底(默认关)。
+//   浏览器划词归 Edge 扩展 pick-inject; 终端/浏览器被红线排除。
+//   🔴 可编辑元素识别(对标豆包 enable_recognize_element_is_editable): 选区落在输入框/编辑区时,
+//   剪贴板兜底**彻底不让进**(防"一划词顶掉复制"), 只走 UIA/CDP —— UIA 在编辑控件本就能取词。
 // 钩子回调必须 1ms 内返回(本机 LowLevelHooksTimeout=1ms), 所以回调只记坐标, 真活在专属 STA 线程干。
+// WinEvent 回调同样快进快出: 只置位, 由 PickTick(同线程消息泵)消费后再上 ThreadPool 干跨进程取词。
 partial class ShotService
 {
     const int PICK_DOWN = 0x0201, PICK_UP = 0x0202, PICK_MOVE = 0x0200;   // DOWN / UP / MOUSEMOVE
@@ -125,7 +133,7 @@ partial class ShotService
         }
         catch { return false; }
     }
-    static bool pickSeenIBeam;          // 本次手势期间见过工字形(DOWN 记初始, MOVE 累积, UP 判定后清) —— 钩子线程独占(门卫只管拖选路径), 勿在他线程写
+    static bool pickSeenIBeam;          // 本次手势期间见过工字形(DOWN 记初始, MOVE 累积, UP 取走即清) —— 钩子线程独占, 勿在他线程写; 2026-10-15 门卫废除后仅作诊断日志
 
     // 双击判定用系统值 (STranslate): 手感与系统一致, 不硬编码 450ms/12px
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -142,6 +150,141 @@ partial class ShotService
     static Form pickDot, pickCard;
     static int pickSlowUntil = -10000;   // UIA 慢目标退避deadline(TickCount): 窗口内不发单击取词
     static int pickRClickUntil = -10000; // 右键让路窗口: 右键按下后短暂暂停单击取词(不和右键菜单抢目标UI线程)
+
+    // ---- WinEvent 选区监听 (2026-10-15 照搬豆包触发机制: Doubao.dll 实锤 SetWinEventHook + TEXTSELECTIONCHANGED) ----
+    // 触发从"只认鼠标"升级为"系统广播": 键盘 Shift+方向键选词 / IME 选区 / 选区取消 都收得到。
+    // 回调快进快出(系统广播, 阻塞会拖慢全局) → 只置位, 由 PickTick(同线程消息泵)消费后再上 ThreadPool。
+    delegate void PickWinEventDelegate(IntPtr hHook, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr hMod, PickWinEventDelegate fn, uint idProcess, uint idThread, uint flags);
+    const uint PICK_WE_TEXTSEL = 0x8014;          // EVENT_OBJECT_TEXTSELECTIONCHANGED
+    const uint PICK_WE_OUTOFCONTEXT = 0;          // WINEVENT_OUTOFCONTEXT
+    static PickWinEventDelegate pickWeFn;         // 根引用防 GC 回收委托
+    static IntPtr pickWeHook;
+    static bool pickWeQueued;                     // 只在 pick 线程读写(WinEventProc 置位/消费都在该线程), 无锁
+    static IntPtr pickWeQueuedHwnd;
+    static int pickWeLastTick = -10000;           // 合流: 拖选/按住 Shift 移动时系统连发, 350ms 内只处理一次
+    static int pickSlowPid;                       // UIA 慢目标退避: 按 pid 8s(旧版全局 30s 禁言 = "时灵时不灵"大坑, 已废)
+
+    static bool PickSlowBlocked(IntPtr hwnd)
+    {
+        try
+        {
+            if (hwnd == IntPtr.Zero) return false;
+            uint p; GetWindowThreadProcessId(hwnd, out p);
+            return (int)p == pickSlowPid && Environment.TickCount < pickSlowUntil;
+        }
+        catch { return false; }
+    }
+
+    // 只收点+工具条, 保留卡片/提问框(用户可能正在读结果/打字) —— 选区塌了立刻收(豆包同款, 不等 4s 超时)
+    static void PickDismissSoft()
+    {
+        try { if (pickDot != null) { pickDot.Close(); pickDot = null; } } catch { }
+        try { if (pickBarWin != null) { pickBarWin.Close(); pickBarWin = null; } } catch { }
+        PickDotRect = null; PickBarRect = null; pickBarBtnXs = null;
+        pickHoverSince = -1; pickExpanded = false;
+    }
+
+    static void PickWinEventProc(IntPtr hHook, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
+    {
+        try
+        {
+            if (ev != PICK_WE_TEXTSEL || hwnd == IntPtr.Zero) return;
+            int now = Environment.TickCount;
+            if (now - pickWeLastTick < 350) return;   // 合流
+            pickWeLastTick = now;
+            pickWeQueuedHwnd = hwnd;
+            pickWeQueued = true;                      // PickTick 消费(同线程, 无锁)
+        }
+        catch { }
+    }
+
+    // WinEvent 消费(pick 线程): 判权/过滤后在 ThreadPool 做跨进程取词
+    static void PickWinEventGo(IntPtr hwnd)
+    {
+        try
+        {
+            Log("pick(wevent): go hwnd=" + hwnd + " busy=" + System.Threading.Volatile.Read(ref pickBusy) + " down=" + pickDownFlag);   // 黑匣子: 放行/拒绝可见
+            if (pickEnabled != 1 || hwnd == IntPtr.Zero) return;
+            if (pickDownFlag) return;                            // 鼠标还按着 = 拖选手势进行中, 交给 UP 路径(免得拖一半球闪现)
+            if (pickAskWin != null || pickCard != null) return;  // 提问框打字中 / 卡片阅读中: 不抢
+            if (pickBusy == 1) return;
+            POINT cp;
+            if (!GetCursorPos(out cp)) return;
+            if (PickHit(PickDotRect, cp.x, cp.y) || PickHit(PickBarRect, cp.x, cp.y) || PickHit(PickCardRect, cp.x, cp.y)) return;
+            if (PickIsTerminal(hwnd)) return;                    // 终端红线(conhost GetSelection 有复制副作用)
+            if (PickIsBrowser(hwnd)) return;                     // 浏览器划词归扩展
+            if (PickSlowBlocked(hwnd)) return;
+            IntPtr root = GetAncestor(hwnd, 2);
+            if (root != IntPtr.Zero && IsHungAppWindow(root)) return;   // 目标挂死时 UIA 会阻塞很久
+            try { uint wp; GetWindowThreadProcessId(hwnd, out wp); if ((int)wp == pickOwnPid) return; } catch { return; }
+            if (Interlocked.Exchange(ref pickBusy, 1) == 1) return;
+            ThreadPool.QueueUserWorkItem(delegate { PickWinEventWork(hwnd, cp.x, cp.y); });
+        }
+        catch { }
+    }
+
+    // WinEvent 取词: CDP → UIA(事件 hwnd 直取, 比 FromPoint 稳), 零注入零剪贴板(豆包同款)
+    static void PickWinEventWork(IntPtr hwnd, int cx, int cy)
+    {
+        string text = ""; string how = "";
+        int t0 = Environment.TickCount;
+        Log("pick(wevent): work start hwnd=" + hwnd);   // 黑匣子: UIA/CDP 调用若挂死/崩溃, 最后一行即案发现场
+        try
+        {
+            try { string cdp = PickViaCdp(hwnd); if (!string.IsNullOrWhiteSpace(cdp)) { text = cdp; how = "cdp"; } } catch { }
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                try { text = PickTextUiaHwnd(hwnd); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
+            }
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                try { text = PickTextUia(cx, cy); if (!string.IsNullOrWhiteSpace(text)) how = "uia点"; } catch { }
+            }
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                // 选区塌了/读不到: 立刻收点+条(豆包同款"选区消即收"), 卡片/提问框不动
+                Log("pick(wevent): selection empty (" + (Environment.TickCount - t0) + "ms) — dismiss dot/bar");
+                Control s = pickSync;
+                if (s != null && s.IsHandleCreated && (pickDot != null || pickBarWin != null))
+                    s.BeginInvoke(new MethodInvoker(delegate { PickDismissSoft(); }));
+                return;
+            }
+            text = text.Trim();
+            if (text.Length > 2000) text = text.Substring(0, 2000);
+            if (text == pickSel && pickDot != null) { pickShownAt = Environment.TickCount; return; }   // 同选区重复广播: 不重画(免闪)
+            pickSel = text;
+            pickLastX = cx; pickLastY = cy;
+            pickShownAt = Environment.TickCount;
+            Log("pick(wevent): " + text.Length + " chars via " + how + " in " + (Environment.TickCount - t0) + "ms | " + PickOneLine(text));
+            Control s2 = pickSync;
+            if (s2 != null && s2.IsHandleCreated)
+                s2.BeginInvoke(new MethodInvoker(delegate { ShowPickDot(cx, cy); }));
+        }
+        catch (Exception ex) { Log("pick wevent err: " + ex.Message); }
+        finally { Interlocked.Exchange(ref pickBusy, 0); }
+    }
+
+    // UIA 按事件 hwnd 直取选区(比 FromPoint 稳: 不依赖指针位置)
+    static string PickTextUiaHwnd(IntPtr hwnd)
+    {
+        try
+        {
+            System.Windows.Automation.AutomationElement el = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+            if (el == null) return "";
+            object pat;
+            if (!el.TryGetCurrentPattern(System.Windows.Automation.TextPattern.Pattern, out pat)) return "";
+            System.Windows.Automation.TextPattern tp = pat as System.Windows.Automation.TextPattern;
+            if (tp == null) return "";
+            var sel = tp.GetSelection();
+            if (sel == null || sel.Length == 0) return "";
+            string s = sel[0].GetText(-1);
+            return string.IsNullOrWhiteSpace(s) ? "" : s;
+        }
+        catch { }
+        return "";
+    }
 
     // ---- 生命周期: 专属 STA 线程(剪贴板要求) ----
     static void PickInit()
@@ -169,6 +312,15 @@ partial class ShotService
             tk.Start();
             pickTimer = tk;
             Log("pick: STA picker thread ready (划词悬浮球已就绪)");
+            // WinEvent 选区监听安装(豆包同款触发): 必须在有消息泵的线程装(回调经泵派发回本线程),
+            // OUTOFCONTEXT + 全进程全线程。装失败只降级(键盘选词触发不可用), 鼠标路径不受影响。
+            try
+            {
+                pickWeFn = new PickWinEventDelegate(PickWinEventProc);
+                pickWeHook = SetWinEventHook(PICK_WE_TEXTSEL, PICK_WE_TEXTSEL, IntPtr.Zero, pickWeFn, 0, 0, PICK_WE_OUTOFCONTEXT);
+                Log("pick winevent: hook " + (pickWeHook != IntPtr.Zero ? "installed (EVENT_OBJECT_TEXTSELECTIONCHANGED)" : "FAILED — 键盘选词触发降级, 仅鼠标路径"));
+            }
+            catch (Exception ex) { Log("pick winevent install err: " + ex.Message); }
             Application.Run();
         }
         catch (Exception ex) { Log("pick loop err: " + ex.Message); }
@@ -293,15 +445,13 @@ partial class ShotService
             if (pickDownOnAsk) { pickDownOnAsk = false; return; }               // 提问框里拖选文字: 正常编辑, 不触发取词
             if (askJustClosed) return;                                          // 提问框刚被这一下关掉: 本轮手势不取词
             if (cardWasTouched) return;                                         // 刚在卡片上按住过: 不重复取词
-            // UP 时刻不追加查询(GetCursorInfo 在 UP 瞬间常已切回箭头=误挡, 实测 venv/effort 被挡) ——
-            // 只用 DOWN+MOVE 累积值, 与 STranslate 一致(它 UP 时不查, 用 _hasSeenIBeam 累积)
+            // 2026-10-15 照搬豆包: I-beam 门卫废除 —— 豆包不看光标形状, 看"选区是否真存在"
+            // (Doubao.dll 实锤 TEXTSELECTIONCHANGED 监听, 无光标形状判断)。旧门卫在网页/WPS/PDF
+            // (光标非工字形)上静默吞掉整个手势 = "划了词不出球"实锤场景。现在手势一律进取词,
+            // 取词结果决定出不点(成功才出): 非文本目标 UIA 无 TextPattern 秒返回,
+            // 慢目标由按-pid 8s 退避兜底(pickSlowPid)。pickSeenIBeam 只留作诊断。
             bool wasTextGesture = pickSeenIBeam; pickSeenIBeam = false;         // 取走即清(下一手势重新记)
-            if (!wasTextGesture)
-            {
-                // I-beam 门卫: 整个手势期间光标从未变工字形 = 不是在选文本(滑杆/按钮/画布)
-                Log("pick: gesture not on text (no I-beam) — silent skip");
-                return;
-            }
+            if (!wasTextGesture) Log("pick: gesture w/o I-beam — still trying (Doubao-style: selection decides)");
             // 出点改为"取词成功才出"(OCR 作废后 UIA 16ms 级, 无需预出; 预出点+完成后重建 = 双跳+空点闪)
             s.BeginInvoke(new MethodInvoker(delegate { PickHandle(ux, uy, pickX0, pickY0); }));
         }
@@ -426,6 +576,7 @@ partial class ShotService
 
     static void PickHandleAsync(int x, int y, bool click, int x0, int y0)
     {
+        if (!click) Log("pick UP->handle: drag enter (busy=" + System.Threading.Volatile.Read(ref pickBusy) + ")");   // 黑匣子: 15:45 事故拖选零日志盲区
         if (Interlocked.Exchange(ref pickBusy, 1) == 1) return;
         try
         {
@@ -457,7 +608,7 @@ partial class ShotService
                 }
                 pickLastClickCap = now; pickLastClickX = x; pickLastClickY = y;
                 if (now < pickRClickUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }   // 右键让路窗口内: 不取词
-                if (now < pickSlowUntil) { Interlocked.Exchange(ref pickBusy, 0); return; }     // 慢目标退避窗口内: 不取词
+                if (PickSlowBlocked(fgAt)) { Interlocked.Exchange(ref pickBusy, 0); return; }   // 慢目标退避(按 pid 8s): 不取词
                 // 目标窗口挂死(UI 未响应)时 UIA 调用会阻塞很久 —— 直接跳过
                 if (fgAt != IntPtr.Zero && IsHungAppWindow(fgAt))
                 { Interlocked.Exchange(ref pickBusy, 0); Log("pick(click): target hung, skip"); return; }
@@ -540,11 +691,10 @@ partial class ShotService
     // 红线不受影响：终端/浏览器不在映射表，天然不碰。
     static readonly string[][] pickCdpApps = new string[][] {
         new string[]{ "xiaomi mimo", "9222" },
-        // 2026-09-12: WorkBuddy 原钉 9223, 但该端口被一个**已死进程(206272)的孤儿 socket** 长期占用
-        // (bind 报 10048; netstat 仍显示 LISTENING 但 tasklist 查不到该 PID, 杀不掉) → WorkBuddy 的
-        // --remote-debugging-port=9223 永远绑不上, CDP 直读 100% 失败, 每次拖选都落到剪贴板注入 Ctrl+C。
-        // 处置: 换 9229(实测空闲)。⚠️ 排查端口别只看 netstat 的 LISTENING —— 用 python socket.bind 金标准测。
-        new string[]{ "workbuddy",   "9229" },
+        // 2026-09-12: 9223 曾被已死进程(206272)的孤儿 socket 长期占用(bind 10048) → 换 9229。
+        // 2026-10-15 照搬豆包收口: 不再赌单个配置口 —— 每个 app 给候选口列表, PickCdpPort 用 /json/version
+        // 动态探测谁活着(127.0.0.1 死口连接拒绝 <5ms, 不拖节奏)。WorkBuddy 快捷方式带的是 9223, 两个都试。
+        new string[]{ "workbuddy",   "9223", "9229" },
         new string[]{ "zcode",       "9224" },
     };
     static readonly Dictionary<uint, object[]> pickCdpCache = new Dictionary<uint, object[]>();  // pid -> [port, tick]
@@ -564,7 +714,20 @@ partial class ShotService
             }
             int port = 0;
             string n = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
-            foreach (string[] a in pickCdpApps) if (n == a[0]) { port = int.Parse(a[1]); break; }
+            string[] cands = null;
+            foreach (string[] a in pickCdpApps) if (n == a[0]) { cands = a; break; }
+            if (cands != null)
+            {
+                // 2026-10-15: 动态探测活端口 —— 候选口逐个发 /json/version(250ms 超时), 谁回话用谁。
+                // 127.0.0.1 上死口=连接拒绝 <5ms; 全死才返回 0(缓存 5min, 不反复探测)。
+                for (int i = 1; i < cands.Length; i++)
+                {
+                    int p;
+                    if (!int.TryParse(cands[i], out p)) continue;
+                    string v = CdpHttpGet("http://127.0.0.1:" + p + "/json/version", 250);
+                    if (v.Length > 0) { port = p; break; }
+                }
+            }
             lock (pickCdpCache) { pickCdpCache[pid] = new object[] { port, Environment.TickCount }; }
             return port;
         }
@@ -695,7 +858,9 @@ partial class ShotService
     // 姿势: 快照(文本+剪贴板序列号) → 清残留修饰键 → SendInput Ctrl+C → 10ms 轮询序列号 ≤500ms →
     // 变了等 30ms → 读文本。判据: 序列号变 ∥ 文本变 ∥ 原剪贴板空 → 出字; 否则返回空=静默放弃。
     // 红线: 调用方必须已排除终端(conhost GetSelection 有内部复制副作用+^C 中断)。
-    // 剪贴板不还原(老大拍板): 划完剪贴板=选中的文本, 「划完能粘」是特性。
+    // 剪贴板策略(2026-09-29 老大改口): 划词只取词, 取完【必须还原】原剪贴板。
+    //   旧设计「划完能粘」= 选中文字留在剪贴板, 会顶掉用户原有待粘贴内容。
+    //   只有点悬浮球「复制」才允许 SetText。
     // 用户此刻是否按着修饰键(Ctrl/Shift/Alt/Win)。GetAsyncKeyState 低 16 位跨进程语义不可靠,
     // 只取高位(当前是否按下)。
     static bool PickAnyModifierDown()
@@ -714,6 +879,31 @@ partial class ShotService
 
     static string PickViaClipboard(IntPtr fgAt)
     {
+        // 🔴 2026-09-29: 默认【彻底禁用】Ctrl+C 取词链。
+        //   即便取完会还原, 仍可能: ①还原失败 ②UU/GameViewer 等钩子看见复制 ③竞态留下选中文字
+        //   = 用户体感「一划词剪贴板就被顶掉」。UIA/CDP 已能无副作用取词。
+        //   要临时打开: shot-service.json → pick.clipChain = 1
+        try
+        {
+            if (Cfg("pick.clipChain", "0") != "1")
+            {
+                Log("pick: clip chain DISABLED (pick.clipChain!=1), no Ctrl+C injected");
+                return "";
+            }
+        }
+        catch { return ""; }
+
+        // 🔴 可编辑元素识别(对标豆包 enable_recognize_element_is_editable, 2026-10-15):
+        //   选区落在输入框/编辑区 → 绝不注入 Ctrl+C。这正是"一划词顶掉复制"最痛的场景
+        //   (在输入框选字被偷复制/打断编辑)。UIA 在编辑控件已能取词, 剪贴板对可编辑目标纯属副作用。
+        try
+        {
+            POINT cp;
+            if (GetCursorPos(out cp) && PickIsEditableAtPoint(cp.x, cp.y))
+            { Log("pick: clip chain skipped — selection in editable control, never inject Ctrl+C"); return ""; }
+        }
+        catch { }
+
         // 2026-09-12 v2 根治「拖选取词打断用户复制」(老大实测: 复制很难成功):
         // 第一道闸 —— CDP 类应用(Electron: WorkBuddy/ZCode/MiMo)绝不走剪贴板兜底。
         //   这类应用本该走 CDP 直读(零按键零剪贴板); CDP 挂了也只放弃取词, 不碰键盘不碰剪贴板。
@@ -761,6 +951,17 @@ partial class ShotService
         if (changed || now != original || string.IsNullOrEmpty(original))
         {
             string t = (now ?? "").Trim();
+            // 🔴 取完立刻还原原剪贴板 —— 划词不许偷走用户要粘贴的内容
+            try
+            {
+                if (!string.IsNullOrEmpty(original))
+                    System.Windows.Forms.Clipboard.SetText(original);
+                else
+                {
+                    System.Windows.Forms.Clipboard.Clear(); // 原本就空则不留划词内容
+                }
+            }
+            catch (Exception rx) { Log("pick: restore clipboard err: " + rx.Message); }
             return t.Length <= 1 ? "" : t;                   // 单字符当没取到
         }
         return "";                                           // 剪贴板没变 = 复制失败, 静默
@@ -794,17 +995,21 @@ partial class ShotService
                     { try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia选区"; } catch { } }
                     uiaCost = Environment.TickCount - tU;
                 }
-                // 剪贴板链 (2026-09-11 老大拍板 STranslate 方案, _ref_clipboardhelper.cs):
-                // Electron 聊天窗 UIA 读选区时灵时不灵(无障碍树懒加载) → 模拟 Ctrl+C 读真选区。
-                // 判据: 序列号变 ∥ 文本变 ∥ 原剪贴板空 → 出字; 否则静默。不还原=划完能粘(老大拍板)。
+                // 剪贴板链: Ctrl+C 读真选区后【立即还原原剪贴板】(2026-09-29), 不许顶掉用户待粘贴内容
                 if (string.IsNullOrWhiteSpace(text))
                 {
                     string clip = PickViaClipboard(fgAt);
                     if (!string.IsNullOrWhiteSpace(clip)) { text = clip; how = "clip"; }
                     Log("pick(click): clip " + (Environment.TickCount - t0) + "ms | " + (string.IsNullOrWhiteSpace(clip) ? "(no change)" : PickOneLine(clip)));
                 }
-                // 退避只看 UIA 耗时: CDP+clip 全落空的正常 miss ~900ms 不该触发 30s 禁言(那是 UIA 挂死场景的保险)
-                if (uiaCost > 700) { pickSlowUntil = Environment.TickCount + 30000; Log("pick(click): slow UIA target " + uiaCost + "ms, backoff 30s"); }
+                // 退避只看 UIA 耗时, 且改按 pid 8s(2026-10-15 废旧版全局 30s 禁言 —— 那会让别的窗口全陪葬
+                // = "时灵时不灵"大坑; 豆包按目标治理, 不搞全盘连坐)
+                if (uiaCost > 700)
+                {
+                    try { uint sp; GetWindowThreadProcessId(fgAt, out sp); pickSlowPid = (int)sp; } catch { pickSlowPid = 0; }
+                    pickSlowUntil = Environment.TickCount + 8000;
+                    Log("pick(click): slow UIA target " + uiaCost + "ms, backoff 8s (pid-scoped)");
+                }
                 if (string.IsNullOrWhiteSpace(text)) return;   // 取不到字 = 不出点(空点已废, 老大不满意"出的点没内容")
                 if (text.Trim().Length > 200) text = text.Substring(0, 200);
             }
@@ -952,6 +1157,40 @@ partial class ShotService
         return "";
     }
 
+    // ---- 可编辑元素识别 (对标豆包 enable_recognize_element_is_editable, 2026-10-15) ----
+    // 选区落在可编辑文本框(ControlType=Edit / 带 TextPattern 的 Document 编辑区)内时返回 true。
+    // 这类目标绝不能走剪贴板兜底注入 Ctrl+C —— 那正是"一划词顶掉复制"最痛的场景
+    // (在输入框选字时被偷复制 / 打断编辑)。UIA 在编辑控件上 GetSelection 本就可用, 故可编辑目标只走 UIA/CDP。
+    static bool PickIsEditableAtPoint(int x, int y)
+    {
+        try
+        {
+            System.Windows.Automation.AutomationElement el =
+                System.Windows.Automation.AutomationElement.FromPoint(new System.Windows.Point(x, y));
+            for (int depth = 0; depth < 4 && el != null; depth++)
+            {
+                object ct = el.GetCurrentPropertyValue(System.Windows.Automation.AutomationElement.ControlTypeProperty);
+                {
+                    var t = ct as System.Windows.Automation.ControlType;
+                    if (t != null)
+                    {
+                        if (t == System.Windows.Automation.ControlType.Edit) return true;
+                        // Document: 只读阅读区不算可编辑; 带 TextPattern 的可编辑 web 区/RichTextBox 算
+                        if (t == System.Windows.Automation.ControlType.Document)
+                        {
+                            object pat;
+                            if (el.TryGetCurrentPattern(System.Windows.Automation.TextPattern.Pattern, out pat) && pat != null) return true;
+                        }
+                    }
+                }
+                try { el = System.Windows.Automation.TreeWalker.ControlViewWalker.GetParent(el); }
+                catch { el = null; }
+            }
+        }
+        catch { }
+        return false;
+    }
+
     // ---- 取词 3: OCR 选区截图 (2026-09-08 主力, 老大终审: Ctrl+C 抢剪贴板方案作废) ----
     // 划选矩形直接 GDI 截屏 → 2x 放大 → OCR。零按键注入、零剪贴板占用、零副作用,
     // 浏览器/终端/图片/PDF 全局生效。baidu 高精度为主(provider 配置复用截图 OCR), Ollama 兜底。
@@ -1041,6 +1280,7 @@ partial class ShotService
         try
         {
             PickRaise();
+            if (pickWeQueued) { pickWeQueued = false; PickWinEventGo(pickWeQueuedHwnd); }   // WinEvent 选区广播消费(同线程)
             POINT cur;
             if (GetCursorPos(out cur))
             {
@@ -1169,7 +1409,7 @@ partial class ShotService
         PickDismiss();
         if (act == "translate") PickDoTranslate();
         else if (act == "ask") PickShowAsk();
-        else if (act == "copy") { try { Clipboard.SetText(pickSel); } catch { } TrayNotify("已复制", PickOneLine(pickSel)); }
+        else if (act == "copy") { try { Clipboard.SetText(pickSel); } catch { } } // [2026-10-16 老大要求] 复制不弹气泡提醒
     }
 
     // ---- 问 AI 前先弹提问框(2026-09-07 老大要的: 每次可以问不同的话) ----
@@ -1230,12 +1470,12 @@ partial class ShotService
         if (btn == PickCardForm.HIT_SWAP) { PickTranslateReverse(c); return; }
         if (btn == PickCardForm.HIT_COPY)
         {
-            try { Clipboard.SetText(c.BodyText); TrayNotify("已复制", "结果已复制到剪贴板"); } catch { }
+            try { Clipboard.SetText(c.BodyText); /* [2026-10-16 老大要求] 复制不弹气泡 */ } catch { }
             return;
         }
         if (btn == PickCardForm.HIT_COPY_SRC)
         {
-            try { Clipboard.SetText(pickSel); TrayNotify("已复制", "原文已复制到剪贴板"); } catch { }
+            try { Clipboard.SetText(pickSel); /* [2026-10-16 老大要求] 复制不弹气泡 */ } catch { }
         }
     }
 
@@ -1249,10 +1489,10 @@ partial class ShotService
             case PickCardForm.HIT_CLOSE: PickDismiss(); break;
             case PickCardForm.HIT_SWAP: PickTranslateReverse(c); break;
             case PickCardForm.HIT_COPY:
-                try { Clipboard.SetText(c.BodyText); TrayNotify("已复制", "结果已复制到剪贴板"); } catch { }
+                try { Clipboard.SetText(c.BodyText); /* [2026-10-16 老大要求] 复制不弹气泡 */ } catch { }
                 break;
             case PickCardForm.HIT_COPY_SRC:
-                try { Clipboard.SetText(pickSel); TrayNotify("已复制", "原文已复制到剪贴板"); } catch { }
+                try { Clipboard.SetText(pickSel); /* [2026-10-16 老大要求] 复制不弹气泡 */ } catch { }
                 break;
         }
     }
