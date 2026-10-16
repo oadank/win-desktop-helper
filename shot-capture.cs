@@ -302,6 +302,7 @@ partial class ShotService
         public bool Fill = false;    // 折线闭合填充 (PixPin MarkBar.BrokenLine.Fill: 首尾闭合成多边形纯色填满, 无头型/虚线)
         public int MosaicStrength = 8; // 马赛克块强度 (PixPin MarkBar.Mosaic.MosaicStrength; 越大块越粗)
         public int HlMode = M_NORMAL; // 荧光笔混合模式 (默认半透明: 多笔重叠自然加深不互相擦; 正片叠底单笔质感好但多笔会覆盖, 待画布架构修)
+        public int HlAlpha = 102;    // 荧光笔透明度 (0-255; 档位 51/102/153/204/255 = 20/40/60/80/100%, 默认 40%)
         public float Width = 3f;     // 线宽
         public int FontPt = 14;      // 文字/序号字号
         public string SeqFmt = "1";  // 序号格式: 1=1.2.3  I=I.II.III  a=a.b.c  A=A.B.C
@@ -500,12 +501,24 @@ partial class ShotService
         static bool markFill0 = false;
         static int markShape0 = 0; // 0=PixPin头型 4=细尾实心 5=细尾空心
         static int markMosaicStrength0 = 8; // 马赛克块强度 (PixPin MarkBar.Mosaic.MosaicStrength)
+        static int markHlAlpha0 = 102;      // 荧光笔透明度 0-255 (档位 51/102/153/204/255, 默认 40%)
+        // 荧光笔透明度合法档位: 配置值吸附到最近档, 保证菜单选中态判定用 == 即可
+        static int[] HlAlphaStops = { 51, 102, 153, 204, 255 };
+        static int HlAlphaNearest(int v)
+        {
+            int best = HlAlphaStops[0], bd = int.MaxValue;
+            foreach (int s in HlAlphaStops) { int d = Math.Abs(s - v); if (d < bd) { bd = d; best = s; } }
+            return best;
+        }
+        // 透明度档位显示文字 (alpha 0-255 → 百分比)
+        static string HlAlphaLabel(int a) { return ((int)Math.Round(a * 100.0 / 255.0)) + "%"; }
         static CaptureOverlay()
         {
             try
             {
                 markLoaded = true;
                 int ms2; if (int.TryParse(Cfg("mark.mosaicStrength", ""), out ms2) && ms2 >= 2 && ms2 <= 40) markMosaicStrength0 = ms2;
+                int ha2; if (int.TryParse(Cfg("mark.hlAlpha", ""), out ha2) && ha2 >= 0 && ha2 <= 255) markHlAlpha0 = HlAlphaNearest(ha2);
                 float w; if (float.TryParse(Cfg("mark.width", "3"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out w) && w >= 1 && w <= 20) markWidth0 = w;
                 int st; if (int.TryParse(Cfg("mark.arrowStyle", ""), out st)) markArrowStyle0 = st;
                 int ci; if (int.TryParse(Cfg("mark.color", ""), System.Globalization.NumberStyles.Integer, null, out ci)) markColor0 = Color.FromArgb(ci);
@@ -549,6 +562,7 @@ partial class ShotService
         bool curFill = markFill0;                  // 折线闭合填充开关
         int curMosaicStrength = markMosaicStrength0;               // 马赛克块强度 (PixPin MarkBar.Mosaic.MosaicStrength)
         int curHlMode = Annot.M_NORMAL;            // 荧光笔混合模式 (默认半透明: 重叠不互相擦)
+        int curHlAlpha = markHlAlpha0;              // 荧光笔透明度 (档位 51/102/153/204/255 = 20/40/60/80/100%)
         int curShape = markShape0;                  // 0=PixPin头型 4=细尾实心 5=细尾空心
         Point polyHover = Point.Empty;              // 折线绘制中的橡皮筋落点 (屏坐标)
         bool polyHoverOk = false;
@@ -849,7 +863,7 @@ partial class ShotService
                 cur.Kind = tool == "rect" ? Annot.K_RECT : tool == "ellipse" ? Annot.K_ELLIPSE :
                            tool == "arrow" ? Annot.K_ARROW : tool == "seq" ? Annot.K_SEQ :
                            tool == "mosaic" ? Annot.K_MOSAIC : tool == "highlight" ? Annot.K_HIGHLIGHT : Annot.K_PEN;
-                cur.MosaicStrength = curMosaicStrength; cur.HlMode = curHlMode;
+                cur.MosaicStrength = curMosaicStrength; cur.HlMode = curHlMode; cur.HlAlpha = curHlAlpha;
                 cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
                 cur.StartType = curStartType; cur.EndType = curEndType; cur.Smooth = curSmooth; cur.Dash = curDash;
                 cur.Style = curCallout ? Annot.S_CALLOUT :
@@ -879,7 +893,7 @@ partial class ShotService
                 {
                     cur.Pts = new List<Point> { sp };
                     // 荧光笔要够粗才像高亮条 (PixPin: 滚轮调粗细); 沿用当前线宽但保底 14px
-                    if (cur.Kind == Annot.K_HIGHLIGHT) { cur.Width = Math.Max(curWidth, 14f); cur.HlMode = curHlMode; }
+                    if (cur.Kind == Annot.K_HIGHLIGHT) { cur.Width = Math.Max(curWidth, 14f); cur.HlMode = curHlMode; cur.HlAlpha = curHlAlpha; }
                 }
                 else cur.Rect = new Rectangle(sp, Size.Empty);
             }
@@ -936,7 +950,18 @@ partial class ShotService
                         InvalidateAnnot(Rectangle.Union(oldB, new Rectangle(polyHover, Size.Empty)));
                     }
                 }
-                else if (cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT) { cur.Pts.Add(sp); InvalidateAnnot(cur); }
+                else if (cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT)
+                {
+                    Rectangle oldB = BoundsOf(cur);
+                    if (cur.Kind == Annot.K_HIGHLIGHT && (Control.ModifierKeys & Keys.Shift) != 0 && cur.Pts.Count > 0)
+                    {
+                        // Shift 按住 = 直线模式: 笔画截断为 [起点, 45° 吸附端点], 松开恢复自由画
+                        Point p1 = ClampToSel(ShiftConstrain(cur.Pts[0], sp));
+                        if (cur.Pts.Count > 1) cur.Pts[cur.Pts.Count - 1] = p1; else cur.Pts.Add(p1);
+                    }
+                    else cur.Pts.Add(sp);
+                    InvalidateAnnot(Rectangle.Union(oldB, BoundsOf(cur)));
+                }
                 else if (cur.Kind == Annot.K_ARROW)
                 {
                     cur.Pts[1] = sp; // 终点跟手 (方向 = 起点->鼠标)
@@ -1653,6 +1678,16 @@ partial class ShotService
             return Rectangle.FromLTRB(x0, y0, x1, y1);
         }
 
+        // Shift 约束端点: 以 p0 为基准把 p1 吸附到 0/45/90/135° 方向 (保鼠标距离, 方向取最近 45° 倍数)
+        static Point ShiftConstrain(Point p0, Point p1)
+        {
+            double dx = p1.X - p0.X, dy = p1.Y - p0.Y;
+            if (dx == 0 && dy == 0) return p1;
+            double len = Math.Sqrt(dx * dx + dy * dy);
+            double snap = Math.Round(Math.Atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+            return new Point(p0.X + (int)Math.Round(len * Math.Cos(snap)), p0.Y + (int)Math.Round(len * Math.Sin(snap)));
+        }
+
         // 正片叠底合成 (PixPin 荧光笔默认混合模式): region(32bpp 副本) 内按 mask 笔画 alpha 逐像素乘色
         // dst = lerp(dst, dst*color/255, maskA) — mask 边缘抗锯齿 alpha 自动变成部分混合
         static void MultiplyBlit(Bitmap region, Bitmap mask, Color c)
@@ -1765,7 +1800,7 @@ partial class ShotService
                                     Point[] lpts = new Point[pts.Length];
                                     for (int i = 0; i < pts.Length; i++) lpts[i] = new Point(pts[i].X - bb.X, pts[i].Y - bb.Y);
                                     using (Pen lp = new Pen(
-                                        a.HlMode == Annot.M_MULTIPLY ? a.Color : Color.FromArgb(110, a.Color), a.Width))
+                                        a.HlMode == Annot.M_MULTIPLY ? a.Color : Color.FromArgb(a.HlAlpha, a.Color), a.Width))
                                     {
                                         lp.StartCap = LineCap.Round; lp.EndCap = LineCap.Round; lp.LineJoin = LineJoin.Round;
                                         lg.DrawLines(lp, lpts);
@@ -2324,6 +2359,7 @@ partial class ShotService
             // 终版 PixPin: 箭头样式=6 图标条(图1); 序号=[N⇅][格式▾][大小][字号]+色板(图2); 文字=[字体▾][大小][字号]+色板(图3); 只显当前工具相关
             propBar = new ToolbarPanel();
             string[] lineTools = { "rect", "ellipse", "arrow", "pen", "highlight", "mosaic" }; // 颜色/粗细组 (荧光笔要高亮色; 马赛克用色块边距弱相关但保留一致)
+            string[] hlOnly = { "highlight" }; // 荧光笔专属: 透明度
             string[] textTools = { "text", "seq" };
             string[] arrowOnly = { "arrow" };
             string[] arrowTools = { "arrow", "poly", "curve" }; // 头型/双向/虚线: 折线曲线也有 (PixPin BrokenLine 同款配置)
@@ -2436,6 +2472,26 @@ partial class ShotService
                 sp.Show();
             }, lineTools);
             wdBtn.ToolKey = "wd";
+            // ---- 荧光笔透明度 (hlOnly): "40% ▾" 下拉, 5 档, 改完即存 ----
+            ToolbarPanel.Btn hlAlphaBtn = null;
+            hlAlphaBtn = propBar.AddText(HlAlphaLabel(curHlAlpha) + " ▾", "荧光笔透明度", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                foreach (int av in HlAlphaStops)
+                {
+                    int captured = av;
+                    ToolStripItem it = m.Items.Add(HlAlphaLabel(av), null, delegate
+                    {
+                        curHlAlpha = captured;
+                        if (hlAlphaBtn != null) { hlAlphaBtn.DrawStr = HlAlphaLabel(captured) + " ▾"; propBar.RelayoutNow(); }
+                        SaveMarkNow();
+                        Log("capture: hl alpha=" + captured);
+                    });
+                    if (av == curHlAlpha) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, hlAlphaBtn.Rect.X, hlAlphaBtn.Rect.Bottom + 2);
+            }, hlOnly);
+            hlAlphaBtn.ToolKey = "hlalpha";
             propBar.AddSep(seqOnly);
             // ---- 序号组 (图2): [N⇅] [格式▾] ----
             ToolbarPanel.Btn startBtn = null;
@@ -2508,6 +2564,7 @@ partial class ShotService
                 else if (b.ToolKey == "smooth") b.DrawStr = curSmooth ? "平滑:开" : "平滑:关";
                 else if (b.ToolKey == "dash") { var po = b.Preview; b.Preview = ToolbarPanel.MakeDashPreviewBmp(curDash, false); if (po != null) po.Dispose(); }
                 else if (b.ToolKey == "fill") b.DrawStr = curFill ? "填充:开" : "填充:关";
+                else if (b.ToolKey == "hlalpha") b.DrawStr = HlAlphaLabel(curHlAlpha) + " ▾";
                 else if (b.ToolKey == "wd") { var po = b.Preview; b.Preview = ToolbarPanel.MakeWidthPreviewBmp(curWidth, false); if (po != null) po.Dispose(); }
                 else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
             }
@@ -2518,7 +2575,7 @@ partial class ShotService
         // 标注参数落盘 (shot-service.json mark 节)
         void SaveMarkNow()
         {
-            try { SaveMarkCfg(curWidth, curStartType, curEndType, curSmooth, curDash, curCallout, curShape, curFill, curColor, curFontPt, curFontFamily, curSeqFmt); } catch { }
+            try { SaveMarkCfg(curWidth, curStartType, curEndType, curSmooth, curDash, curCallout, curShape, curFill, curColor, curFontPt, curFontFamily, curSeqFmt, curMosaicStrength, curHlAlpha); } catch { }
         }
 
         void PlacePropBar()
@@ -2624,7 +2681,7 @@ partial class ShotService
             redoStack.Clear();
             InvalidateAnnot(a);
             // 诊断: 每笔标注的 kind/规模/关键参数 (荧光笔画了看不见这类问题, 日志直接说话)
-            string extra = a.Kind == Annot.K_HIGHLIGHT ? (" hlMode=" + a.HlMode + " pts=" + (a.Pts != null ? a.Pts.Count : 0)) :
+            string extra = a.Kind == Annot.K_HIGHLIGHT ? (" hlMode=" + a.HlMode + " alpha=" + a.HlAlpha + " pts=" + (a.Pts != null ? a.Pts.Count : 0)) :
                            a.Kind == Annot.K_MOSAIC ? (" strength=" + a.MosaicStrength + " rect=" + a.Rect.Width + "x" + a.Rect.Height) : "";
             Log("capture: annot push kind=" + a.Kind + extra);
         }
