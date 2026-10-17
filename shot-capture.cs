@@ -1126,6 +1126,10 @@ partial class ShotService
         //   正常路径没收到 (焦点丢了) → 遮罩上执行 Esc 语义, 保底退出。钩子不吃键 (弹窗/文字输入的 Esc 不受影响)。
         static volatile int escSeenTick = 0;
         static IntPtr kbHook = IntPtr.Zero;
+        // 🔴 委托必须存静态字段 (2026-10-18 崩溃实锤): 方法组直接传给 SetWindowsHookEx 会生成临时委托,
+        //    GC 一回收, 钩子还挂在系统里 → 下一个按键就 native 崩 (事件日志: unknown module, c0000005)。
+        //    老大实测点 Esc 就崩 = 就是它。照 shot-service volHookProc 的模式存字段。
+        static readonly KbdHookProc kbHookProc = new KbdHookProc(KbHookProcCore);
         delegate IntPtr KbdHookProc(int code, IntPtr wp, IntPtr lp);
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int idHook, KbdHookProc proc, IntPtr hMod, uint tid);
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hh);
@@ -1143,23 +1147,32 @@ partial class ShotService
             catch { }
         }
 
-        static IntPtr KbHookProc(int code, IntPtr wp, IntPtr lp)
-        {            if (code >= 0 && (wp == (IntPtr)0x0100 || wp == (IntPtr)0x0104) && lp != IntPtr.Zero)
+        static IntPtr KbHookProcCore(int code, IntPtr wp, IntPtr lp)
+        {
+            // 🔴 钩子回调里裸抛异常 = native 崩进程 (c000041d), 全体包死
+            try
             {
-                KBDLLHOOKSTRUCT k = (KBDLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(lp, typeof(KBDLLHOOKSTRUCT));
-                if (k.vkCode == 0x1B && live != null && !live.IsDisposed) // VK_ESCAPE
+                if (code >= 0 && (wp == (IntPtr)0x0100 || wp == (IntPtr)0x0104) && lp != IntPtr.Zero)
                 {
-                    int pressedAt = Environment.TickCount;
-                    System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                    KBDLLHOOKSTRUCT k = (KBDLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(lp, typeof(KBDLLHOOKSTRUCT));
+                    if (k.vkCode == 0x1B && live != null && !live.IsDisposed) // VK_ESCAPE
                     {
-                        System.Threading.Thread.Sleep(120);
-                        CaptureOverlay ov = live;
-                        if (ov == null || ov.IsDisposed) return;
-                        if (Math.Abs(Environment.TickCount - System.Threading.Volatile.Read(ref escSeenTick)) < 400) return; // 正常路径已处理
-                        try { ov.BeginInvoke((Action)delegate { try { ov.EscFallback(); } catch { } }); } catch { }
-                    });
+                        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                        {
+                            try
+                            {
+                                System.Threading.Thread.Sleep(120);
+                                CaptureOverlay ov = live;
+                                if (ov == null || ov.IsDisposed) return;
+                                if (Math.Abs(Environment.TickCount - System.Threading.Volatile.Read(ref escSeenTick)) < 400) return; // 正常路径已处理
+                                ov.BeginInvoke((Action)delegate { try { ov.EscFallback(); } catch (Exception ex2) { Log("esc fallback err: " + ex2.Message); } });
+                            }
+                            catch (Exception ex1) { try { Log("esc hook defer err: " + ex1.Message); } catch { } } // 🔴 后台线程异常没人接, 裸抛=杀进程 (2026-10-18)
+                        });
+                    }
                 }
             }
+            catch { }
             return CallNextHookEx(kbHook, code, wp, lp);
         }
 
@@ -1298,7 +1311,7 @@ partial class ShotService
             this.Focus(); // 所有路径兜底: 前台到了遮罩不等于焦点在遮罩, Esc 全靠它 (2026-10-18 Esc 失效实锤)
             if (kbHook == IntPtr.Zero) // Esc 保底钩子: 遮罩存活期间常驻, 关闭时摘除
             {
-                try { kbHook = SetWindowsHookEx(WH_KEYBOARD_LL, KbHookProc, GetModuleHandle(null), 0); Log("capture: esc kb hook=" + kbHook); }
+                try { kbHook = SetWindowsHookEx(WH_KEYBOARD_LL, kbHookProc, GetModuleHandle(null), 0); Log("capture: esc kb hook=" + kbHook); }
                 catch (Exception ex) { Log("capture: esc hook err: " + ex.Message); }
             }
             // 开罩即高亮光标下窗口 (PixPin 同款: 不必先动鼠标); sp 直接就是屏幕坐标
@@ -1905,6 +1918,19 @@ partial class ShotService
         volatile bool hoverStop = false;
         volatile int uiaDisabled = 0;
         static volatile int uiaFailStreak = 0; // 连续慢/异常计数; 首查可能因 Chromium 惰性建树很慢, 连 5 次才停用
+        // 慢窗冷却 (2026-10-18): 单窗查一次 >800ms → 60s 内跳过 UIA 细化投递, 只出粗框 (防"不跟手")
+        static readonly Dictionary<IntPtr, DateTime> uiaSlowHwnd = new Dictionary<IntPtr, DateTime>();
+        static readonly object uiaSlowLock = new object();
+        static bool UiaSlowCooldown(IntPtr h)
+        {
+            lock (uiaSlowLock)
+            {
+                DateTime t;
+                if (!uiaSlowHwnd.TryGetValue(h, out t)) return false;
+                if ((DateTime.Now - t).TotalSeconds > 60) { uiaSlowHwnd.Remove(h); return false; }
+                return true;
+            }
+        }
 
         void StartHoverLoop()
         {
@@ -1968,7 +1994,7 @@ partial class ShotService
                                 if (chc.Length > 0 && hoverLevel >= 0 && hoverLevel < chc.Length && chc[hoverLevel].Contains(sp))
                                     fin = chc[hoverLevel];
                             }
-                            else if (uiDetect == 0 && uiaFailStreak < 5)
+                            else if (uiDetect == 0 && uiaFailStreak < 5 && !UiaSlowCooldown(h))
                             {
                                 // PixPin 同款: 已知"窗口只是外壳"的进程 (浏览器/Unity/Electron), 粗框没意义 —
                                 // 缓存未命中时保持上一次的细框 (若有), 绝不让大外壳盖住细框闪一下
@@ -2399,7 +2425,11 @@ partial class ShotService
                 }
             }
             // 慢只记日志不禁用: 首查慢是 Chromium 惰性建树 (实测 1761ms), 第二笔就走缓存 — 以前"慢5次全局禁UIA"把精度砍没了
-            if (sw.ElapsedMilliseconds > 800) Log("hover uia slow: " + sw.ElapsedMilliseconds + "ms depth=" + chain.Count + " (不禁用, 记录观察)");
+            if (sw.ElapsedMilliseconds > 800)
+            {
+                Log("hover uia slow: " + sw.ElapsedMilliseconds + "ms depth=" + chain.Count + " (记入冷却 60s, 粗框照常)");
+                lock (uiaSlowLock) { uiaSlowHwnd[hwnd] = DateTime.Now; } // 🔴 慢窗冷却
+            }
             else uiaFailStreak = 0;
             return chain.ToArray();
         }
