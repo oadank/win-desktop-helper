@@ -514,6 +514,11 @@ partial class ShotService
         }
         // 透明度档位显示文字 (alpha 0-255 → 百分比)
         static string HlAlphaLabel(int a) { return ((int)Math.Round(a * 100.0 / 255.0)) + "%"; }
+        static string SeqFmtLabel(string f)
+        {
+            return f == "I" ? "I.II.III" : f == "a" ? "a.b.c" : f == "A" ? "A.B.C" : "1.2.3";
+        }
+        static int NearestIdx(int[] arr, int v) { int bi = 0, bd = int.MaxValue; for (int i = 0; i < arr.Length; i++) { int d = Math.Abs(arr[i] - v); if (d < bd) { bd = d; bi = i; } } return bi; }
         static CaptureOverlay()
         {
             try
@@ -671,6 +676,9 @@ partial class ShotService
         // 上滚=放大到父级(整个卡片/面板), 下滚=缩小到子级(按钮/输入框)。只在还没框选时有效, 链到头就停住。
         protected override void OnMouseWheel(MouseEventArgs e)
         {
+            // 属性栏悬停滚轮调值 (PixPin 同款): 粗细/字号/编号格式等按钮上直接滚, 不用点开下拉
+            // (老框架下滚轮消息进有焦点的主窗 —— 截图期间主窗必持焦点, 在这里转发给属性栏)
+            if (propBar != null && propBar.Visible && propBar.WheelAt(propBar.PointToClient(Cursor.Position), e.Delta > 0)) return;
             if (!hasSel && hoverChain.Length > 0 && tool == null && !textMode)
             {
                 int lv = hoverLevel < 0 ? hoverChain.Length - 1 : hoverLevel;
@@ -2569,6 +2577,12 @@ partial class ShotService
                 sp.Show();
             }, lineTools);
             wdBtn.ToolKey = "wd";
+            wdBtn.OnWheel = delegate(bool up) // 悬停滚轮换档 (PixPin 同款)
+            {
+                int wi = curWidth <= 2.75f ? 0 : (curWidth <= 4.75f ? 1 : 2);
+                int nw = Math.Max(0, Math.Min(widthVals.Length - 1, wi + (up ? 1 : -1)));
+                if (nw != wi) { curWidth = widthVals[nw]; MarkProp(); Log("capture: wheel wd=" + curWidth); }
+            };
             // ---- 荧光笔透明度 (hlOnly): "40% ▾" 下拉, 5 档, 改完即存 ----
             ToolbarPanel.Btn hlAlphaBtn = null;
             hlAlphaBtn = propBar.AddText(HlAlphaLabel(curHlAlpha) + " ▾", "荧光笔透明度", delegate
@@ -2589,6 +2603,13 @@ partial class ShotService
                 m.Show(propBar, hlAlphaBtn.Rect.X, hlAlphaBtn.Rect.Bottom + 2);
             }, hlOnly);
             hlAlphaBtn.ToolKey = "hlalpha";
+            hlAlphaBtn.OnWheel = delegate(bool up)
+            {
+                int i = System.Array.IndexOf(HlAlphaStops, HlAlphaNearest(curHlAlpha));
+                if (i < 0) i = 0;
+                int ni = Math.Max(0, Math.Min(HlAlphaStops.Length - 1, i + (up ? 1 : -1)));
+                if (ni != i) { curHlAlpha = HlAlphaStops[ni]; MarkProp(); Log("capture: wheel hlalpha=" + curHlAlpha); }
+            };
             // ---- 马赛克模式/强度 (mosaicOnly): 马赛克=方块 / 模糊=糊化; 强度档位 ----
             ToolbarPanel.Btn mosModeBtn = null;
             mosModeBtn = propBar.AddText(curMosaicMode == 1 ? "模糊" : "马赛克", "马赛克模式", delegate
@@ -2629,6 +2650,13 @@ partial class ShotService
                 m.Show(propBar, mosStrBtn.Rect.X, mosStrBtn.Rect.Bottom + 2);
             }, mosaicOnly);
             mosStrBtn.ToolKey = "mosstr";
+            mosStrBtn.OnWheel = delegate(bool up)
+            {
+                int[] stops = { 4, 8, 12, 20, 32 };
+                int i = NearestIdx(stops, curMosaicStrength);
+                int ni = Math.Max(0, Math.Min(stops.Length - 1, i + (up ? 1 : -1)));
+                if (ni != i) { curMosaicStrength = stops[ni]; MarkProp(); Log("capture: wheel mosstr=" + curMosaicStrength); }
+            };
             propBar.AddSep(seqOnly);
             // ---- 序号组 (图2): [N⇅] [格式▾] ----
             ToolbarPanel.Btn startBtn = null;
@@ -2659,6 +2687,14 @@ partial class ShotService
                 m.Show(propBar, fmtBtn.Rect.X, fmtBtn.Rect.Bottom + 2);
             }, seqOnly);
             fmtBtn.ToolKey = "seqfmt";
+            fmtBtn.OnWheel = delegate(bool up)
+            {
+                string[] order = { "1", "I", "a", "A" };
+                int i = System.Array.IndexOf(order, string.IsNullOrEmpty(curSeqFmt) ? "1" : curSeqFmt);
+                if (i < 0) i = 0;
+                int ni = Math.Max(0, Math.Min(order.Length - 1, i + (up ? 1 : -1)));
+                if (ni != i) { curSeqFmt = order[ni]; MarkProp(); Log("capture: wheel seqfmt=" + curSeqFmt); }
+            };
             propBar.AddSep(textTools);
             // ---- 字体/大小 (图2/图3): [字体▾] [大小] [字号] ----
             familyBtn = propBar.AddText(FamilyShort(curFontFamily) + " ▾", "字体 (文字/序号)", delegate { ShowFamilyMenu(); }, textTools);
@@ -2666,6 +2702,13 @@ partial class ShotService
             propBar.AddLabel("大小", textTools);
             fontBtn = propBar.AddText(curFontPt.ToString(), "字号 (点选切换)", delegate { ShowFontMenu(); }, textTools);
             fontBtn.ToolKey = "f_size";
+            fontBtn.OnWheel = delegate(bool up)
+            {
+                int[] pts = { 11, 14, 18, 22, 26 };
+                int i = NearestIdx(pts, curFontPt);
+                int ni = Math.Max(0, Math.Min(pts.Length - 1, i + (up ? 1 : -1)));
+                if (ni != i) { curFontPt = pts[ni]; MarkProp(); Log("capture: wheel fontpt=" + curFontPt); }
+            };
             propBar.AddSep();
             // ---- 色板 (图2 右下: 黑红橙黄绿蓝紫灰白) ----
             Color[] cols =
@@ -2704,6 +2747,8 @@ partial class ShotService
                 else if (b.ToolKey == "hlalpha") b.DrawStr = HlAlphaLabel(curHlAlpha) + " ▾";
                 else if (b.ToolKey == "mosmode") b.DrawStr = curMosaicMode == 1 ? "模糊" : "马赛克";
                 else if (b.ToolKey == "mosstr") b.DrawStr = curMosaicStrength.ToString();
+                else if (b.ToolKey == "seqfmt") b.DrawStr = SeqFmtLabel(curSeqFmt) + " ▾";
+                else if (b.ToolKey == "f_size") b.DrawStr = curFontPt.ToString();
                 else if (b.ToolKey == "wd") { var po = b.Preview; b.Preview = ToolbarPanel.MakeWidthPreviewBmp(curWidth, false); if (po != null) po.Dispose(); }
                 else if (b.ToolKey.StartsWith("col")) b.On = b.Swatch == curColor;
             }
@@ -3520,6 +3565,7 @@ partial class ShotService
             public string Icon, Tip, ToolKey;
             public Action OnClick;
             public Action<bool> OnSpin;        // 一体化微调框: true=上三角(+1) false=下三角(-1)
+            public Action<bool> OnWheel;       // 悬停滚轮调值 (PixPin 同款): true=上滚(+档) false=下滚(-档); null=不响应
             public bool IsToggle, On, Enabled = true;
             public bool IsSpinner;             // PixPin 同款: 左半当前值文字 + 右半上▲下▼三角
             public Image Preview;              // 下拉按钮的当前预览图 (非空: 画图+右侧▾)
@@ -3920,7 +3966,7 @@ partial class ShotService
             foreach (Btn b in Btns) b.Enabled = en;
         }
 
-        int Hit(Point p)
+        public int Hit(Point p)
         {
             for (int i = 0; i < Btns.Count; i++)
             {
@@ -4097,6 +4143,25 @@ partial class ShotService
                         g.DrawImage(ic, b.Rect.X + 8, b.Rect.Y + 8, 24, 24);
                 }
             }
+        }
+
+        // 悬停滚轮调值入口 (PixPin 同款): 命中按钮且挂了 OnWheel/OnSpin 才消费
+        public bool WheelAt(Point p, bool up)
+        {
+            int h = Hit(p);
+            if (h < 0) return false;
+            Btn b = Btns[h];
+            if (!b.Enabled) return false;
+            if (b.OnWheel != null) { b.OnWheel(up); Invalidate(); return true; }
+            if (b.OnSpin != null) { b.OnSpin(up); Invalidate(); return true; } // 序号起始微调框: 滚轮复用▲▼
+            return false;
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            // .NET 4.5.1+ 会把滚轮自动转给鼠标下的控件 (即使没焦点); 老框架则由主窗路由过来, 两路只走其一
+            WheelAt(e.Location, e.Delta > 0);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
