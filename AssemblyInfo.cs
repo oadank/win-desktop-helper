@@ -6,5 +6,5 @@ using System.Reflection;
 [assembly: AssemblyProduct("Win Desktop Helper")]
 [assembly: AssemblyCompany("oadank")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("0.0.24")]
-[assembly: AssemblyFileVersion("0.0.24")]
+[assembly: AssemblyVersion("0.0.25")]
+[assembly: AssemblyFileVersion("0.0.25")]
