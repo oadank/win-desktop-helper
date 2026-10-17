@@ -165,6 +165,7 @@ partial class ShotService
     static IntPtr pickWeQueuedHwnd;
     static int pickWeLastTick = -10000;           // 合流: 拖选/按住 Shift 移动时系统连发, 350ms 内只处理一次
     static int pickSlowPid;                       // UIA 慢目标退避: 按 pid 8s(旧版全局 30s 禁言 = "时灵时不灵"大坑, 已废)
+    static int pickDebugSelMiss = -1;             // 诊断开关(pick.debugSelMiss=1): 记录"无真选区→不出球"的位置, 默认关
 
     static bool PickSlowBlocked(IntPtr hwnd)
     {
@@ -683,6 +684,40 @@ partial class ShotService
         catch { return false; }
     }
 
+    // ---- 任务栏装饰类应用黑名单 (2026-10-17) ----
+    // 这类工具只画任务栏/窗口外观, 界面上没有任何可选文本 → 对它取词毫无意义。
+    // 更要紧的是它们都是 WinUI3/XAML 宿主: 被外部跨进程 UIA 交叉查询时, 可能触发宿主去初始化
+    // XAML 诊断组件并失败退出(实锤 2026-10-17 12:57:00 TranslucentTB: `Failed to initialize
+    // XAML Diagnostics / 0x800706BE RPC failed`)。宁可放过, 绝不碰它。
+    static readonly string[] pickDecorationNames = { "translucenttb", "translucenttb_cbtest", "taskbarx", "startallback", "start11", "startisback", "explorerpatcher", "rbtray", "trafficmonitor" };
+    static readonly System.Collections.Hashtable pickDecorCache = new System.Collections.Hashtable();
+
+    static bool PickIsDecorationApp(IntPtr hwnd)
+    {
+        try
+        {
+            if (hwnd == IntPtr.Zero) return false;
+            uint pid; GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0) return false;
+            lock (pickDecorCache)
+            {
+                object[] c; int now = Environment.TickCount;
+                if (pickDecorCache.ContainsKey(pid))
+                {
+                    c = (object[])pickDecorCache[pid];
+                    if (now - (int)c[1] < 300000) return (bool)c[0];
+                }
+                bool isDecor = false;
+                string n = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
+                foreach (string d in pickDecorationNames) if (n == d) { isDecor = true; break; }
+                pickDecorCache[pid] = new object[] { isDecor, Environment.TickCount };
+                if (isDecor) Log("pick: decoration app detected pid=" + pid + " name=" + n + " — never touch its XAML");
+                return isDecor;
+            }
+        }
+        catch { return false; }
+    }
+
     // ---- 取词 0: CDP 直读（2026-09-11 方案D，老大拍板）----
     // Electron 应用带 --remote-debugging-port 启动（快捷方式已加：MiMo=9222/WorkBuddy=9223/ZCode=9224），
     // DevTools 协议对每个 page/iframe target 发 Runtime.evaluate 读 getSelection —— 真选区、
@@ -981,17 +1016,28 @@ partial class ShotService
             }
             if (click)
             {
-                // 浏览器: 单击/双击取词归扩展(pick-inject) —— 原生不发; 终端: 红线不发
-                if (PickIsBrowser(fgAt)) { Log("pick(click): browser target, skipped"); return; }
+                // 浏览器划词/双击取词一律归 Edge 扩展(Win Desktop Helper 划词 v0.1.0,
+                // 装好的, 加载位置 C:\D\opt\win-desktop-helper\extension)。它 document mouseup/dblclick →
+                // getSelection() → POST /pick-inject, 服务端零 UIA 零按键。
+                // 实测铁证(2026-10-17 12:54:51): `pick-inject: 5 chars @ 824,840 | 方临时限制` = 这条路通。
+                // 🔴 所以原生绝不再对浏览器发起取词: 12:52 那版曾放开走 UIA, 结果每次划词白跑一趟 UIA
+                // (日志 `pick(drag): browser target, UIA no selection`) 还可能干扰扩展, 已收回。
+                if (PickIsBrowser(fgAt)) { Log("pick(click): browser target, extension owns it"); return; }
                 if (PickIsTerminal(fgAt)) { Log("pick(click): terminal target, skipped"); return; }
+                // 任务栏装饰类(TranslucentTB / 各类美化工具): 窗口里没有可选文本, 对它发 UIA 只有副作用。
+                // 实锤(2026-10-17 12:57:00): 双击落在这类窗口上 → 我们发 UIA → 紧接着它报
+                // `Failed to initialize XAML Diagnostics / 0x800706BE RPC failed` 退出。交叉查询 XAML 宿主
+                // 正是能触发这类宿主的诊断组件初始化。取词对它本来也毫无意义, 直接跳过。
+                if (PickIsDecorationApp(fgAt)) { Log("pick(click): decoration app target (taskbar skin), skipped"); return; }
                 // CDP 直读优先(方案D): Electron 调试口毫秒级读真选区; 空=落回 UIA(聊天输入框选区 getSelection 看不到, 还得靠 UIA)
                 try { string cdp = PickViaCdp(fgAt); if (!string.IsNullOrWhiteSpace(cdp)) { text = cdp; how = "cdp"; } } catch { }
                 int uiaCost = 0;
                 if (string.IsNullOrWhiteSpace(text))
                 {
                     int tU = Environment.TickCount;
-                    try { text = PickWordAtPoint(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia词"; } catch { }
-                    if (string.IsNullOrWhiteSpace(text))
+                    // 🔴 2026-10-17 照豆包: 双击也只认真选区, 不再按坐标猜词。
+                    //   (旧版先跑 PickWordAtPoint=RangeFromPoint 扩词; 在重命名框/输入框里会凭坐标造出一个词,
+                    //    没有选区也弹球 = 老大实锤误弹。豆包看的是选区事件, 不猜。)
                     { try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia选区"; } catch { } }
                     uiaCost = Environment.TickCount - tU;
                 }
@@ -1017,18 +1063,35 @@ partial class ShotService
             {
                 // 拖选: UIA 优先(本地应用), 剪贴板兜底(Electron/聊天类)。
                 // OCR 永久退出取词链(老大 2026-09-11 终审: 识别的全是错误, 不可靠)。
-                // 浏览器划选归 Edge 扩展所有 —— 原生让位。
+                // 浏览器划选归 Edge 扩展所有 —— 原生让位(实测扩展通: pick-inject 5 chars @ 824,840)。
                 bool terminal = PickIsTerminal(fgAt);
                 bool browser = PickIsBrowser(fgAt);
-                if (!terminal && !browser)
+                bool decor = PickIsDecorationApp(fgAt);   // 任务栏装饰类(TranslucentTB 等): 无可选文本, 别去碰它的 XAML
+                if (!terminal && !browser && !decor)
                 {
                     // CDP 直读优先(方案D): Electron 拖选=文档级选区, getSelection 必有; 空才落 UIA/剪贴板
                     try { string cdp = PickViaCdp(fgAt); if (!string.IsNullOrWhiteSpace(cdp)) { text = cdp; how = "cdp"; } } catch { }
                     if (string.IsNullOrWhiteSpace(text))
                     {
+                        // 🔴 2026-10-17 照豆包: 只认真选区, 不猜词。
+                        //   旧版这里先跑 PickWordAtPoint(RangeFromPoint 按坐标扩词), 于是"双击进重命名框 →
+                        //   光标落进编辑框 → 一划就按坐标猜出一个词" = 没选区也出球(老大实测: 豆包不出我们出, 不对)。
+                        //   豆包只监听 TEXTSELECTIONCHANGED, 没有真选区根本不触发。现在鼠标路径同样只读
+                        //   GetSelection 真选区, 拿不到就交给 WinEvent/剪贴板链, 绝不按坐标猜。
                         try { text = PickTextUia(x, y); if (!string.IsNullOrWhiteSpace(text)) how = "uia"; } catch { }
+                        if (string.IsNullOrWhiteSpace(text))
+                        {
+                            int dbg = pickDebugSelMiss;
+                            if (dbg < 0) { try { dbg = Cfg("pick.debugSelMiss", "0") == "1" ? 1 : 0; } catch { dbg = 0; } pickDebugSelMiss = dbg; }
+                            if (dbg == 1) Log("pick(drag): no real selection at " + x + "," + y + " — no guess (doubao-style)");
+                        }
                     }
-                    if (string.IsNullOrWhiteSpace(text))
+                    // 浏览器: 到此还没字就静默放弃 —— 绝不对网页注入 Ctrl+C(会顶掉用户复制、触发页面快捷键)
+                    if (string.IsNullOrWhiteSpace(text) && browser)
+                    {
+                        Log("pick(drag): browser target, UIA no selection — no clipboard injection, give up");
+                    }
+                    else if (string.IsNullOrWhiteSpace(text))
                     {
                         string clip = PickViaClipboard(fgAt);
                         if (!string.IsNullOrWhiteSpace(clip)) { text = clip; how = "clip"; }

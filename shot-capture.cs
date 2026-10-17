@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -627,6 +627,45 @@ partial class ShotService
         }
     }
 
+    // ---- 放大镜独立小窗 (2026-10-17 老大要求「放大镜的像素块图层要在工具条上层」) ----
+    // 为什么必须是独立窗体: 工具条是遮罩的子控件 (ToolbarPanel : Panel, Controls.Add(bar)),
+    //   WinForms 里子控件永远画在父窗体自绘内容之上 —— 放大镜只要还画在遮罩 OnPaint 里,
+    //   不管 SendToBack 还是改绘制顺序, 都会被工具条盖住。唯一真层级办法 = 给它一个自己的顶层窗体,
+    //   跟遮罩同为 TopMost, 后弹出的在上面; 遮罩失去焦点(点工具条/属性栏)时再 BringToFront 顶回去。
+    sealed class MagForm : Form
+    {
+        public Action<PaintEventArgs> Painter;   // 由 CaptureOverlay 置入, 画法沿用原来那套 (像素网格/信息条/提示)
+        public MagForm()
+        {
+            AutoScaleMode = AutoScaleMode.None;  // 125% DPI 下不让系统缩放 (本程序全按物理像素)
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            ShowInTaskbar = false;
+            TopMost = true;                       // 压住遮罩 + 遮罩上的工具条/属性栏
+            BackColor = Color.Black;
+            DoubleBuffered = true;
+            Cursor = Cursors.Cross;               // 鼠标在放大镜上时不显示别的光标
+            MinimumSize = Size.Empty;
+        }
+        // 不让它抢焦点: 遮罩必须一直是活动窗口, 否则 Esc/C/方向键全失效
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000 /*WS_EX_NOACTIVATE*/ | 0x00000080 /*WS_EX_TOOLWINDOW: 不占 Alt+Tab*/;
+                return cp;
+            }
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Action<PaintEventArgs> p = Painter;
+            if (p != null) p(e);
+        }
+    }
+
     class CaptureOverlay : Form
     {
         readonly Bitmap frozen;  // 冻结的全屏原图 (尺寸=虚拟屏)
@@ -635,6 +674,243 @@ partial class ShotService
         bool dragging = false;
         bool hasSel = false;
         int resizeHandle = -1;   // 拖拽中的选框手柄 0-7 (TL,T,TR,R,BR,B,BL,L); -1=无 — PixPin 同款四角四边拉区域
+        // ---- 标注二次编辑 (PixPin MarkSecondaryEditing=Enable) ----
+        // PixPin 原文: 「除铅笔和橡皮擦外, 大多数标注支持二次调整。但要先切换到对应的工具, 再点击已有标注进行编辑。」
+        // 所以只有"当前工具"跟这条标注同类型时才允许选中, 不是无脑点谁选谁。
+        Annot selAnnot = null;   // 当前选中的已提交标注
+        int selGrip = -1;        // 选中控制点: 0=起点 1=终点 2=矩形 0-7 手柄; -1=未按
+        Rectangle selGripOrig;   // 拖动控制点前的几何快照 (拖回原位用)
+        Point selDragFrom;       // 拖动"线段中间整体平移"的起点
+        Annot selDragSnap;       // 整体平移的原始几何快照
+        bool selMoving = false;  // 正在整体平移
+        // ---- 铅笔按住 Shift 画直线 (PixPin pencilShiftMode) ----
+        // 证据: pixpin.cn/docs/mark/pencil 「使用铅笔过程中, 随时按住 Shift 键, 即可绘制以按下位置为起点、
+        //       鼠标位置为终点的直线。默认是自由角度; 如需对齐特定角度, 可前往 配置-标注-铅笔-按住 Shift 时
+        //       铅笔绘图模式 (自由角度 / 45 / 30 / 15 / 10 / 5 度)」
+        // 三个状态: 没按 = 自由画; 刚按下 = 记下起点(此时鼠标位置)并清空笔迹; 按住 = 笔迹恒为[起点, 当前点]
+        bool penShiftOn = false;    // Shift 是否处于按住状态
+        bool penShiftLine = false;  // 本次笔画是否已切成直线模式
+        Point penShiftAnchor;       // 直线起点 (按 Shift 那一刻的鼠标位置)
+        Point penLastPt;            // 上一个采样点 (判"有没有动"用)
+        // ---- 选区内拖动 = 移动整个选区 (PixPin: 鼠标进选区变四向箭头, 按住拖动移框) ----
+        bool movingSel = false;     // 正在拖动移动选区
+        Point moveSelFrom;          // 按下点
+        Rectangle moveSelOrig;      // 按下时的选区
+        // ---- 放大镜 (PixPin 同款: 跟鼠标, 像素网格 + 中心像素取色) ----
+        // 证据: pixpin.cn/docs/capture/static-capture 「在截图界面时会显示放大镜, 放大显示鼠标周围的内容,
+        //   并显示鼠标指向像素的颜色值。按下 C 即可复制当前像素的颜色值。颜色默认以 RGB 格式显示,
+        //   可以按 Shift 切换到 Hex 格式」+ 老大 2026-10-17 提供的三张 PixPin 实测截图
+        Point lastMousePt;
+        bool lastMouseOk = false;
+        const int MagZoom = 8;              // 放大倍数
+        const int MagSrcW = 17, MagSrcH = 13; // 采样窗口 (源像素) → 136x104 显示
+        Rectangle prevMagRect = Rectangle.Empty; // 上一帧放大镜区域 (遮罩客户区; 刷新用)
+        Rectangle paintedMagRect = Rectangle.Empty; // 上一帧画过放大镜的区域 (残影兜底用)
+        MagForm magForm;                     // 放大镜独立顶层小窗 (压住工具条的唯一办法, 见类注释)
+        readonly Bitmap magBmp = new Bitmap(MagSrcW * MagZoom, MagSrcH * MagZoom + 96); // 放大镜离屏画布 (窗子不闪)
+        string magSig = "";                  // 上一帧签名: 位置/像素/格式没变就不重画 (省 CPU)
+        // 🔴 信息条放在放大色块「下面」(老大 2026-10-17 纠正: 不是右侧一列) — magBarH = 该条高度
+        static int magBarW = 0;   // 下方横排: 不额外占宽 (与放大图同宽)
+        static int magBarH = 46;  // 下方信息条高度: 坐标行 + 颜色行 (实测后校正)
+        // 复制提示条占位: 放大镜小窗底部预留这么高, 提示条画在里面 (窗子本身不闪)
+        const int magToastH = 0;
+        // 🎯 PixPin 原生条目顺序 (REA 取证: PointInfoWindow 控件栈
+        //    zoomWid → widLabelBg → lblPos → colorBoxContainer(colorBlock + lblColor) → lblTips
+        //    qss: QLabel{font-size:14pt; margin-bottom:3} / #widLabelBg{background rgba(0,0,0,220)})
+        //    → 「坐标 → 颜色(色块+值) → 快捷键提示」竖着叠, 每一段一行。
+        //    颜色是一个整体 (RGB(...) / #RRGGBB), 不是 R/G/B 拆三行。
+        static readonly string[] MagTips = { "%1: Copy color value", "%1: Switch color format" };
+
+        static bool MagOn()
+        {
+            int v;
+            return !int.TryParse(Cfg("capture.magnifier", "1"), out v) || v != 0;
+        }
+
+        // 放大镜窗体区域 (遮罩客户区坐标), 含信息条。
+        // 🔴 老大 2026-10-17 定: 「放大镜的像素块图层要在工具条的上层」— 靠独立顶层小窗 (MagForm) 实现, 不是靠工具条让位。
+        //    这里只负责算位置: 跟鼠标右下 (贴边翻转到左上)。
+        Rectangle MagRect(Point m)
+        {
+            int w = MagSrcW * MagZoom;
+            int h = MagSrcH * MagZoom + magBarH + magToastH;
+            int x = m.X + 24, y = m.Y + 24;
+            if (x + w > ClientSize.Width - 4) x = m.X - 24 - w;
+            if (y + h > ClientSize.Height - 4) y = m.Y - 24 - h;
+            if (x < 4) x = 4;
+            if (y < 4) y = 4;
+            return new Rectangle(x, y, w, h);
+        }
+
+        // 放大镜内容渲染 (画到 MagForm 的位图上, 客户区坐标 0,0 = 放大镜左上角)
+        // 🔴 2026-10-17: 原来直接画在遮罩 OnPaint 里, 被工具条(子控件)盖住 → 改成独立顶层窗体后,
+        //    画法一字未改, 只是坐标系从「屏幕客户区」变成「放大镜本地坐标」(减去 mr.Location)。
+        Rectangle DrawMagnifier(Graphics g)
+        {
+            if (!MagOn() || frozen == null || !lastMouseOk) { paintedMagRect = Rectangle.Empty; return Rectangle.Empty; }
+            Point m = lastMousePt;
+            if (m.X < 0 || m.Y < 0 || m.X >= ClientSize.Width || m.Y >= ClientSize.Height) { paintedMagRect = Rectangle.Empty; return Rectangle.Empty; }
+            Rectangle mr = MagRect(m);
+            paintedMagRect = mr;
+            int imgH = MagSrcH * MagZoom;
+            // 本地坐标: 放大镜窗客户区 (0,0) 就是 mr 的左上角
+            int LX = 0, LY = 0;
+
+            // 采样窗 (钳在冻结图内; 鼠标贴边时窗口贴边, 中心点仍指鼠标)
+            int sx = m.X - MagSrcW / 2, sy = m.Y - MagSrcH / 2;
+            sx = Math.Max(0, Math.Min(sx, frozen.Width - MagSrcW));
+            sy = Math.Max(0, Math.Min(sy, frozen.Height - MagSrcH));
+            Color curPx;
+            try { curPx = frozen.GetPixel(Math.Max(0, Math.Min(m.X, frozen.Width - 1)), Math.Max(0, Math.Min(m.Y, frozen.Height - 1))); }
+            catch { paintedMagRect = Rectangle.Empty; return Rectangle.Empty; }
+
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+            Rectangle dst = new Rectangle(LX, LY, MagSrcW * MagZoom, imgH);
+            g.DrawImage(frozen, dst, sx, sy, MagSrcW, MagSrcH, GraphicsUnit.Pixel);
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Default;
+            // PixPin 同款: 框选后只放大选取内的像素 — 选取外的格子涂黑 (不拾取)
+            if (hasSel)
+            {
+                using (SolidBrush eb = new SolidBrush(Color.FromArgb(235, 18, 18, 18)))
+                    for (int j = 0; j < MagSrcH; j++)
+                        for (int i = 0; i < MagSrcW; i++)
+                            if (!sel.Contains(sx + i, sy + j))
+                                g.FillRectangle(eb, LX + i * MagZoom, LY + j * MagZoom, MagZoom, MagZoom);
+            }
+
+            // 行列高亮 (浅蓝贯穿, 照老大截图) + 网格淡线
+            int cxOff = (m.X - sx) * MagZoom, cyOff = (m.Y - sy) * MagZoom;
+            using (SolidBrush hl = new SolidBrush(Color.FromArgb(70, 120, 190, 255)))
+            {
+                g.FillRectangle(hl, LX, LY + cyOff, dst.Width, MagZoom);
+                g.FillRectangle(hl, LX + cxOff, LY, MagZoom, imgH);
+            }
+            using (Pen gp = new Pen(Color.FromArgb(45, 255, 255, 255)))
+            {
+                for (int i = 1; i < MagSrcW; i++) g.DrawLine(gp, LX + i * MagZoom, LY, LX + i * MagZoom, LY + imgH);
+                for (int j = 1; j < MagSrcH; j++) g.DrawLine(gp, LX, LY + j * MagZoom, LX + dst.Width, LY + j * MagZoom);
+            }
+            // 中心像素: 白底黑框小方块 (照截图)
+            g.FillRectangle(Brushes.White, LX + cxOff - 1, LY + cyOff - 1, MagZoom + 2, MagZoom + 2);
+            using (Pen bp = new Pen(Color.Black, 1.5f)) g.DrawRectangle(bp, LX + cxOff - 1, LY + cyOff - 1, MagZoom + 2, MagZoom + 2);
+            // 外框 (只框放大图本体)
+            using (Pen op = new Pen(Color.FromArgb(200, 255, 255, 255), 1)) g.DrawRectangle(op, LX, LY, dst.Width - 1, imgH - 1);
+
+            // 🔴 信息条在放大色块「下面」(老大 2026-10-17 纠正), 条目顺序照 PixPin PointInfoWindow:
+            //    坐标行 (lblPos) → 颜色行 (colorBlock 色块 + lblColor 颜色值) → 快捷键提示 (lblTips)
+            Rectangle barR = new Rectangle(LX, LY + imgH, dst.Width, magBarH);
+            using (SolidBrush bg = new SolidBrush(Color.FromArgb(220, 0, 0, 0))) g.FillRectangle(bg, barR);
+            bool hex = ShiftDown();
+            string colorTxt = MagColorText(curPx);
+            string posTxt = "(" + (m.X + SystemInformation.VirtualScreen.X) + "," + (m.Y + SystemInformation.VirtualScreen.Y) + ")";
+            using (Font f = new Font("Consolas", 9f))
+            using (Font fs = new Font("Consolas", 7.5f))
+            {
+                int tx = barR.X + 7, ty = barR.Y + 4;
+                // ① 坐标行 (PixPin lblPos)
+                g.DrawString(posTxt, f, Brushes.White, tx, ty);
+                ty += 19;
+                // ② 颜色行 (PixPin colorBoxContainer: 色块 + 颜色值)
+                g.FillRectangle(new SolidBrush(curPx), tx, ty + 1, 14, 14);
+                g.DrawRectangle(Pens.White, tx, ty + 1, 14, 14);
+                g.DrawString(colorTxt, f, Brushes.White, tx + 19, ty);
+                ty += 20;
+                // ③ 快捷键提示行 (PixPin lblTips, 小字灰白)
+                using (SolidBrush tb = new SolidBrush(Color.FromArgb(215, 235, 235, 235)))
+                    g.DrawString("Shift:切换 C:复制", fs, tb, tx, ty);
+            }
+            // 外框包整体 (放大图 + 信息条) — 出界文字会在框外留残影, 必须框住
+            using (Pen op3 = new Pen(Color.FromArgb(200, 255, 255, 255), 1))
+                g.DrawRectangle(op3, LX, LY, mr.Width - 1, mr.Height - 1);
+            // 复制提示 (C 复制颜色成功) 由 DrawMagnifierOnForm 统一画在小窗底部, 这里不管
+            return mr;
+        }
+
+        // ---- 放大镜小窗同步 (每帧/每次状态变化调一次) ----
+        // 位置变了 → 挪窗; 像素/坐标/格式变了 → 重画离屏画布; 都变了才 Invalidate。
+        void SyncMagForm()
+        {
+            if (IsDisposed || Disposing) return;
+            if (!MagOn() || frozen == null || !lastMouseOk || recMode)
+            {
+                HideMagForm();
+                return;
+            }
+            Point m = lastMousePt;
+            if (m.X < 0 || m.Y < 0 || m.X >= ClientSize.Width || m.Y >= ClientSize.Height) { HideMagForm(); return; }
+            Rectangle mr = MagRect(m);
+            prevMagRect = mr;
+            if (magForm == null || magForm.IsDisposed)
+            {
+                magForm = new MagForm();
+                magForm.Painter = delegate(PaintEventArgs pe) { DrawMagnifierOnForm(pe.Graphics); };
+                magForm.Show();
+            }
+            // 有文字编辑框弹在外面时别盖它 (文字输入要能看到光标)
+            if (textInput != null && textInput.Visible) { magForm.Hide(); return; }
+            Point pt = PointToScreen(mr.Location);
+            Size sz = new Size(mr.Width, Math.Max(magBmp.Height, magBarH + MagSrcH * MagZoom));
+            if (magForm.Bounds != new Rectangle(pt, sz)) magForm.Bounds = new Rectangle(pt, sz);
+            if (!magForm.Visible) { magForm.Show(); }
+            // 遮罩一旦不是活动窗 (点了工具条/属性栏), 放大镜窗会飘到上面 → 顶回来保持层级
+            if (magForm.TopMost) magForm.BringToFront();
+            string sig = m.X + "," + m.Y + "," + ShiftDown() + "," + (magToast == null ? "" : magToast);
+            if (sig != magSig)
+            {
+                magSig = sig;
+                magForm.Invalidate();
+            }
+        }
+
+        // 画到小窗: 先画在离屏位图上 (双缓冲, 拖动不闪), 再整块贴到窗体
+        void DrawMagnifierOnForm(Graphics g)
+        {
+            try
+            {
+                if (frozen == null) return;
+                using (Graphics bg = Graphics.FromImage(magBmp))
+                {
+                    bg.Clear(BackColor == Color.Empty ? Color.Black : Color.Black);
+                    DrawMagnifier(bg);
+                }
+                Rectangle mr = MagRect(lastMousePt);
+                g.DrawImage(magBmp, new Rectangle(0, 0, mr.Width, mr.Height), new Rectangle(0, 0, mr.Width, mr.Height), GraphicsUnit.Pixel);
+                // 提示条 (画在信息条下面, 在小窗内部, 不越界)
+                if (magToast != null)
+                {
+                    using (Font ft = new Font("Microsoft YaHei UI", 9f))
+                    {
+                        SizeF s = g.MeasureString(magToast, ft);
+                        int tw = (int)Math.Ceiling(s.Width) + 18, th = (int)Math.Ceiling(s.Height) + 8;
+                        int ty2 = mr.Height + 4;
+                        if (ty2 + th <= magBmp.Height)
+                        {
+                            Rectangle tr = new Rectangle((mr.Width - tw) / 2, ty2, tw, th);
+                            using (SolidBrush b1 = new SolidBrush(Color.FromArgb(238, 30, 140, 80))) g.FillRectangle(b1, tr);
+                            using (Pen p1 = new Pen(Color.FromArgb(200, 255, 255, 255), 1)) g.DrawRectangle(p1, tr.X, tr.Y, tr.Width - 1, tr.Height - 1);
+                            using (SolidBrush t1 = new SolidBrush(Color.White)) g.DrawString(magToast, ft, t1, tr.X + 9, tr.Y + 4);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { Log("mag paint err: " + ex.Message); }
+        }
+
+        void HideMagForm()
+        {
+            prevMagRect = Rectangle.Empty;
+            paintedMagRect = Rectangle.Empty;
+            magSig = "";
+            if (magForm != null && !magForm.IsDisposed && magForm.Visible) magForm.Hide();
+        }
+
+        void DisposeMagForm()
+        {
+            try { if (magForm != null && !magForm.IsDisposed) magForm.Close(); } catch { }
+            magForm = null;
+        }
+
         Rectangle resizeOrig;    // 拖拽开始时的选区 (固定对边法)
         readonly List<Annot> annots = new List<Annot>(); // 已提交标注 (屏坐标)
         readonly List<Annot> redoStack = new List<Annot>(); // 撤销弹出的标注 (重做用, 新笔画清空)
@@ -678,6 +954,8 @@ partial class ShotService
         // 折叠槽 (PixPin 同款): 箭头/折线/曲线共用按钮位, 谁最后用谁占槽, 落盘 mark.foldArrow
         internal static string foldArrowTool = "arrow";
         ToolbarPanel.Btn foldArrowBtn;
+        ContextMenuStrip foldArrowMenu;                       // 折叠槽下拉: 建一次复用 (每次 new 会卡)
+        System.Collections.Generic.List<ToolStripItem> foldArrowMenuItems;
         static string FoldArrowTip()
         {
             if (foldArrowTool == "poly") return "折线标注 (单击加点, 双击或回车收尾) · 右下角小三角展开换箭头/曲线";
@@ -707,6 +985,21 @@ partial class ShotService
                 bool co2; if (bool.TryParse(Cfg("mark.callout", ""), out co2)) markCallout0 = co2;
                 bool fl2; if (bool.TryParse(Cfg("mark.fill", ""), out fl2)) markFill0 = fl2;
                 int shp2; if (int.TryParse(Cfg("mark.shape", ""), out shp2) && (shp2 == 0 || shp2 == 4 || shp2 == 5)) markShape0 = shp2;
+                // 放大镜信息条尺寸: 高度按下方三行 (坐标 / 颜色 / 提示) 实测, 不写死 (写死必留残影 — 10-17 踩过)
+                try
+                {
+                    using (Bitmap bm = new Bitmap(1, 1)) using (Graphics gg = Graphics.FromImage(bm))
+                    using (Font f17 = new Font("Consolas", 9f))
+                    using (Font fs17 = new Font("Consolas", 7.5f))
+                    {
+                        int h1 = (int)Math.Ceiling(gg.MeasureString("(99999,99999)", f17).Height);
+                        int h2 = (int)Math.Ceiling(gg.MeasureString("RGB(255,255,255)", f17).Height);
+                        int h3 = (int)Math.Ceiling(gg.MeasureString("Shift:切换 C:复制", fs17).Height);
+                        magBarH = h1 + h2 + h3 + 10;   // 三行 + 上下内边距
+                        if (magBarH < 44) magBarH = 44;
+                    }
+                }
+                catch { magBarH = 46; }
                 // 旧版只存 mark.arrowStyle(0-5), 新字段缺失时向后兼容映射到 PixPin 头型
                 if (string.IsNullOrEmpty(Cfg("mark.arrowEnd", "")) && string.IsNullOrEmpty(Cfg("mark.shape", "")) && !string.IsNullOrEmpty(Cfg("mark.arrowStyle", "")))
                 {
@@ -791,9 +1084,13 @@ partial class ShotService
             }
         }
 
+        // 当前活着的遮罩 (同一时刻最多一个; 关闭时置 null)。仅供 HTTP 自测口取句柄, 不参与业务逻辑。
+        internal static CaptureOverlay live;
+
         public CaptureOverlay(Bitmap preShot)
         {
             AutoScaleMode = AutoScaleMode.None; // 125% DPI 下 Form 的 Font 缩放会整体放大子控件坐标 → 属性栏网格/列表错位重叠; 本程序全按物理像素设计
+            live = this;
             frozen = preShot;
             // 性能关键 (PixPin 同款"反向遮罩"): 背景直接用冻结原图 (框内=原亮度透出),
             // 暗层在 OnPaint 里画成「选区外的 4 块纯色矩形」— 每帧零大图 DrawImage, 只填纯色。
@@ -886,6 +1183,7 @@ partial class ShotService
         {
             if (textMode) CancelTextInput();
             tool = null;
+            selAnnot = null; selGrip = -1; selMoving = false; // 选区作废, 编辑态一并清掉
             if (cur != null) { var c = cur; cur = null; }
             annots.Clear();
             redoStack.Clear();
@@ -944,11 +1242,16 @@ partial class ShotService
                 Log("handles skip: hasSel=" + hasSel + " textMode=" + textMode + " dragging=" + dragging + " rh=" + resizeHandle);
                 return;
             }
+            // 🔴 外观照 2026-10-17 老大提供的 PixPin 截图实测:
+            //   圆形(不是方块) · 天蓝 #2F9CF5 · 直径约 9px · 白色描边约 2px · 8 个点(四角+四边中点)
+            //   (旧版是白底方块+蓝色方框, 手搓的, 已按实测替换)
+            const float HR = 5.5f;   // 半径 (直径 11 = 9px 实心 + 2px 白描边外扩)
+            Color pixBlue = Color.FromArgb(47, 156, 245);
             foreach (Point pt in HandlePts())
             {
-                Rectangle rc = new Rectangle(pt.X - 5, pt.Y - 5, 10, 10);
-                using (SolidBrush wb = new SolidBrush(Color.White)) g.FillRectangle(wb, rc);
-                using (Pen bp = new Pen(Color.FromArgb(70, 130, 220), 1.5f)) g.DrawRectangle(bp, rc);
+                RectangleF rc = new RectangleF(pt.X - HR, pt.Y - HR, HR * 2, HR * 2);
+                using (SolidBrush wb = new SolidBrush(Color.White)) g.FillEllipse(wb, rc);
+                using (SolidBrush bb = new SolidBrush(pixBlue)) g.FillEllipse(bb, pt.X - 4.5f, pt.Y - 4.5f, 9f, 9f);
             }
         }
 
@@ -1025,10 +1328,23 @@ partial class ShotService
                 InvalidateSelArea(old);
                 return;
             }
+            // 选区内按下 (无工具) = 拖动移动整个选区 (PixPin 同款: 光标四向箭头, 拖框走)
+            // 🔴 有工具时不接管 — 工具要在选区内画标注; 二次编辑态也不接管 (点标注归编辑)
+            if (tool == null && selAnnot == null && !textMode && sel.Contains(sp))
+            {
+                movingSel = true;
+                moveSelFrom = sp;
+                moveSelOrig = sel;
+                Cursor = Cursors.SizeAll;
+                Log("capture: sel move start");
+                return;
+            }
             if (tool != null && sel.Contains(sp))
             {
                 // 标注阶段: 在选区内开始一笔
                 CommitTextInput(); // 若有未提交文字先落字
+                // 二次编辑优先: 当前工具接管该类标注时, 点已画的标注 = 进入调整态而不是新画一笔 (PixPin 同款)
+                if (tool != "text" && TryBeginAnnotEdit(sp)) return;
                 if (tool == "text")
                 {
                     // 点到已提交文字 = 重编辑 (载入原文/角度/字体原位替换); 否则在此处开新文字
@@ -1053,6 +1369,9 @@ partial class ShotService
                         polyHoverOk = false;
                     }
                     Point np = ClampToSel(sp);
+                    // Shift 按住加点: 该点锁 45° (与橡皮筋预览保持同一几何, 所见即所得)
+                    if ((Control.ModifierKeys & Keys.Shift) != 0 && cur.Pts.Count > 0)
+                        np = ClampToSel(ShiftConstrain(cur.Pts[cur.Pts.Count - 1], np));
                     if (cur.Pts.Count == 0 || cur.Pts[cur.Pts.Count - 1] != np) cur.Pts.Add(np); // 同点不重复加 (双击第二下)
                     InvalidateAnnot(cur);
                     return;
@@ -1090,6 +1409,8 @@ partial class ShotService
                 else if (cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT)
                 {
                     cur.Pts = new List<Point> { sp };
+                    // 铅笔 Shift 直线状态复位 (本次笔画从头判)
+                    penShiftOn = false; penShiftLine = false; penLastPt = sp; penShiftAnchor = sp;
                     // 荧光笔要够粗才像高亮条 (PixPin: 滚轮调粗细); 沿用当前线宽但保底 14px
                     if (cur.Kind == Annot.K_HIGHLIGHT) { cur.Width = Math.Max(curWidth, 14f); cur.HlMode = curHlMode; cur.HlAlpha = curHlAlpha; }
                 }
@@ -1101,6 +1422,14 @@ partial class ShotService
         {
             if (recMode) return; // 录制中: 不再响应选区调整
             Point sp = PointToScreen(e.Location);
+            // 放大镜: 记录鼠标位, 只重绘旧/新两块放大镜区域 (不全屏刷)
+            if (!recMode && MagOn())
+            {
+                // PixPin 同款: 框选后放大镜只拾取选取内的像素 — 鼠标出选取 = 放大镜消失, 不再取色
+                bool showMag = !hasSel || sel.Contains(e.Location);
+                lastMousePt = e.Location; lastMouseOk = showMag;
+                SyncMagForm();   // 放大镜在独立顶层小窗上 (压住工具条), 位置/内容由它自己维护
+            }
             if (resizeHandle >= 0)
             {
                 // 手柄拖拽中: 固定对边调整选区
@@ -1110,12 +1439,45 @@ partial class ShotService
                 InvalidateSelArea(old);
                 return;
             }
+            // 标注二次编辑拖动: 控制点或整体平移 (PixPin: 拖控制点改节点 / 拖线段中间整体移动)
+            if (selAnnot != null && (selGrip >= 0 || selMoving))
+            {
+                DragAnnotEdit(sp);
+                return;
+            }
+            // 选区整体拖动中: 选区跟手, 工具条跟随 (边界钳在虚拟屏内)
+            if (movingSel)
+            {
+                Rectangle old = sel;
+                int nx = moveSelOrig.X + (sp.X - moveSelFrom.X);
+                int ny = moveSelOrig.Y + (sp.Y - moveSelFrom.Y);
+                Rectangle vs = SystemInformation.VirtualScreen;
+                if (nx < vs.Left) nx = vs.Left;
+                if (ny < vs.Top) ny = vs.Top;
+                if (nx + sel.Width > vs.Right) nx = vs.Right - sel.Width;
+                if (ny + sel.Height > vs.Bottom) ny = vs.Bottom - sel.Height;
+                sel = new Rectangle(nx, ny, moveSelOrig.Width, moveSelOrig.Height);
+                InvalidateSelArea(old);
+                InvalidateSelArea(sel);
+                if (bar != null && bar.Visible) PlaceBar();
+                return;
+            }
             // 文字工具悬停检测: 已提交文字 → 提示框 (其他工具不调用 = 文字当背景)
             UpdateTextHover(sp, e.Location);
+            // 悬停在可编辑标注上 → 四向箭头 (PixPin: 选区中拖动移动选框同款光标语义)
+            if (selAnnot != null && selGrip < 0 && !textMode && cur == null && !dragging)
+            {
+                bool onGrip = HitGrip(selAnnot, sp) >= 0;
+                bool onBody = HitAnnotBody(selAnnot, sp);
+                Cursor = onGrip ? Cursors.Cross : onBody ? Cursors.SizeAll : Cursors.Default;
+            }
+            // 悬停光标: 手柄=方向缩放; 选区内(无工具/无编辑态)=四向箭头(移动选区); 其余=十字
             if (hasSel && !pendingDown && !dragging && cur == null && !textMode)
             {
                 int hh = HitHandle(e.Location);
-                Cursor = hh >= 0 ? HandleCursors[hh] : Cursors.Cross; // 手柄上换方向光标, 离开恢复十字
+                if (hh >= 0) Cursor = HandleCursors[hh];
+                else if (tool == null && selAnnot == null && sel.Contains(sp)) Cursor = Cursors.SizeAll;
+                else Cursor = Cursors.Cross;
             }
             if (pendingDown && !dragging)
             {
@@ -1140,6 +1502,10 @@ partial class ShotService
                 if (cur.Kind == Annot.K_POLY)
                 {
                     // 折线绘制中: 只更新橡皮筋落点 (不加点, 点是在 mousedown 加的)
+                    // Shift 按住 = 下一段锁 45° (PixPin 原文: 「在绘制或调整直线、折线时按住 Shift 键,
+                    //   可绘制固定间隔 45° 的线条」)
+                    if ((Control.ModifierKeys & Keys.Shift) != 0 && cur.Pts.Count > 0)
+                        sp = ClampToSel(ShiftConstrain(cur.Pts[cur.Pts.Count - 1], sp));
                     if (sp != polyHover)
                     {
                         Rectangle oldB = BoundsOf(cur);
@@ -1150,21 +1516,58 @@ partial class ShotService
                 }
                 else if (cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT)
                 {
-                    Rectangle oldB = BoundsOf(cur);
-                    if (cur.Kind == Annot.K_HIGHLIGHT && (Control.ModifierKeys & Keys.Shift) != 0 && cur.Pts.Count > 0)
+                    bool shift = (Control.ModifierKeys & Keys.Shift) != 0;
+                    bool firstShift = false;
+                    if (cur.Kind == Annot.K_PEN && shift && !penShiftOn)
                     {
-                        // Shift 按住 = 直线模式: 笔画截断为 [起点, 45° 吸附端点], 松开恢复自由画
+                        // Shift 刚按下 → 从这一刻的鼠标位置起一条新直线 (PixPin 原文「以按下位置为起点」)
+                        // 🔴 判"有没有动"很关键: 按住 Shift 但不挪鼠标时不该把已有笔迹清掉
+                        if (penLastPt != sp) { penShiftAnchor = penLastPt; firstShift = true; }
+                        else { penShiftAnchor = sp; firstShift = true; }
+                        penShiftLine = true;
+                        cur.Pts.Clear();
+                        cur.Pts.Add(penShiftAnchor);
+                        cur.Pts.Add(penShiftAnchor);
+                    }
+                    penShiftOn = shift;
+                    Rectangle oldB = BoundsOf(cur);
+                    if (cur.Kind == Annot.K_HIGHLIGHT && shift && cur.Pts.Count > 0)
+                    {
+                        // 荧光笔 (老逻辑保留): 笔画截断为 [起点, 45° 吸附端点], 松开恢复自由画
                         Point p1 = ClampToSel(ShiftConstrain(cur.Pts[0], sp));
                         if (cur.Pts.Count > 1) cur.Pts[cur.Pts.Count - 1] = p1; else cur.Pts.Add(p1);
                     }
-                    else cur.Pts.Add(sp);
+                    else if (cur.Kind == Annot.K_PEN && penShiftLine)
+                    {
+                        if (!shift)
+                        {
+                            // 松开 Shift: 这条直线就此定格, 后续接着自由画 (从当前点续笔)
+                            penShiftLine = false;
+                            if (cur.Pts.Count < 2 || cur.Pts[cur.Pts.Count - 1] != sp) cur.Pts.Add(sp);
+                        }
+                        else
+                        {
+                            // 按住 Shift 期间: 笔迹恒为两点, 末端跟手; 对齐角度按配置 (默认自由角度)
+                            Point p1 = ClampToSel(SnapPencilMode(penShiftAnchor, sp));
+                            while (cur.Pts.Count < 2) cur.Pts.Add(penShiftAnchor);
+                            cur.Pts[1] = p1;
+                            while (cur.Pts.Count > 2) cur.Pts.RemoveAt(cur.Pts.Count - 1);
+                        }
+                    }
+                    else
+                    {
+                        cur.Pts.Add(sp);
+                    }
+                    penLastPt = sp;
                     InvalidateAnnot(Rectangle.Union(oldB, BoundsOf(cur)));
                 }
                 else if (cur.Kind == Annot.K_ARROW)
                 {
-                    cur.Pts[1] = sp; // 终点跟手 (方向 = 起点->鼠标)
+                    // Shift 按住 = 锁 45° 方向 (PixPin 「在绘制或调整直线、折线时按住 Shift」同一条规则)
+                    Point ap = ((Control.ModifierKeys & Keys.Shift) != 0) ? ShiftConstrain(cur.Pts[0], sp) : sp;
+                    cur.Pts[1] = ap; // 终点跟手 (方向 = 起点->鼠标)
                     Rectangle old = cur.Rect;
-                    cur.Rect = Normalize(cur.Pts[0], sp);
+                    cur.Rect = Normalize(cur.Pts[0], ap);
                     InvalidateAnnot(old);
                     InvalidateAnnot(cur);
                 }
@@ -1273,7 +1676,7 @@ partial class ShotService
         System.Threading.Thread hoverThread;
         volatile bool hoverStop = false;
         volatile int uiaDisabled = 0;
-        volatile int uiaFailStreak = 0; // 连续慢/异常计数; 首查可能因 Chromium 惰性建树很慢, 连 5 次才停用
+        static volatile int uiaFailStreak = 0; // 连续慢/异常计数; 首查可能因 Chromium 惰性建树很慢, 连 5 次才停用
 
         void StartHoverLoop()
         {
@@ -1316,25 +1719,40 @@ partial class ShotService
                     Rectangle fin = Rectangle.Empty;
                     var path = new System.Collections.Generic.List<IntPtr>();
                     IntPtr h = WindowFromPointEx(cp, Handle, uiDetect == 0, path); // 仅窗口档: 不下钻
+                    bool winChanged = h != lastHwnd;
+                    if (winChanged) uiaFailStreak = 0; // 换窗解除熔断: 新窗口该查就查 (熔断只防同一窗口反复超时)
                     if (h != IntPtr.Zero)
                     {
                         RECT r;
                         if (GetWindowRect(h, out r) && r.Right > r.Left && r.Bottom > r.Top)
                         {
                             fin = new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
-                            bool cacheHit = uiaCacheHwnd == h && uiaCache != Rectangle.Empty &&
-                                            uiaCache.Contains(sp) && fin.Contains(uiaCache);
+                            // 🔴 先查 UIA 缓存 (照 PixPin SnapshotAllWinRect: 查点走内存, 不问系统)
+                            //    命中 = 鼠标上次已探索过的元素内 → 立刻出细框, 不等任何跨进程查询。
+                            Rectangle cached = HitUiaCache(h, sp);
+                            bool cacheHit = cached != Rectangle.Empty && fin.Contains(cached);
                             if (cacheHit)
                             {
-                                fin = uiaCache; // 锁定: 光标还在细化框内就不换框 (稳定不闪)
+                                fin = cached; // 命中缓存: 直接给最内层框, 零等待
+                                uiaCache = cached; uiaCacheHwnd = h;
                                 Rectangle[] chc = hoverChain;
                                 if (chc.Length > 0 && hoverLevel >= 0 && hoverLevel < chc.Length && chc[hoverLevel].Contains(sp))
                                     fin = chc[hoverLevel];
                             }
                             else if (uiDetect == 0 && uiaFailStreak < 5)
                             {
+                                // PixPin 同款: 已知"窗口只是外壳"的进程 (浏览器/Unity/Electron), 粗框没意义 —
+                                // 缓存未命中时保持上一次的细框 (若有), 绝不让大外壳盖住细框闪一下
+                                if (IsDeepProcess(h) && uiaCacheHwnd == h && fin.Contains(uiaCache)) fin = uiaCache;
                                 // 缓存失配: 请求后台细化 (绝不阻塞本循环 — 树冷查询几百 ms, 同步查=高亮冻住不跟手)
-                                lock (uiaLock) { reqHwnd = h; reqPt = sp; }
+                                // 代际: 同一窗口同一坐标重复投递不涨代际 (光标没动就别把在途查询作废),
+                                // 换了目标才 +1 → 在途的旧结果作废, 避免陈旧框把画面拽回去
+                                lock (uiaLock)
+                                {
+                                    bool same = (reqHwnd == h && reqPt == sp);
+                                    reqHwnd = h; reqPt = sp;
+                                    if (!same) reqSeq++;
+                                }
                                 uiaKick.Set();
                                 // 顺手消费已就绪的结果 (光标还停在结果框内才收)
                                 Rectangle[] got = null; Rectangle gotRect = Rectangle.Empty;
@@ -1370,10 +1788,13 @@ partial class ShotService
                             }
                         }
                     }
-                    if (h != lastHwnd)
+                    bool chainFresh = false;
+                    if (winChanged)
                     {
+                        // 换窗: 缓存/层级链作废, 但过渡动画保留 (老大 09:48 明确: 滑动不能去掉)
                         uiaCache = Rectangle.Empty; uiaCacheHwnd = IntPtr.Zero;
                         hoverChain = new Rectangle[0]; hoverLevel = -1;
+                        chainFresh = true;
                         // 诊断: 换窗时记类名+矩形 (任务栏识别不到/识别慢这类问题, 日志直接说话; 换窗才打, 不刷屏)
                         if (h != IntPtr.Zero)
                         {
@@ -1388,16 +1809,17 @@ partial class ShotService
                         else Log("hover hwnd none");
                     }
                     lastHwnd = h;
-                    ApplyHover(fin); // 带滑动过渡动画
+                    ApplyHover(fin, chainFresh); // 换窗=短滑(110ms), 同窗微调=滑动过渡(90ms)
                 }
                 catch { }
-                System.Threading.Thread.Sleep(25); // 采样 25ms (原 60ms 用户反馈"动画延迟了一点": 高亮框跟手慢半拍)
+                System.Threading.Thread.Sleep(12); // 采样 12ms (原 25ms: 跨控件停留多久才出框, 老大实测"比 PixPin 慢半拍")
             }
         }
 
         // UIA 细化专用线程: 慢查询全在这里跑, 悬停循环只投请求/收结果 → 换窗/移动永远跟手
         readonly object uiaLock = new object();
         IntPtr reqHwnd = IntPtr.Zero; Point reqPt;
+        int reqSeq = 0;  // 请求代际: 悬停循环每投一次新请求 +1; 细化线程做完发现代际已变 = 结果过时, 直接丢
         Rectangle uiaResult = Rectangle.Empty; IntPtr uiaResultHwnd = IntPtr.Zero;
     Rectangle[] uiaResultChain = new Rectangle[0]; // 父子链 (滚轮切换用, 数组引用整体替换 = 跨线程读安全)
         System.Threading.AutoResetEvent uiaKick = new System.Threading.AutoResetEvent(false);
@@ -1417,17 +1839,33 @@ partial class ShotService
             while (!IsDisposed)
             {
                 uiaKick.WaitOne(250);
-                IntPtr h; Point pt;
-                lock (uiaLock) { h = reqHwnd; pt = reqPt; reqHwnd = IntPtr.Zero; }
+                IntPtr h; Point pt; int mySeq;
+                lock (uiaLock) { h = reqHwnd; pt = reqPt; mySeq = reqSeq; reqHwnd = IntPtr.Zero; }
                 if (h == IntPtr.Zero) continue;
                 if (uiDetect != 0) continue; // 仅窗口/不检测档: 不做 UIA 细化
                 var swUia = System.Diagnostics.Stopwatch.StartNew();
-                Rectangle[] ch = UiaChainAt(h, pt); // 可能几百 ms (树冷) — 反正不挡悬停循环
+                Rectangle[] ch = ChainAt(h, pt); // 可能几百 ms (树冷) — 反正不挡悬停循环
+                // 🔴 代际检查 (2026-10-17 11:30): 查询期间鼠标已移到别处 → 这份结果不写回"当前指针",
+                //    但绝不丢弃 (2026-10-17 19:20 改, 照 PixPin SnapshotAllWinRect 思路):
+                //    结果按窗口+查询点存进 cache[], 鼠标下次回到这个矩形里立刻命中 = 越用越快。
                 lock (uiaLock)
                 {
-                    uiaResultChain = ch;
-                    uiaResult = ch.Length > 0 ? ch[ch.Length - 1] : Rectangle.Empty;
-                    uiaResultHwnd = h;
+                    bool stale = mySeq != reqSeq;
+                    if (!stale)
+                    {
+                        uiaResultChain = ch;
+                        uiaResult = ch.Length > 0 ? ch[ch.Length - 1] : Rectangle.Empty;
+                        uiaResultHwnd = h;
+                    }
+                    // 无论是否过期都入库 (整链所有层都可用, 点落在哪层就用哪层)
+                    if (ch.Length > 0 && uiaCacheList.Count < 4000)
+                    {
+                        for (int i = 0; i < ch.Length; i++)
+                        {
+                            if (ch[i].Width < 4 || ch[i].Height < 4) continue;
+                            uiaCacheList.Add(new UiaCacheEntry { Hwnd = h, Rect = ch[i] });
+                        }
+                    }
                 }
                 // 诊断: 细化结果变化才记 (深度不够/太粗/太慢, 日志直接说话)
                 Rectangle finUia = ch.Length > 0 ? ch[ch.Length - 1] : Rectangle.Empty;
@@ -1439,10 +1877,110 @@ partial class ShotService
             }
         }
 
+        // ---- UIA 结果缓存 (照 PixPin UiRegionDetector 的 SnapshotAllWinRect + checkWinRectAlive 思路) ----
+        // PixPin 不是每次悬停都去问系统: 它把窗口矩形快照下来, 查点走内存; UIA 只在必要时补一层。
+        // 这里同理: UIA 查到的每一层都入库, 鼠标进到某个已知最内层矩形 = 立刻出框, 零等待。
+        struct UiaCacheEntry { public IntPtr Hwnd; public Rectangle Rect; }
+        readonly List<UiaCacheEntry> uiaCacheList = new List<UiaCacheEntry>();
+
+        // 在缓存里找"包含该点、面积最小"的那层 (= 最深的已知元素)
+        Rectangle HitUiaCache(IntPtr hwnd, Point pt)
+        {
+            Rectangle best = Rectangle.Empty; long bestArea = long.MaxValue;
+            for (int i = 0; i < uiaCacheList.Count; i++)
+            {
+                UiaCacheEntry e = uiaCacheList[i];
+                if (e.Hwnd != hwnd) continue;
+                if (!e.Rect.Contains(pt)) continue;
+                long a = (long)e.Rect.Width * e.Rect.Height;
+                if (a < bestArea) { bestArea = a; best = e.Rect; }
+            }
+            return best;
+        }
+
+        void ClearUiaCache() { lock (uiaLock) { uiaCacheList.Clear(); } }
+
+        // 🔴 照 PixPin UiRegionDetector.dll 明文名单 (2026-10-17 REA 取证):
+        //    Unity.exe / EpicGamesLauncher.exe / Mybase.exe / Snap.Hutao.exe / GoldenDict.exe /
+        //    openshot-qt.exe / qgis-bin.exe + 一整排浏览器 (chrome/msedge/brave/opera/qqbrowser/360browser/firefox/
+        //    quark/sogouexplorer/liebao/maxthon/360se/theworld/baidubrowser/vivaldi/edge/sputnik/chromeplus/
+        //    qip surf/blackhawk/7star/sleipnir5/citrio/chrome sxs/coowon) + Explorer.EXE
+        //    PixPin 对这些进程特殊处理 (它们的 HWND 是整块壳, 必须下钻才有意义)。
+        static readonly string[] DeepProcesses = {
+            "unity", "epicgameslauncher", "mybase", "snap.hutao", "goldendict", "openshot-qt", "qgis-bin",
+            "chrome", "msedge", "brave", "opera", "slbrowser", "qqbrowser", "360browser", "firefox", "quark",
+            "sogouexplorer", "liebao", "maxthon", "360se", "theworld", "baidubrowser", "vivaldi", "edge",
+            "sputnik", "chromeplus", "qip surf", "blackhawk", "7star", "sleipnir5", "citrio", "chrome sxs",
+            "coowon", "explorer"
+        };
+
+        static bool IsDeepProcess(IntPtr hwnd)
+        {
+            uint pid; GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0) return false;
+            string pn = ProcNameOf(pid);
+            if (pn.Length == 0) return false;
+            pn = pn.ToLowerInvariant();
+            for (int i = 0; i < DeepProcesses.Length; i++) if (pn.StartsWith(DeepProcesses[i])) return true;
+            return false;
+        }
+
+        // 进程名 (去掉 .exe, 小写): 用 QueryFullProcessImageName 比枚举模块快且不受位数限制
+        static string ProcNameOf(uint pid)
+        {
+            try
+            {
+                IntPtr h = OpenProcess(0x1000 /*QUERY_LIMITED_INFORMATION*/, false, (int)pid);
+                if (h == IntPtr.Zero) return "";
+                try
+                {
+                    var sb = new System.Text.StringBuilder(1024);
+                    int sz = sb.Capacity;
+                    if (QueryFullProcessImageNameW(h, 0, sb, ref sz))
+                    {
+                        string full = sb.ToString();
+                        int slash = full.LastIndexOf('\\');
+                        string name = slash >= 0 ? full.Substring(slash + 1) : full;
+                        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 4);
+                        return name.ToLowerInvariant();
+                    }
+                    return "";
+                }
+                finally { try { System.Runtime.InteropServices.Marshal.Release(h); } catch { } }
+            }
+            catch { return ""; }
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr OpenProcess(int access, bool inherit, int pid);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        static extern bool QueryFullProcessImageNameW(IntPtr h, int flags, System.Text.StringBuilder buf, ref int size);
+
         // UIA 命中: 系统原生 FromPoint 直达最深元素, 再沿控制视图向上爬回窗口根 = 完整父子链
         // (PixPin 级精度来源: 不逐层 FindAll — 每次 FindAll+N 次 Current 属性都是跨进程往返, 又慢又浅)
         // 返回 [0]=窗口根 → [n-1]=最深元素 (与 hoverChain 语义一致)
-        public static Rectangle[] UiaProbeChain(Point pt)
+        //
+        // 🔴 超时隔离 (2026-10-17 11:30, 修「切换不够快」): UIA 的 FromPoint 遇到卡死的目标进程会一直等到
+        // COM 超时 —— 实测日志 `hover uia chain ... in 10054ms`。挂在细化线程上 = 整个细化管线被堵 10 秒,
+        // 期间所有细化结果都过期, 鼠标早移走了 → 看到的就是"卡"。
+        // 做法: 真正查询丢到一次性后台线程, 本线程最多等 budgetMs, 超时返空 (这一笔放弃, 下一笔照常)。
+        public static Rectangle[] UiaProbeChain(Point pt) { return UiaProbeChain(pt, 400); }
+
+        public static Rectangle[] UiaProbeChain(Point pt, int budgetMs)
+        {
+            Rectangle[] res = null;
+            System.Threading.Thread probe = new System.Threading.Thread(delegate ()
+            {
+                try { res = UiaProbeChainCore(pt); } catch { res = null; }
+            });
+            probe.IsBackground = true; // 超时后它自己慢慢跑到 COM 超时, 与我们无关, 也不阻塞进程退出
+            probe.Start();
+            // 正常命中 20~220ms 就回; 超过 budgetMs 说明对方忙/卡 → 这笔作废, 绝不拖累后续
+            if (!probe.Join(budgetMs)) { Log("uia probe timeout: >" + budgetMs + "ms, skipped"); return new Rectangle[0]; }
+            return res ?? new Rectangle[0];
+        }
+
+        static Rectangle[] UiaProbeChainCore(Point pt)
         {
             List<Rectangle> chain = new List<Rectangle>();
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -1506,12 +2044,69 @@ partial class ShotService
             return chain.ToArray();
         }
 
-        // UIA 子树命中 (悬停主入口): ① FromPoint 直达叶子 ② 不中回落 FromHandle 逐层下钻
-        // 返回整条父子链 [0]=窗口 → [n-1]=最深元素; PixPin「鼠标滚轮切换父子元素」就用这条链 (官方: 配置-截图-UI 检测=检测元素)
-        Rectangle[] UiaChainAt(IntPtr hwnd, Point pt)
+        // 诊断用 (2026-10-17): 从指定窗口 FromHandle 逐层下钻, 每层都记类名+名称+控件类型
+        // 用途: 判断任务栏(Win11 XAML)这类壳窗口到底能不能钻到按钮级 — 拿数据决定怎么做, 不靠猜
+        public static string UiaDrillDump(IntPtr hwnd, Point pt)
+        {
+            var sb = new System.Text.StringBuilder("[");
+            try
+            {
+                var cur = System.Windows.Automation.AutomationElement.FromHandle(hwnd);
+                int n = 0;
+                var walker = System.Windows.Automation.TreeWalker.ControlViewWalker;
+                while (cur != null && n < 14)
+                {
+                    string cn = "", nm = "", ct = "", aid = "";
+                    try { cn = cur.Current.ClassName; } catch { }
+                    try { nm = cur.Current.Name; } catch { }
+                    try { ct = cur.Current.ControlType.ProgrammaticName; } catch { }
+                    try { aid = cur.Current.AutomationId; } catch { }
+                    var r = RectOf(cur);
+                    if (n > 0) sb.Append(",");
+                    sb.Append("{\"d\":" + n + ",\"class\":\"" + JsonEscape(cn) + "\",\"name\":\"" + JsonEscape(nm)
+                        + "\",\"type\":\"" + JsonEscape(ct) + "\",\"aid\":\"" + JsonEscape(aid)
+                        + "\",\"r\":\"" + r.X + "," + r.Y + " " + r.Width + "x" + r.Height + "\"}");
+                    // 下钻: 找包含该点且面积最小的子元素 (与悬停逻辑同一套判据)
+                    System.Windows.Automation.AutomationElement next = null;
+                    double best = double.MaxValue;
+                    System.Windows.Automation.AutomationElementCollection kids = null;
+                    try { kids = cur.FindAll(System.Windows.Automation.TreeScope.Children, System.Windows.Automation.Condition.TrueCondition); }
+                    catch { }
+                    if (kids != null) foreach (System.Windows.Automation.AutomationElement k in kids)
+                    {
+                        try
+                        {
+                            var kr = k.Current.BoundingRectangle;
+                            if (kr.IsEmpty || kr.Width < 4 || kr.Height < 4) continue;
+                            if (pt.X >= kr.Left && pt.X < kr.Right && pt.Y >= kr.Top && pt.Y < kr.Bottom)
+                            {
+                                double area = kr.Width * kr.Height;
+                                if (area < best) { best = area; next = k; }
+                            }
+                        }
+                        catch { }
+                    }
+                    n++;
+                    if (next == null) break;
+                    cur = next;
+                }
+            }
+            catch (Exception ex) { sb.Append(",{\"err\":\"" + JsonEscape(ex.Message) + "\"}"); }
+            sb.Append("]");
+            return sb.ToString();
+        }
+
+        // 自测入口 (/uia): 与悬停走完全同一条实现, 保证"看到的"就是"实际的"
+        public static Rectangle[] UiaChainStatic(IntPtr hwnd, Point pt) { return ChainAt(hwnd, pt); }
+
+        // 链路计算 (静态: uiaFailStreak 也是 static, 自测接口才能直接复用同一条实现)
+        static Rectangle[] ChainAt(IntPtr hwnd, Point pt)
         {
             var chain = new List<Rectangle>();
             var sw = System.Diagnostics.Stopwatch.StartNew();
+            // 目标窗口面积 (判"末层是不是还停在整块壳上"用)
+            long winRectArea = 0;
+            try { RECT w0; if (GetWindowRect(hwnd, out w0)) winRectArea = (long)Math.Max(0, w0.Right - w0.Left) * Math.Max(0, w0.Bottom - w0.Top); } catch { }
             // ① 首选 FromPoint 原生命中 (直达叶子, 精度=PixPin 同级), 再截取目标窗口以下的链
             try
             {
@@ -1531,7 +2126,14 @@ partial class ShotService
                     if (start < 0) start = 0; // 比对失败也用全链 (窗口 rect 可能因 DPI/阴影偏差)
                     for (int i = start; i < probe.Length; i++) chain.Add(probe[i]);
                 }
-                if (chain.Count > 1) // depth<=1 = FromPoint 只命中桌面根/窗口壳 (任务栏/Shell 常见) → 走 FromHandle 兜底
+                // 🔴 判断"够不够细"而不是"够不够长" (2026-10-17 修任务栏识别):
+                // 原判据 chain.Count>1 只看层数。任务栏实测 FromPoint 恰好给 2 层 [桌面根, Shell_TrayWnd],
+                // Count=2 就 early return → 永远停在整条栏, FromHandle 下钻根本没机会跑。
+                // 新判据: 末层面积 >= 目标窗口面积的 60% = 还是"整块壳", 说明没钻进去 → 继续往下钻。
+                Rectangle lastR = chain.Count > 0 ? chain[chain.Count - 1] : Rectangle.Empty;
+                double winArea = (double)winRectArea;
+                bool tooCoarse = winArea > 0 && lastR.Width * (double)lastR.Height >= winArea * 0.6;
+                if (chain.Count > 1 && !tooCoarse)
                 {
                     uiaFailStreak = 0;
                     return chain.ToArray();
@@ -1543,7 +2145,30 @@ partial class ShotService
                 Log("uia probe err: " + ex.Message); // FromPoint 失败回落旧逻辑, 不累计熔断
             }
             // ② 兜底: FromHandle + 逐层 FindAll
-            chain.AddRange(UiaFallbackChain(hwnd, pt));
+            // 🔴 XAML 宿主修正 (2026-10-17 任务栏): WindowFromPointEx 下钻到的可能是
+            //   `Windows.UI.Composition.DesktopWindowContentBridge`(DesktopWindowXamlSource) 而不是 Shell_TrayWnd。
+            //   从这个 XAML 宿主 FromHandle 钻, 子树是空的 → 永远只有整条栏。改从它的父窗口(Shell_TrayWnd)开始钻。
+            IntPtr drillRoot = hwnd;
+            try
+            {
+                System.Text.StringBuilder cnx = new System.Text.StringBuilder(96); GetClassNameW(drillRoot, cnx, 96);
+                if (cnx.ToString() == "Windows.UI.Composition.DesktopWindowContentBridge")
+                {
+                    IntPtr par = GetParentW(drillRoot);
+                    if (par != IntPtr.Zero) { drillRoot = par; Log("uia drill root -> parent (XAML host)"); }
+                }
+            }
+            catch { }
+            chain.AddRange(UiaFallbackChain(drillRoot, pt));
+            // 下钻回来若首项不是 hwnd 本身 (换了根), 补回真实窗口层, 保证链语义仍是 [窗口, …, 最深]
+            if (drillRoot != hwnd && chain.Count > 0)
+            {
+                RECT hr2; if (GetWindowRect(hwnd, out hr2))
+                {
+                    Rectangle hrr = Rectangle.FromLTRB(hr2.Left, hr2.Top, hr2.Right, hr2.Bottom);
+                    if (chain[0] != hrr) chain.Insert(0, hrr);
+                }
+            }
             // 慢只记日志不禁用: 首查慢是 Chromium 惰性建树 (实测 1761ms), 第二笔就走缓存 — 以前"慢5次全局禁UIA"把精度砍没了
             if (sw.ElapsedMilliseconds > 800) Log("hover uia slow: " + sw.ElapsedMilliseconds + "ms depth=" + chain.Count + " (不禁用, 记录观察)");
             else uiaFailStreak = 0;
@@ -1564,12 +2189,15 @@ partial class ShotService
         }
 
         // 检测结果回 UI 线程: 换框 + 联合区域重绘 (选区已有时只更新字段不重绘, OnPaint 本来就不画 hover)
-        // ---- 橙框滑动过渡: 从当前框平滑滑到新框, ~90ms smoothstep ----
+        // ---- 橙框滑动过渡: 同窗微调 90ms smoothstep; 换窗口 110ms 稍快版 (老大: 动画要有, 但不能拖) ----
         Rectangle animFrom = Rectangle.Empty, animTgt = Rectangle.Empty;
         DateTime animT0;
+        double animDurMs = 35;
         Timer animTimer; // UI 线程创建 (ApplyHover 经 BeginInvoke, 天然在 UI 线程)
 
-        void ApplyHover(Rectangle nr)
+        void ApplyHover(Rectangle nr) { ApplyHover(nr, false); }
+
+        void ApplyHover(Rectangle nr, bool crossWindow)
         {
             try
             {
@@ -1580,8 +2208,9 @@ partial class ShotService
                     {
                         if (IsDisposed) return;
                         if (nr == animTgt && (animTimer == null || !animTimer.Enabled)) return; // 无变化
+                        double dur = 35; // 最快档 (老大 10-17 二次提速: 60ms 还嫌慢)
                         Rectangle cur = hoverWin; // 动画进行中 hoverWin=当前插值位置, 从这续滑 (修: 用 animFrom 会跳回起点)
-                        if (cur == nr) { animTgt = nr; return; }
+                        if (cur == nr) { animTgt = nr; return; } // 已在目标框: 什么都不做 (别打断进行中的滑动)
                         // 空框↔实框 (高亮出现/消失) 直接切换, 滑动只用于框与框之间
                         if (nr == Rectangle.Empty || cur == Rectangle.Empty)
                         {
@@ -1589,16 +2218,20 @@ partial class ShotService
                             SetHoverWin(nr);
                             return;
                         }
-                        animFrom = cur; animTgt = nr; animT0 = DateTime.Now;
+                        animFrom = cur; animTgt = nr;
+                        // 🔴 动画进行中换目标: 保持原终点时刻, 不重启 — 否则每个新目标都从当前位置重新
+                        //    35ms 慢启动(smoothstep 起步缓), UIA 链连环出新目标时上边界一次挪一点 = 爬行
+                        //    (老大实测"识别到最大窗口时, 上边界像卡住一样很慢的向上放大")
+                        if (animTimer == null || !animTimer.Enabled) { animT0 = DateTime.Now; animDurMs = dur; }
                         if (animTimer == null)
                         {
-                            animTimer = new Timer { Interval = 16 };
+                            animTimer = new Timer { Interval = 8 }; // 125Hz: 滑动期间少画几帧也不会看出台阶
                             animTimer.Tick += delegate
                             {
                                 try
                                 {
                                     if (IsDisposed) { StopAnim(); return; }
-                                    double t = (DateTime.Now - animT0).TotalMilliseconds / 90.0; // 90ms (原 130ms 提速: 老大反馈反应再快点)
+                                    double t = (DateTime.Now - animT0).TotalMilliseconds / animDurMs;
                                     if (t >= 1.0)
                                     {
                                         StopAnim();
@@ -1645,11 +2278,13 @@ partial class ShotService
             // 为什么必须挖: 窗体背景是整张全屏冻结图, 脏区越大系统重绘背景越慢;
             // 原来一失效就是全屏, 滚轮连切层级时每格都全屏 blit → 卡成幻灯片 (用户实测"超级慢")。
             // 交集内部的画面(亮+原图)根本没变, 挖掉它 = 脏区从整屏降到一条边带。
-            Rectangle u = Rectangle.Union(a, b); u.Inflate(6, 6);
+            Rectangle u = Rectangle.Union(a, b);
+            // 外扩 12 而非 6: 橙框 2px 在 125%/150% DPI 窗体里被系统缩放, 脏区太紧会留残影
+            u.Inflate(12, 12);
             Rectangle inter = Rectangle.Intersect(a, b);
             if (inter.Width > 12 && inter.Height > 12)
             {
-                inter.Inflate(-4, -4); // 留 4px 保住边框线本身会被重画
+                inter.Inflate(-6, -6); // 留边保住边框线本身会被重画
                 using (Region rg = new Region(u)) { rg.Exclude(inter); Invalidate(rg); }
             }
             else Invalidate(u);
@@ -1690,6 +2325,26 @@ partial class ShotService
                 Log("capture: resized sel=" + sel.Width + "x" + sel.Height + " at " + sel.Location);
                 return;
             }
+            // 标注二次编辑: 结束拖动 (几何已在 DragAnnotEdit 里实时更新)
+            if (selAnnot != null && (selGrip >= 0 || selMoving) && e.Button == MouseButtons.Left)
+            {
+                string what = selMoving ? "move" : ("grip" + selGrip);
+                selGrip = -1; selMoving = false;
+                Cursor = Cursors.Default;
+                InvalidateAnnot(selAnnot);
+                Log("capture: edit end " + what + " kind=" + selAnnot.Kind
+                    + " rect=" + selAnnot.Rect.Width + "x" + selAnnot.Rect.Height
+                    + (selAnnot.Pts != null ? " pts=" + selAnnot.Pts.Count : ""));
+                return;
+            }
+            // 选区拖动结束
+            if (movingSel && e.Button == MouseButtons.Left)
+            {
+                movingSel = false;
+                Cursor = Cursors.SizeAll; // 还悬停在选区内, 光标保持四向箭头
+                Log("capture: sel moved -> " + sel.Width + "x" + sel.Height + " at " + sel.Location);
+                return;
+            }
             // pending 未拖动 = 选中悬停窗口 (自动检测完成, 等价框选)
             if (pendingDown && e.Button == MouseButtons.Left && !dragging && !hasSel)
             {
@@ -1726,6 +2381,7 @@ partial class ShotService
                     else if (cur.Kind == Annot.K_ARROW) { if (cur.Pts.Count >= 2 && cur.Pts[0] != cur.Pts[1]) PushAnnot(cur); }
                     else if (cur.Rect.Width > 2 && cur.Rect.Height > 2) PushAnnot(cur);
                     cur = null;
+                    penShiftOn = false; penShiftLine = false; // Shift 直线状态复位
                 }
             }
             }
@@ -1747,11 +2403,22 @@ partial class ShotService
                 base.OnPaintBackground(e);
         }
 
+        // 选区/工具/编辑态变化时, 让放大镜小窗跟着同步 (重涂选取外像素 / 该藏就藏)
+        void InvalidateMag()
+        {
+            // 放大镜在独立小窗上, 不占遮罩像素 —— 这里只让窗内内容跟着同步一次 (选区变了要重涂选取外像素)
+            SyncMagForm();
+        }
+
         // 只重绘「旧框∪新框」外扩区域 — 全屏 blit 由 BackgroundImage 系统完成
         void InvalidateSelArea(Rectangle oldSel)
         {
+            InvalidateMag(); // 放大镜内容跟着同步 (选区变了要重涂选取外像素)
             Rectangle u = Rectangle.Union(RectangleToClient(sel), RectangleToClient(oldSel));
-            u.Inflate(70, 45); // 覆盖红框线宽 + 尺寸文字 + 露亮边缘
+            // 🔴 但尺寸文字画在选区上方 (ty = d.Top - 字号高 - 6, Consolas 11 约 18px 高),
+            //    旧值 25 不够盖住 → 移动选区时旧位置的「303 x 216」擦不掉, 反复堆叠半透明黑 = 老大实测"黑色薄膜"拖影。
+            u.Inflate(35, 25);
+            u.Inflate(0, 14); // 上下再各让 14px, 覆盖尺寸文字与手柄
             Invalidate(u);
         }
 
@@ -1793,11 +2460,227 @@ partial class ShotService
 
         void CancelAll() { Log("capture: cancelled (esc/right-click)"); Close(); }
 
+        // ==================== 标注二次编辑 (PixPin MarkSecondaryEditing = Enable) ====================
+        // 证据: pixpin.cn/docs/mark/base-use 「除铅笔和橡皮擦外, 大多数标注支持二次调整。但要先切换到
+        //       对应的工具, 再点击已有标注进行编辑。」pixpin.cn/docs/mark/line 调整态:
+        //         「拖动控制点可调整节点位置 / 拖动线段中间区域可整体移动 / 鼠标滚轮调整粗细」
+        // 配置键实证 (PixPin.exe 明文): MarkSecondaryEditing = Disable | Enable | Completely Disable
+        //        | Only Text Annotation Available; eraserReEditing; disableArrowCurveControlPoint
+        static bool CanSecondEdit(Annot a)
+        {
+            if (a == null) return false;
+            // 铅笔 / 橡皮擦 / 荧光笔 / 马赛克: PixPin 明确排除 (画布型标注没有"节点"可拖)
+            return a.Kind == Annot.K_RECT || a.Kind == Annot.K_ELLIPSE || a.Kind == Annot.K_ARROW
+                || a.Kind == Annot.K_POLY || a.Kind == Annot.K_TEXT || a.Kind == Annot.K_SEQ;
+        }
+
+        // 当前工具"接管"哪些标注类型 —— 与 PixPin 的 switchMarkEditTypeTo 一一对应
+        bool ToolOwns(Annot a)
+        {
+            if (a == null || tool == null || !CanSecondEdit(a)) return false;
+            switch (tool)
+            {
+                case "rect": return a.Kind == Annot.K_RECT;
+                case "ellipse": return a.Kind == Annot.K_ELLIPSE;
+                case "arrow": return a.Kind == Annot.K_ARROW;
+                case "poly": case "curve": return a.Kind == Annot.K_POLY;
+                case "seq": return a.Kind == Annot.K_SEQ;
+                default: return false;
+            }
+        }
+
+        // 标注的控制点 (屏坐标)。箭头/折线 = 各顶点 + 中点(线段中间拖动=整体平移, PixPin 同款语义)
+        Point[] AnnotGrips(Annot a)
+        {
+            if (a == null) return new Point[0];
+            if (a.Kind == Annot.K_ARROW && a.Pts != null && a.Pts.Count >= 2)
+                return new Point[] { a.Pts[0], a.Pts[1] };
+            if (a.Kind == Annot.K_POLY && a.Pts != null && a.Pts.Count > 0)
+                return a.Pts.ToArray();
+            if (a.Kind == Annot.K_RECT || a.Kind == Annot.K_ELLIPSE)
+            {
+                Rectangle s = a.Rect;
+                int mx = s.X + s.Width / 2, my = s.Y + s.Height / 2;
+                return new Point[] {
+                    new Point(s.Left, s.Top), new Point(mx, s.Top), new Point(s.Right, s.Top),
+                    new Point(s.Right, my), new Point(s.Right, s.Bottom), new Point(mx, s.Bottom),
+                    new Point(s.Left, s.Bottom), new Point(s.Left, my)
+                };
+            }
+            return new Point[0];
+        }
+
+        // 点是否落在标注本体上 (用于"点已有标注 = 进入编辑态"); 容差按线宽放大
+        bool HitAnnotBody(Annot a, Point sp)
+        {
+            int tol = Math.Max(6, (int)a.Width + 4);
+            if (a.Kind == Annot.K_ARROW && a.Pts != null && a.Pts.Count >= 2)
+                return DistToSegment(sp, a.Pts[0], a.Pts[1]) <= tol;
+            if (a.Kind == Annot.K_POLY && a.Pts != null && a.Pts.Count >= 2)
+            {
+                for (int i = 0; i + 1 < a.Pts.Count; i++)
+                    if (DistToSegment(sp, a.Pts[i], a.Pts[i + 1]) <= tol) return true;
+                return false;
+            }
+            if (a.Kind == Annot.K_RECT || a.Kind == Annot.K_ELLIPSE || a.Kind == Annot.K_TEXT || a.Kind == Annot.K_SEQ)
+            {
+                Rectangle r = BoundsOf(a); r.Inflate(tol, tol);
+                return r.Contains(sp);
+            }
+            return false;
+        }
+
+        static double DistToSegment(Point p, Point a, Point b)
+        {
+            double dx = b.X - a.X, dy = b.Y - a.Y;
+            if (dx == 0 && dy == 0) return Math.Sqrt((p.X - a.X) * (double)(p.X - a.X) + (p.Y - a.Y) * (double)(p.Y - a.Y));
+            double t = ((p.X - a.X) * dx + (p.Y - a.Y) * dy) / (dx * dx + dy * dy);
+            if (t < 0) t = 0; else if (t > 1) t = 1;
+            double px = a.X + t * dx, py = a.Y + dy * t;
+            return Math.Sqrt((p.X - px) * (p.X - px) + (p.Y - py) * (p.Y - py));
+        }
+
+        // 命中控制点 (屏坐标)。返回下标; -1 = 没中控制点但可能中了本体
+        int HitGrip(Annot a, Point sp)
+        {
+            Point[] gs = AnnotGrips(a);
+            for (int i = 0; i < gs.Length; i++)
+                if (Math.Abs(sp.X - gs[i].X) <= 7 && Math.Abs(sp.Y - gs[i].Y) <= 7) return i;
+            return -1;
+        }
+
+        void ClearSelAnnot()
+        {
+            if (selAnnot == null) return;
+            Annot a = selAnnot;
+            selAnnot = null; selGrip = -1; selMoving = false;
+            InvalidateAnnot(a);
+        }
+
+        // 在鼠标按下时判定: 点已有标注 → 返回 true 表示"本次按下已被二次编辑接管"
+        bool TryBeginAnnotEdit(Point sp)
+        {
+            // 先看是否点中当前选中的控制点
+            if (selAnnot != null)
+            {
+                int g = HitGrip(selAnnot, sp);
+                if (g >= 0)
+                {
+                    selGrip = g;
+                    selGripOrig = selAnnot.Rect;
+                    selDragSnap = new Annot { Kind = selAnnot.Kind, Rect = selAnnot.Rect, Pts = selAnnot.Pts == null ? null : new List<Point>(selAnnot.Pts) };
+                    Log("capture: edit grip " + g + " on kind=" + selAnnot.Kind);
+                    return true;
+                }
+                if (HitAnnotBody(selAnnot, sp) && sp != Point.Empty)
+                {
+                    selMoving = true;
+                    selDragFrom = sp;
+                    selDragSnap = new Annot { Kind = selAnnot.Kind, Rect = selAnnot.Rect, Pts = selAnnot.Pts == null ? null : new List<Point>(selAnnot.Pts) };
+                    Cursor = Cursors.SizeAll;
+                    Log("capture: edit move start kind=" + selAnnot.Kind);
+                    return true;
+                }
+            }
+            // 再找: 当前工具能接管的已提交标注 (后画的优先)
+            for (int i = annots.Count - 1; i >= 0; i--)
+            {
+                Annot a = annots[i];
+                if (!ToolOwns(a)) continue;
+                if (HitGrip(a, sp) >= 0 || HitAnnotBody(a, sp))
+                {
+                    ClearSelAnnot();
+                    selAnnot = a;
+                    InvalidateAnnot(a);
+                    Log("capture: annot selected kind=" + a.Kind + " (已进入二次编辑态)");
+                    return true;
+                }
+            }
+            // 点空白 = 退出编辑态, 交还正常绘制流程
+            if (selAnnot != null) { ClearSelAnnot(); return false; }
+            return false;
+        }
+
+        // 拖动中: 更新选中标注的几何
+        void DragAnnotEdit(Point sp)
+        {
+            if (selAnnot == null) return;
+            Annot a = selAnnot;
+            Rectangle old = BoundsOf(a);
+            if (selMoving)
+            {
+                int dx = sp.X - selDragFrom.X, dy = sp.Y - selDragFrom.Y;
+                if (a.Pts != null && a.Pts.Count > 0 && a.Kind != Annot.K_SEQ)
+                {
+                    a.Pts.Clear();
+                    foreach (Point p in selDragSnap.Pts) a.Pts.Add(new Point(p.X + dx, p.Y + dy));
+                }
+                a.Rect = new Rectangle(selDragSnap.Rect.X + dx, selDragSnap.Rect.Y + dy, selDragSnap.Rect.Width, selDragSnap.Rect.Height);
+            }
+            else if (selGrip >= 0)
+            {
+                if (a.Kind == Annot.K_ARROW && a.Pts != null && a.Pts.Count >= 2)
+                {
+                    Point anchor = a.Pts[1 - selGrip];
+                    Point np = ((Control.ModifierKeys & Keys.Shift) != 0) ? ShiftConstrain(anchor, sp) : sp;
+                    a.Pts[selGrip] = np;
+                    a.Rect = Normalize(a.Pts[0], a.Pts[1]);
+                }
+                else if (a.Kind == Annot.K_POLY && a.Pts != null && selGrip < a.Pts.Count)
+                {
+                    Point prev = a.Pts[Math.Max(0, selGrip - 1)];
+                    Point np = ((Control.ModifierKeys & Keys.Shift) != 0) ? ShiftConstrain(prev, sp) : sp;
+                    a.Pts[selGrip] = np;
+                }
+                else if (a.Kind == Annot.K_RECT || a.Kind == Annot.K_ELLIPSE)
+                {
+                    a.Rect = ResizeSelBy(selGripOrig, sp, selGrip);
+                }
+            }
+            InvalidateAnnot(Rectangle.Union(old, BoundsOf(a)));
+        }
+
+        // 选中态视觉: 虚线包围框 + 8px 控制点 (PixPin 调整态同款:
+        //   「折线处于调整状态时会显示控制点」; 颜色沿用截图里的天蓝 #2F9CF5)
+        void DrawAnnotEditOverlay(Graphics g, Point offset)
+        {
+            Annot a = selAnnot;
+            if (a == null) return;
+            Rectangle b = BoundsOf(a);
+            Rectangle cb = new Rectangle(b.X - offset.X, b.Y - offset.Y, b.Width, b.Height);
+            using (Pen dp = new Pen(Color.FromArgb(160, 47, 156, 245), 1f))
+            {
+                dp.DashStyle = System.Drawing.Drawing2D.DashStyle.Dash;
+                g.DrawRectangle(dp, cb);
+            }
+            foreach (Point pt in AnnotGrips(a))
+            {
+                Rectangle rc = new Rectangle(pt.X - offset.X - 4, pt.Y - offset.Y - 4, 8, 8);
+                using (SolidBrush wb = new SolidBrush(Color.White)) g.FillEllipse(wb, rc);
+                using (Pen bp = new Pen(Color.FromArgb(47, 156, 245), 1.6f)) g.DrawEllipse(bp, rc);
+            }
+        }
+
+        // 删除选中的标注 (PixPin: 「标注处于选中状态时, 按下 Delete 或 Backspace 即可删除」)
+        bool DeleteSelAnnot()
+        {
+            if (selAnnot == null) return false;
+            Annot a = selAnnot;
+            selAnnot = null; selGrip = -1; selMoving = false;
+            annots.Remove(a);
+            redoStack.Clear();
+            InvalidateAnnot(a);
+            Log("capture: annot deleted kind=" + a.Kind + " (" + annots.Count + " left)");
+            return true;
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            // 放大镜已移到 MagForm 顶层小窗, 遮罩不再需要放大镜残影自愈 (那段会变成无限失效循环)
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            // 放大镜层级不走这里: 它现在画在独立的置顶小窗上 (MagForm), 天然压在工具条之上。
             if (!hasSel)
             {
                 using (SolidBrush dim = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
@@ -1823,6 +2706,7 @@ partial class ShotService
                     }
                     else g.FillRectangle(dim, e.ClipRectangle);
                 }
+                // 放大镜不在这里画: 它在独立顶层小窗 (MagForm) 上, 靠 SyncMagForm 同步 — 只有这样才压得住工具条
                 return;
             }
             Rectangle d = RectangleToClient(sel); // 客户区坐标 = 冻结图坐标 (窗体原点=虚拟屏原点)
@@ -1879,8 +2763,16 @@ partial class ShotService
             }
             else
             {
-                using (Pen p = new Pen(Color.Red, 2)) g.DrawRectangle(p, d);
-                DrawSelHandles(g); // 选框 8 手柄 (PixPin 同款)
+                // 选区边框: 天蓝 #2F9CF5 (照 PixPin 截图实测色, 旧版是纯红)
+                // 🔴 1px + PixelOffsetMode.Half: 旧 1.5px 笔宽落在整数坐标上会跨两个物理像素,
+                //    横竖边抗锯齿受力不同 → 老大实测"有的线粗有的线细"。Half 对齐后每条边都精确落在一列/行像素内, 粗细恒定。
+                var pom = g.PixelOffsetMode;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                using (Pen p = new Pen(Color.FromArgb(47, 156, 245), 1f)) g.DrawRectangle(p, d);
+                g.PixelOffsetMode = pom;
+                DrawSelHandles(g);    // 选框 8 手柄 (PixPin 同款)
+                DrawAnnotEditOverlay(g, Point.Empty); // 标注二次编辑: 虚线框 + 控制点
+                // 放大镜 (MagForm 顶层小窗) 不在此绘制, 见 SyncMagForm
             }
             using (Font f = new Font("Consolas", 11))
             using (Brush b = new SolidBrush(Color.Yellow))
@@ -1940,6 +2832,27 @@ partial class ShotService
             double len = Math.Sqrt(dx * dx + dy * dy);
             double snap = Math.Round(Math.Atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
             return new Point(p0.X + (int)Math.Round(len * Math.Cos(snap)), p0.Y + (int)Math.Round(len * Math.Sin(snap)));
+        }
+
+        // 铅笔 Shift 直线角度吸附 (PixPin pencilShiftMode 六档, 键名与取值均实证自 PixPin.exe 明文):
+        //   0=free angle straight line(默认, 不吸附) 1=45 2=30 3=15 4=10 5=5 度
+        static Point SnapByDegrees(Point p0, Point p1, int deg)
+        {
+            double dx = p1.X - p0.X, dy = p1.Y - p0.Y;
+            if (dx == 0 && dy == 0) return p1;
+            double len = Math.Sqrt(dx * dx + dy * dy);
+            double step = deg * Math.PI / 180.0;
+            double snap = Math.Round(Math.Atan2(dy, dx) / step) * step;
+            return new Point(p0.X + (int)Math.Round(len * Math.Cos(snap)), p0.Y + (int)Math.Round(len * Math.Sin(snap)));
+        }
+
+        static Point SnapPencilMode(Point p0, Point p1)
+        {
+            int m;
+            string v = Cfg("mark.pencilShiftMode", "");
+            if (int.TryParse(v, out m) && m >= 1 && m <= 5)
+                return SnapByDegrees(p0, p1, m == 1 ? 45 : m == 2 ? 30 : m == 3 ? 15 : m == 4 ? 10 : 5);
+            return p1; // 0 / 未设置 = 自由角度直线 (PixPin 默认)
         }
 
         // 正片叠底合成 (PixPin 荧光笔默认混合模式): region(32bpp 副本) 内按 mask 笔画 alpha 逐像素乘色
@@ -2218,15 +3131,30 @@ partial class ShotService
         }
 
         // ---- 导出: 冻结图选区 + 标注 合成 ----
+        // 复制选区: 裁图 → 贴标注 → 写剪贴板。
+        // 🔴 内存不足根因 (2026-10-17 16:52 实锤): 自动识别的窗口矩形可能超出屏幕
+        //    (日志 "window picked (auto-detect) 2514x1362", 而虚拟屏只有 2496x1404, 且起点 -9,-9)
+        //    → frozen.Clone(d) 越界, GDI+ 抛的就是「内存不足」而不是参数错误。
+        //    修法: 先与 frozen 求交 (钳进图内), 越界部分不拷; 全空则明确报错。
         Bitmap CropTaken()
         {
             Rectangle d = sel;
             d.Offset(-SystemInformation.VirtualScreen.X, -SystemInformation.VirtualScreen.Y);
-            Bitmap outBmp = frozen.Clone(d, frozen.PixelFormat);
+            Rectangle img = new Rectangle(0, 0, frozen.Width, frozen.Height);
+            if (!d.IntersectsWith(img))
+            {
+                Log("capture: crop out of frozen " + d + " vs " + img);
+                throw new InvalidOperationException("选区不在截图范围内");
+            }
+            Rectangle dc = Rectangle.Intersect(d, img);
+            if (dc.Width != d.Width || dc.Height != d.Height)
+                Log("capture: crop clamped " + d.Width + "x" + d.Height + " -> " + dc.Width + "x" + dc.Height);
+            Bitmap outBmp = frozen.Clone(dc, PixelFormat.Format32bppArgb);
             using (Graphics g = Graphics.FromImage(outBmp))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                DrawAnnots(g, new Point(sel.X, sel.Y)); // 屏坐标 -> 选区局部坐标
+                // 标注坐标是屏坐标: 减去「钳后的左上角」, 越界标注自然被裁掉
+                DrawAnnots(g, new Point(sel.X + (dc.X - d.X), sel.Y + (dc.Y - d.Y)));
             }
             return outBmp;
         }
@@ -2560,7 +3488,10 @@ partial class ShotService
         ToolbarPanel bar;
         void ShowBar()
         {
-            if (bar != null) { PlaceBar(); bar.Visible = true; return; }
+            // 🔴 首次/重新显示必须强制重绘 (2026-10-17 bug: 选区完成后工具条是空白, 鼠标滑过才出现)
+            // 原因: Visible=false→true 时 WinForms 不会立刻发 WM_PAINT, 自绘的 ToolbarPanel 就一直是空面板,
+            // 直到鼠标进入触发 Invalidate 才画出来。Invalidate(true) 连子控件一起作废 + Update() 立刻出图。
+            if (bar != null) { PlaceBar(); bar.Visible = true; bar.Invalidate(true); bar.Update(); return; }
             bar = new ToolbarPanel();
             // [标注组]
             bar.Add("rect", "矩形标注", delegate { PickTool("rect"); }, true).ToolKey = "rect";
@@ -2571,23 +3502,48 @@ partial class ShotService
             foldArrowBtn.Fold = new string[] { "arrow", "poly", "curve" };
             foldArrowBtn.OnFold = delegate
             {
-                ContextMenuStrip m = DarkMenu();
-                string[][] members = { new string[] { "arrow", "箭头标注" }, new string[] { "poly", "折线 (单击加点, 双击或回车收尾)" }, new string[] { "curve", "曲线 (单击加点, 双击或回车收尾)" } };
-                foreach (string[] mem in members)
+                // 复用同一个菜单对象 (2026-10-17): 每次 new ContextMenuStrip + 3 个带图标的项,
+                // 首次打开要现做图标位图 + 建句柄 → 老大实测"打开这个巨卡无比"。菜单建一次, 之后只改勾选态。
+                if (foldArrowMenu == null)
                 {
-                    string key = mem[0], label = mem[1];
-                    ToolStripItem it = m.Items.Add(label, MakeIcon(key, 18), delegate
+                    ContextMenuStrip m = DarkMenu();   // 深色皮肤/图标列/字体都在 DarkMenu 里统一设好
+                    // PixPin 同款: 图标 + 名称, 操作说明不进标题 (那是 tooltip 的事)
+                    string[][] members = {
+                        new string[] { "arrow", "箭头", "Shift+3" },
+                        new string[] { "poly",  "折线", "Shift+2" },
+                        new string[] { "curve", "曲线", "Shift+1" }
+                    };
+                    foldArrowMenuItems = new System.Collections.Generic.List<ToolStripItem>();
+                    foreach (string[] mem in members)
                     {
-                        foldArrowTool = key;
-                        foldArrowBtn.Icon = key;          // 槽位图标/提示换成新成员 (PixPin 同款: 谁最后用谁占槽)
-                        foldArrowBtn.Tip = FoldArrowTip();
-                        bar.Invalidate();
-                        PickTool(key);
-                        SaveMarkNow();
-                    });
-                    if (key == foldArrowTool) it.Font = new Font(it.Font, FontStyle.Bold);
+                        string key = mem[0];
+                        var it = new ToolStripMenuItem(mem[1], MakeIcon(key, 18), delegate
+                        {
+                            foldArrowTool = key;
+                            foldArrowBtn.Icon = key;
+                            foldArrowBtn.Tip = FoldArrowTip();
+                            bar.Invalidate();
+                            PickTool(key);
+                            SaveMarkNow();
+                        });
+                        it.Tag = key;
+                        it.ShortcutKeyDisplayString = mem[2];  // 快捷键右对齐灰字 (PixPin 同款)
+                        it.ForeColor = DarkUI.Text;
+                        foldArrowMenuItems.Add(it);
+                        m.Items.Add(it);
+                    }
+                    // 每次弹出前刷新当前项加粗 (复用菜单, 但高亮要跟当前工具走)
+                    m.Opening += delegate
+                    {
+                        foreach (ToolStripItem it2 in foldArrowMenuItems)
+                        {
+                            bool cur = (string)it2.Tag == foldArrowTool;
+                            it2.Font = new Font(m.Font, cur ? FontStyle.Bold : FontStyle.Regular);
+                        }
+                    };
+                    foldArrowMenu = m;
                 }
-                m.Show(bar, foldArrowBtn.Rect.X, foldArrowBtn.Rect.Bottom + 2);
+                foldArrowMenu.Show(bar, foldArrowBtn.Rect.X, foldArrowBtn.Rect.Bottom + 2);
             };
             bar.Add("pen", "自由画笔", delegate { PickTool("pen"); }, true).ToolKey = "pen";
             bar.Add("highlight", "荧光笔 (拖动高亮文字/区域)", delegate { PickTool("highlight"); }, true).ToolKey = "highlight";
@@ -2623,6 +3579,8 @@ partial class ShotService
         void PickTool(string id)
         {
             CommitTextInput();
+            // 切工具 = 退出标注二次编辑态 (PixPin: 二次编辑要「先切换到对应的工具」, 换工具即脱钩)
+            ClearSelAnnot();
             tool = (tool == id) ? null : id;
             foreach (var b in bar.Btns)
                 if (b.IsToggle) b.On = (b.ToolKey == tool) || (b.Fold != null && System.Array.IndexOf(b.Fold, tool) >= 0); // 折叠槽: 任一成员激活都亮
@@ -2644,6 +3602,9 @@ partial class ShotService
             MarkProp();
             PlacePropBar();
             propBar.Visible = true;
+            // 🔴 同上: 属性栏首次显示也要强制重绘, 否则是空面板要等鼠标滑过 (老大实测"点箭头属性不出来, 滑过才出")
+            propBar.Invalidate(true);
+            propBar.Update();
         }
 
         void BuildPropBar()
@@ -3032,13 +3993,79 @@ partial class ShotService
             m.Show(propBar, familyBtn.Rect.X, familyBtn.Rect.Bottom + 2);
         }
 
+        // 深色皮肤下拉菜单 (2026-10-17 重写): ToolStrip 的默认渲染器不认 BackColor/ForeColor,
+        // 只设颜色会得到"系统浅色菜单 + 深色底"的花斑(老大截图: 白色边距块 / 蓝底盖住图标 / 字看不清)。
+        // 必须换掉渲染器 + 关掉系统主题, 才真的整块深色。
         static ContextMenuStrip DarkMenu()
         {
             ContextMenuStrip m = new ContextMenuStrip();
             m.BackColor = Color.FromArgb(40, 41, 46);
             m.ForeColor = DarkUI.Text;
-            m.ShowImageMargin = false;
+            m.ShowImageMargin = true;                 // 要图标就必须留图标列
+            m.ImageScalingSize = new Size(16, 16);
+            m.Padding = new Padding(1);
+            m.Font = new Font("Microsoft YaHei UI", 9.5f);
+            m.RenderMode = ToolStripRenderMode.Professional; // 关键: 换成可自定的渲染器 (系统默认不理颜色)
+            m.Renderer = new DarkMenuRenderer();
+            m.DropShadowEnabled = false;              // 系统阴影在深色底上是一圈白边
+            // 🔴 卡顿主因: ToolStrip 默认不开双缓冲, 每移动一格都整块重绘 → 悬停换项时闪/卡。
+            // 反射打开 DoubleBuffered (属性 protected, 老框架唯一办法)
+            try
+            {
+                var pi = typeof(ToolStrip).GetProperty("DoubleBuffered",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (pi != null) pi.SetValue(m, true, null);
+            }
+            catch { }
             return m;
+        }
+
+        // 深色菜单渲染: 深底 + 深色高亮 + 亮色字, 不留白边不留系统蓝
+        sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
+        {
+            public DarkMenuRenderer() : base(new DarkMenuColors()) { }
+            protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+            {
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(40, 41, 46))) e.Graphics.FillRectangle(b, e.AffectedBounds);
+            }
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+            {
+                using (Pen p = new Pen(Color.FromArgb(66, 68, 78)))
+                    e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+            }
+            protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
+            {
+                // 图标列: 与菜单同色 (不画系统那条浅色竖条)
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(40, 41, 46))) e.Graphics.FillRectangle(b, e.AffectedBounds);
+            }
+            protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+            {
+                Rectangle r = new Rectangle(1, e.Item.ContentRectangle.Y - 2, e.Item.Width - 2, e.Item.ContentRectangle.Height + 4);
+                using (SolidBrush b = new SolidBrush(e.Item.Selected ? Color.FromArgb(58, 76, 112) : Color.FromArgb(40, 41, 46)))
+                    e.Graphics.FillRectangle(b, r);
+            }
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+            {
+                e.TextColor = e.Item.Enabled ? DarkUI.Text : Color.FromArgb(110, 116, 126);
+                base.OnRenderItemText(e);
+            }
+            protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+            {
+                using (Pen p = new Pen(Color.FromArgb(62, 64, 74))) e.Graphics.DrawLine(p, 6, e.Item.Height / 2, e.Item.Width - 6, e.Item.Height / 2);
+            }
+        }
+
+        sealed class DarkMenuColors : ProfessionalColorTable
+        {
+            public override Color MenuItemSelected { get { return Color.FromArgb(58, 76, 112); } }
+            public override Color MenuItemSelectedGradientBegin { get { return Color.FromArgb(58, 76, 112); } }
+            public override Color MenuItemSelectedGradientEnd { get { return Color.FromArgb(58, 76, 112); } }
+            public override Color MenuItemBorder { get { return Color.FromArgb(58, 76, 112); } }
+            public override Color MenuBorder { get { return Color.FromArgb(66, 68, 78); } }
+            public override Color ToolStripDropDownBackground { get { return Color.FromArgb(40, 41, 46); } }
+            public override Color ImageMarginGradientBegin { get { return Color.FromArgb(40, 41, 46); } }
+            public override Color ImageMarginGradientMiddle { get { return Color.FromArgb(40, 41, 46); } }
+            public override Color ImageMarginGradientEnd { get { return Color.FromArgb(40, 41, 46); } }
         }
 
         void HidePropBar() { if (propBar != null) propBar.Visible = false; }
@@ -3052,7 +4079,11 @@ partial class ShotService
             if (y + bar.Height > vs.Bottom - 4) y = sel.Top - bar.Height - 8; // 下方放不下翻到选区上方
             if (y < vs.Top + 4) y = vs.Top + 4;
             Point c = RectangleToClient(new Rectangle(new Point(x, y), Size.Empty)).Location;
+            // 🔴 层级 (老大 2026-10-17): 放大镜永远盖在工具条上面。
+            //    真层级靠 MagForm 独立顶层小窗实现 (子控件永远画在父窗体自绘之上, 遮罩里画不可能赢)。
+            //    工具条这里只负责贴边挪位, 不做让位。
             bar.Left = c.X; bar.Top = c.Y;
+            if (magForm != null && !magForm.IsDisposed && magForm.Visible) magForm.BringToFront(); // 工具条刚挪动, 把它顶回去
         }
 
         void HideBar() { if (bar != null) bar.Visible = false; HidePropBar(); }
@@ -3539,18 +4570,274 @@ partial class ShotService
             catch (Exception ex) { Log("result form err: " + ex.Message); }
         }
 
+        // 精细调整选区 (PixPin 官方规则, pixpin.cn/docs/capture/static-capture 原文):
+        //   方向键        = 整个选框朝该方向移动 1 像素
+        //   Shift+方向键  = 该方向对应的边「向内收缩」1 像素
+        //   Ctrl +方向键  = 该方向对应的边「向外扩展」1 像素
+        // 只在"已有选区 + 没在画标注 + 没在输文字 + 没在录屏"时接管按键, 其余一律放行(不抢别人键位)。
+        // 边角语义(PixPin 同款方向感):
+        //   左 ←  收缩=左边往右移(Left+1)   扩展=左边往左移(Left-1)
+        //   右 →  收缩=右边往左移(Right-1)  扩展=右边往右移(Right+1)
+        //   上 ↑  收缩=上边往下移(Top+1)    扩展=上边上移(Top-1)
+        //   下 ↓  收缩=下边往上移(Bottom-1) 扩展=下边下移(Bottom+1)
+        // 收缩到最小 3x3 就停住(再小就选不到东西, PixPin 也不允许).
+        // 自测口: 供 HTTP /capture 查询当前遮罩状态 (仅读, 不改任何状态)
+        public string DebugJson()
+        {
+            string selDesc = selAnnot == null ? "null" :
+                "{\"kind\":" + selAnnot.Kind + ",\"grips\":" + AnnotGrips(selAnnot).Length
+                + ",\"x\":" + selAnnot.Rect.X + ",\"y\":" + selAnnot.Rect.Y
+                + ",\"w\":" + selAnnot.Rect.Width + ",\"h\":" + selAnnot.Rect.Height
+                + ",\"pts\":" + (selAnnot.Pts == null ? 0 : selAnnot.Pts.Count) + "}";
+            return "{\"ok\":true,\"hasSel\":" + (hasSel ? "true" : "false")
+                + ",\"tool\":" + (tool == null ? "null" : "\"" + JsonEscape(tool) + "\"")
+                + ",\"textMode\":" + (textMode ? "true" : "false")
+                + ",\"annotCount\":" + annots.Count
+                + ",\"selAnnot\":" + selDesc
+                + ",\"x\":" + sel.X + ",\"y\":" + sel.Y + ",\"w\":" + sel.Width + ",\"h\":" + sel.Height
+                + ",\"virtualScreen\":[" + SystemInformation.VirtualScreen.X + "," + SystemInformation.VirtualScreen.Y + "," + SystemInformation.VirtualScreen.Width + "," + SystemInformation.VirtualScreen.Height + "]}";
+        }
+
+        // 自测口: 造标注 (不伪造鼠标消息), 用于验证二次编辑/删除/平移
+        //   kind: rect|ellipse|arrow|poly ; 坐标为屏坐标
+        public string DebugAddAnnot(string kind, string data)
+        {
+            Annot a = new Annot();
+            a.Color = Color.FromArgb(242, 80, 59); a.Width = 3;
+            if (kind == "arrow" || kind == "poly")
+            {
+                a.Kind = kind == "arrow" ? Annot.K_ARROW : Annot.K_POLY;
+                a.Pts = new List<Point>();
+                foreach (string seg in data.Split(';'))
+                {
+                    string[] xy = seg.Split(',');
+                    if (xy.Length == 2) a.Pts.Add(new Point(int.Parse(xy[0]), int.Parse(xy[1])));
+                }
+                if (a.Kind == Annot.K_ARROW) a.Rect = Normalize(a.Pts[0], a.Pts[1]);
+            }
+            else
+            {
+                a.Kind = kind == "ellipse" ? Annot.K_ELLIPSE : Annot.K_RECT;
+                string[] v = data.Split(',');
+                a.Rect = new Rectangle(int.Parse(v[0]), int.Parse(v[1]), int.Parse(v[2]), int.Parse(v[3]));
+            }
+            annots.Add(a);
+            InvalidateAnnot(a);
+            Log("capture: debug annot added kind=" + a.Kind);
+            return DebugJson();
+        }
+
+        // 自测口: 走与真实鼠标完全相同的二次编辑路径 (点中/拖拽/删除)
+        public string DebugClick(int x, int y)
+        {
+            bool took = TryBeginAnnotEdit(new Point(x, y));
+            return "{\"ok\":true,\"took\":" + (took ? "true" : "false") + ",\"state\":" + DebugJson() + "}";
+        }
+
+        public string DebugDrag(int x, int y)
+        {
+            DragAnnotEdit(new Point(x, y));
+            return "{\"ok\":true,\"state\":" + DebugJson() + "}";
+        }
+
+        public string DebugEndDrag()
+        {
+            selGrip = -1; selMoving = false;
+            return "{\"ok\":true,\"state\":" + DebugJson() + "}";
+        }
+
+        public string DebugDelSel()
+        {
+            bool del = DeleteSelAnnot();
+            return "{\"ok\":true,\"deleted\":" + (del ? "true" : "false") + ",\"state\":" + DebugJson() + "}";
+        }
+
+        // 自测口: 切工具 (走真实 PickTool 路径, 含二次编辑态脱钩)
+        public string DebugSetTool(string t)
+        {
+            if (t == "(none)" || t == "none") { if (tool != null) PickTool(tool); }
+            else PickTool(t);
+            return "{\"ok\":true,\"state\":" + DebugJson() + "}";
+        }
+
+        // 自测口: 直接设选区 = 模拟"刚框选完"的状态 (不伪造鼠标消息, 避免真去动用户的鼠标)
+        public string DebugSetSel(Rectangle r)
+        {
+            if (r.Width < 3) r.Width = 3;
+            if (r.Height < 3) r.Height = 3;
+            sel = r; hasSel = true;
+            Invalidate();
+            try { PlaceBar(); } catch { }
+            Log("capture: debug sel set -> " + r.Width + "x" + r.Height + " at " + r.Location);
+            return DebugJson();
+        }
+
+        // 自测口: 走与真实按键完全相同的处理路径 (PreProcessMessage → ProcessCmdKey),
+        // 不经过系统钩子, 因此测的是同一条判断/几何代码, 但不会去动用户键盘。
+        public string DebugKey(string key, string mod)
+        {
+            // copy = 直接走键盘处理里那条「确认/复制」路径 (验鼠标涂色/全屏裁剪有没有内存不足)
+            if (key == "copy") { ActCopy(); return "{\"ok\":true,\"copied\":true}"; }
+            // colorcopy = 走 C 取色同一条函数 (验 Shift 决定格式、提示条弹出)
+            if (key == "colorcopy")
+            {
+                bool done = ActCopyColor();
+                return "{\"ok\":true,\"handled\":" + (done ? "true" : "false") + ",\"toast\":\"" + (magToast == null ? "" : magToast) + "\"}";
+            }
+            Keys k = Keys.None;
+            if (key == "left") k = Keys.Left;
+            else if (key == "right") k = Keys.Right;
+            else if (key == "up") k = Keys.Up;
+            else if (key == "down") k = Keys.Down;
+            else return "{\"ok\":false,\"error\":\"key must be left/right/up/down\"}";
+            bool shift = mod == "shift", ctrl = mod == "ctrl";
+            Keys kd = k | (shift ? Keys.Shift : Keys.None) | (ctrl ? Keys.Control : Keys.None);
+            bool handled = TryNudgeSelection(kd);
+            return "{\"ok\":true,\"handled\":" + (handled ? "true" : "false") + ",\"state\":" + DebugJson() + "}";
+        }
+
+        bool TryNudgeSelection(Keys keyData)
+        {
+            if (!hasSel || textMode || cur != null || dragging || recMode) return false;
+            Keys k = keyData & Keys.KeyCode;
+            bool shift = (keyData & Keys.Shift) == Keys.Shift;
+            bool ctrl = (keyData & Keys.Control) == Keys.Control;
+            int dx = 0, dy = 0, dl = 0, dt = 0, dr = 0, db = 0;
+            if (k == Keys.Left) { if (shift) dl = 1; else if (ctrl) dl = -1; else dx = -1; }
+            else if (k == Keys.Right) { if (shift) dr = -1; else if (ctrl) dr = 1; else dx = 1; }
+            else if (k == Keys.Up) { if (shift) dt = 1; else if (ctrl) dt = -1; else dy = -1; }
+            else if (k == Keys.Down) { if (shift) db = -1; else if (ctrl) db = 1; else dy = 1; }
+            else return false;
+
+            Rectangle old = sel;
+            int l = sel.Left + dx + dl, t = sel.Top + dy + dt;
+            int r = sel.Right + dx + dr, b = sel.Bottom + dy + db;
+            const int MINSZ = 3;
+            if (r - l < MINSZ) { if (dl != 0) l = r - MINSZ; else if (dr != 0) r = l + MINSZ; }
+            if (b - t < MINSZ) { if (dt != 0) t = b - MINSZ; else if (db != 0) b = t + MINSZ; }
+            // 钳在虚拟屏幕内(移出屏幕外就选不到/截出黑边)
+            Rectangle vs = SystemInformation.VirtualScreen;
+            if (dx != 0) { if (l < vs.Left) { l = vs.Left; r = l + sel.Width; } if (r > vs.Right) { r = vs.Right; l = r - sel.Width; } }
+            if (dy != 0) { if (t < vs.Top) { t = vs.Top; b = t + sel.Height; } if (b > vs.Bottom) { b = vs.Bottom; t = b - sel.Height; } }
+            sel = Rectangle.FromLTRB(l, t, r, b);
+            if (sel == old) return true;   // 到边界了: 吞掉按键但不重绘
+            InvalidateSelArea(old);
+            InvalidateSelArea(sel);
+            if (bar != null && bar.Visible) PlaceBar();   // 工具条跟着选区走
+            // 尺寸数字是 OnPaint 里按 sel 实时画的, 重绘即更新, 无需单独刷新
+            Log("capture: nudge sel key=" + k + (shift ? "+Shift" : ctrl ? "+Ctrl" : "") + " -> " + sel.Width + "x" + sel.Height + " at " + sel.Location);
+            return true;
+        }
+
+        // Shift 按住 → 放大镜颜色显示/复制切换到 #RRGGBB (PixPin MagnifierColorFormat 同款)。
+        // 为什么读实时按键状态而不是 Control.ModifierKeys: 复制时按的是 C, Shift 状态在组合键里传不进来;
+        // 实时查 VK_SHIFT 高位置位 = 物理上正按着, 显示和复制永远一致。
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern short GetAsyncKeyState(int vKey);
+        static bool ShiftDown() { return (GetAsyncKeyState(0x10) & 0x8000) != 0; }
+
+        // C = 复制放大镜当前像素颜色 (PixPin 原文: 「按下 C 即可复制当前像素的颜色值,
+        //   颜色默认以 RGB 格式显示, 可以按 Shift 切换到 Hex 格式」)
+        // 🔴 老大 2026-10-17 纠正语义: Shift 只负责「切换显示格式」, C 只负责「复制屏幕上当前显示的那串」。
+        //    不管按没按 Shift, C 复制的东西必须跟放大镜上看到的一模一样, 不做二次换算。
+        //    复制成功给可见提示 (之前静默, 老大以为没反应)。
+        bool ActCopyColor()
+        {
+            if (textMode || cur != null || !lastMouseOk || !MagOn() || frozen == null) return false;
+            try
+            {
+                int px = Math.Max(0, Math.Min(lastMousePt.X, frozen.Width - 1));
+                int py = Math.Max(0, Math.Min(lastMousePt.Y, frozen.Height - 1));
+                Color c = frozen.GetPixel(px, py);
+                string s = MagColorText(c);
+                Clipboard.SetText(s);
+                Log("capture: color copied " + s + " @(" + lastMousePt.X + "," + lastMousePt.Y + ")");
+                ShowMagToast("已复制 " + s);
+            }
+            catch (Exception ex) { Log("copy color err: " + ex.Message); ShowMagToast("复制颜色失败: " + ex.Message); }
+            return true;
+        }
+
+        // 放大镜上显示的颜色文本 (显示与复制共用同一个函数, 保证「看到什么就复制什么」)
+        string MagColorText(Color c)
+        {
+            return ShiftDown()
+                ? ("#" + c.R.ToString("X2") + c.G.ToString("X2") + c.B.ToString("X2"))
+                : ("RGB(" + c.R + "," + c.G + "," + c.B + ")");
+        }
+
+        // 复制提示: 放大镜上方浮一小条, 1.2 秒后自己消失 (不打断截图, 不抢焦点)
+        string magToast = null;
+        DateTime magToastAt = DateTime.MinValue;
+        Timer magToastTimer;
+        void ShowMagToast(string text)
+        {
+            magToast = text;
+            magToastAt = DateTime.Now;
+            if (magToastTimer == null)
+            {
+                magToastTimer = new Timer();
+                magToastTimer.Interval = 1200;
+                magToastTimer.Tick += delegate
+                {
+                    magToastTimer.Stop();
+                    magToast = null;
+                    if (magForm != null && !magForm.IsDisposed && magForm.Visible) magForm.Invalidate();
+                };
+            }
+            magToastTimer.Stop();
+            magToastTimer.Start();
+            if (magForm != null && !magForm.IsDisposed && magForm.Visible) magForm.Invalidate();
+        }
+
+        // Shift 按下/抬起 → 立刻重画放大镜 (不能等下一次鼠标移动)
+        void RefreshMagNow()
+        {
+            SyncMagForm();   // Shift 切换颜色格式 → 立刻重画小窗 (内容签名里带 Shift 状态, 必重画)
+        }
+
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            // Shift 只改放大镜颜色显示格式 (RGB ↔ #RRGGBB), 不走后续逻辑, 但要立刻重画放大镜
+            if ((keyData & Keys.KeyCode) == Keys.ShiftKey)
+            {
+                RefreshMagNow();
+            }
+            else if ((keyData & Keys.KeyCode) == Keys.C) // 复制当前像素颜色: 优先给放大镜取色, 其它 C 快捷键不抢
+            {
+                if (ActCopyColor()) return true;
+            }
             if (keyData == Keys.Escape)
             {
                 if (recMode) { RecCancelFromBar(); return true; } // 录制中 Esc = 取消录制 (遮罩仍有焦点时可用)
                 if (textMode) { CancelTextInput(); return true; }
                 if (cur != null) { var c = cur; cur = null; InvalidateAnnot(c); return true; } // 丢弃当前笔画
+                if (selAnnot != null) { ClearSelAnnot(); Log("capture: edit deselect (esc)"); return true; } // 先退编辑态
                 CancelAll();
                 return true;
             }
             if (keyData == (Keys.Control | Keys.Z)) { ActUndo(); return true; } // Ctrl+Z 撤销
             if (keyData == (Keys.Control | Keys.Y)) { ActRedo(); return true; } // Ctrl+Y 重做
+            // C = 复制放大镜当前像素颜色 → 已提到 ProcessCmdKey 顶部 (ActCopyColor), 这里不再重复
+            // 二次编辑态: Delete/Backspace 删除选中标注 (PixPin 原文: 「标注处于选中状态时, 按下 Delete 或 Backspace 即可删除」)
+            if ((keyData == Keys.Delete || keyData == Keys.Back) && selAnnot != null) { DeleteSelAnnot(); return true; }
+            // 二次编辑态: 方向键微调 (无选区手柄冲突时优先给标注, 1px 粒度, Shift=10px)
+            if (selAnnot != null && (keyData & Keys.KeyCode) >= Keys.Left && (keyData & Keys.KeyCode) <= Keys.Down)
+            {
+                Keys kk = keyData & Keys.KeyCode;
+                int step = ((keyData & Keys.Shift) == Keys.Shift) ? 10 : 1;
+                int ddx = kk == Keys.Left ? -step : kk == Keys.Right ? step : 0;
+                int ddy = kk == Keys.Up ? -step : kk == Keys.Down ? step : 0;
+                Rectangle old = BoundsOf(selAnnot);
+                if (selAnnot.Pts != null && selAnnot.Pts.Count > 0 && selAnnot.Kind != Annot.K_SEQ)
+                    for (int i = 0; i < selAnnot.Pts.Count; i++)
+                        selAnnot.Pts[i] = new Point(selAnnot.Pts[i].X + ddx, selAnnot.Pts[i].Y + ddy);
+                selAnnot.Rect = new Rectangle(selAnnot.Rect.X + ddx, selAnnot.Rect.Y + ddy, selAnnot.Rect.Width, selAnnot.Rect.Height);
+                InvalidateAnnot(Rectangle.Union(old, BoundsOf(selAnnot)));
+                return true;
+            }
+            // 精细调整选区: 方向键移动 1px / Shift+方向键收缩 1px / Ctrl+方向键扩展 1px (PixPin 官方规则)
+            if (TryNudgeSelection(keyData)) return true;
             // 折线/曲线: 回车收尾, 退格删最后一个点 (PixPin BrokenLine 同款手势)
             if (cur != null && cur.Kind == Annot.K_POLY)
             {
@@ -3582,7 +4869,9 @@ partial class ShotService
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             base.OnFormClosed(e);
+            DisposeMagForm();   // 🔴 必须先收小窗: 它是独立顶层窗体, 不跟着遮罩自动关, 漏了就永远糊在屏上
             Log("capture: overlay closed (" + annots.Count + " annots)");
+            if (live == this) live = null;
             captureBusy = false; // 遮罩退出(动作完成或取消), 允许下一次截图
 
             if (BackgroundImage != null) { try { BackgroundImage.Dispose(); } catch { } BackgroundImage = null; }
@@ -3803,6 +5092,7 @@ partial class ShotService
 
         public readonly List<Btn> Btns = new List<Btn>();
         int hoverIdx = -1;
+        Btn foldHot;   // 鼠标当前压在哪个折叠槽的三角列上 (画高亮用)
         readonly ToolTip tip = new ToolTip();
         string shownTip;
 
@@ -4140,7 +5430,7 @@ partial class ShotService
                     catch { w = 40; }
                     b.Rect = new Rectangle(x, 4, w, 40); x += w;
                 }
-                else { b.Rect = new Rectangle(x, 4, 40, 40); x += 40; }
+                else { b.Rect = new Rectangle(x, 4, b.Fold != null ? 58 : 40, 40); x += b.Fold != null ? 58 : 40; } // 折叠槽多留 18px 给右侧三角列 (PixPin 同款)
             }
             if (tf != null) try { tf.Dispose(); } catch { }
             bool tall = false;
@@ -4345,12 +5635,23 @@ partial class ShotService
                 }
                 if (b.Fold != null)
                 {
-                    // 折叠组标记: 右下角小实心三角 (PixPin 同款), 提示此槽位可展开换邻居工具
-                    using (SolidBrush fb = new SolidBrush(Color.FromArgb(190, 205, 212)))
-                        g.FillPolygon(fb, new Point[] { new Point(b.Rect.Right - 10, b.Rect.Bottom - 5), new Point(b.Rect.Right - 4, b.Rect.Bottom - 5), new Point(b.Rect.Right - 4, b.Rect.Bottom - 11) });
+                    // 折叠组 (2026-10-17 按 PixPin 重做): 右侧独立一列 18px, 画竖分隔线 + 居中三角, 整列都是热区。
+                    // 旧做法只在右下角画个 6px 三角、热区 15x13 —— 老大实测"这个下拉三角不好按"。
+                    Rectangle fr = FoldRect(b);
+                    using (Pen sp = new Pen(Color.FromArgb(70, 255, 255, 255)))
+                        g.DrawLine(sp, fr.X, b.Rect.Y + 10, fr.X, b.Rect.Bottom - 10);
+                    // 三角: 居中, 8x5, 鼠标在列上时变亮 (给"能按"的反馈)
+                    bool hot = foldHot == b;
+                    int cx = fr.X + fr.Width / 2, cy = b.Rect.Y + b.Rect.Height / 2;
+                    using (SolidBrush fb = new SolidBrush(hot ? Color.FromArgb(255, 255, 255) : Color.FromArgb(190, 205, 212)))
+                        g.FillPolygon(fb, new Point[] {
+                            new Point(cx - 4, cy - 2), new Point(cx + 4, cy - 2), new Point(cx, cy + 3) });
                 }
             }
         }
+
+        // 折叠槽右侧三角列 (PixPin 同款): 整列可点, 不是只有那个小三角
+        static Rectangle FoldRect(Btn b) { return new Rectangle(b.Rect.Right - 18, b.Rect.Y, 18, b.Rect.Height); }
 
         // 悬停滚轮调值入口 (PixPin 同款): 命中按钮且挂了 OnWheel/OnSpin 才消费
         public bool WheelAt(Point p, bool up)
@@ -4375,6 +5676,10 @@ partial class ShotService
         {
             base.OnMouseMove(e);
             int h = Hit(e.Location);
+            // 折叠三角列悬停高亮 (PixPin 同款: 移到三角上时三角变亮, 明确告诉你这里能按)
+            Btn hotNow = (h >= 0) ? Btns[h] : null;
+            if (hotNow != null && hotNow.Fold != null && !FoldRect(hotNow).Contains(e.Location)) hotNow = null;
+            if (hotNow != foldHot) { foldHot = hotNow; Invalidate(); }
             if (h != hoverIdx)
             {
                 hoverIdx = h;
@@ -4410,9 +5715,9 @@ partial class ShotService
             if (e.Button == MouseButtons.Left && h >= 0 && h == hoverIdx)
             {
                 Btn b = Btns[h];
-                if (b.Enabled && b.Fold != null && b.OnFold != null && e.X >= b.Rect.Right - 15 && e.Y >= b.Rect.Bottom - 13)
+                if (b.Enabled && b.Fold != null && b.OnFold != null && FoldRect(b).Contains(e.Location))
                 {
-                    b.OnFold(); Log("fold menu open " + string.Join("/", b.Fold)); // 点折叠三角 = 展开组菜单
+                    b.OnFold(); Log("fold menu open " + string.Join("/", b.Fold)); // 点折叠三角列 = 展开组菜单 (整列 18px 可点)
                 }
                 else if (b.Enabled && b.GridKind == 1 && b.OnPick != null)
                 {

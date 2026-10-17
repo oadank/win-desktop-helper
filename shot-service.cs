@@ -177,6 +177,7 @@ public partial class ShotService
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);   // Win10 1703+; -4 = PerMonitorV2
     [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int value);               // 2 = per-monitor
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll", EntryPoint = "GetParent")] static extern IntPtr GetParentW(IntPtr h);
     [DllImport("user32.dll")] static extern uint GetClipboardSequenceNumber();   // 读序号不开剪贴板, 零竞争
     [DllImport("user32.dll")] static extern IntPtr GetClipboardOwner();          // 当前剪贴板所有者窗口(判来源应用)
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
@@ -3436,7 +3437,15 @@ public partial class ShotService
                     else
                     {
                         var swp = System.Diagnostics.Stopwatch.StartNew();
-                        if (q.ContainsKey("diag"))
+                        if (q.ContainsKey("drill"))
+                        {
+                            // 诊断: 指定窗口 FromHandle 逐层下钻 (查任务栏能不能到按钮级)
+                            IntPtr dh = FindWindowW("Shell_TrayWnd", null);
+                            if (q.ContainsKey("hwnd")) { long hv; if (long.TryParse(q["hwnd"], out hv)) dh = new IntPtr(hv); }
+                            body = "{\"ok\":true,\"hwnd\":" + dh.ToInt64() + ",\"drill\":" + CaptureOverlay.UiaDrillDump(dh, new Point(ux, uy)) + "}";
+                            Log("[uia-drill] " + ux + "," + uy + " hwnd=" + dh.ToInt64());
+                        }
+                        else if (q.ContainsKey("diag"))
                         {
                             var sbd = new System.Text.StringBuilder("{\"ok\":true,\"hit\":[");
                             bool first = true;
@@ -3483,9 +3492,10 @@ public partial class ShotService
                         {
                             IntPtr hw = WindowFromPointEx(new POINT { x = ux, y = uy }, IntPtr.Zero);
                             Point up = new Point(ux, uy);
-                            Rectangle[] ch = CaptureOverlay.UiaProbeChain(up);
-                            string src = "frompoint";
-                            if (ch.Length <= 1) { ch = CaptureOverlay.UiaFallbackChain(hw, up); src = "fromhandle"; }
+                            // 直接用悬停真正走的同一条链 (UiaChainAt 内部已含 FromPoint→FromHandle 回落),
+                            // 别在这再写一套 depth<=1 的判断 — 两套判据不一致会导致"自测看着浅、实际也浅"查不出问题
+                            Rectangle[] ch = CaptureOverlay.UiaChainStatic(hw, up);
+                            string src = "chain";
                             System.Text.StringBuilder sb2 = new System.Text.StringBuilder("{\"ok\":true,\"x\":" + ux + ",\"y\":" + uy + ",\"hwnd\":" + hw.ToInt64() + ",\"src\":\"" + src + "\",\"depth\":" + ch.Length + ",\"ms\":" + swp.ElapsedMilliseconds + ",\"chain\":[");
                             for (int i = 0; i < ch.Length; i++)
                             {
@@ -3632,6 +3642,79 @@ public partial class ShotService
                         return; // 已手写响应, 不走公共 JSON 响应
                     }
                     else { code = 404; body = "{\"ok\":false,\"error\":\"image not found\"}"; }
+                }
+                else if (path == "/capture")
+                {
+                    // 区域截图遮罩的远程控制口 (自测/自动化用, 不弹泡):
+                    //   /capture            唤起遮罩(异步, 立即返回)
+                    //   /capture?state=1    查当前遮罩状态 {hasSel,x,y,w,h,tool,textMode,annotCount}
+                    //   /capture?sel=x,y,w,h  预设选区(模拟框选完成, 不真的动鼠标)
+                    //   /capture?key=left|right|up|down&mod=shift|ctrl|none  走与键盘完全相同的 ProcessCmdKey 路径
+                    //   /capture?close=1    关掉遮罩(等同 Esc)
+                    CaptureOverlay ov = CaptureOverlay.live;
+                    if (q.ContainsKey("state"))
+                    {
+                        if (ov == null || ov.IsDisposed) body = "{\"ok\":false,\"error\":\"no overlay\"}";
+                        else body = ov.DebugJson();
+                    }
+                    else if (q.ContainsKey("sel"))
+                    {
+                        if (ov == null || ov.IsDisposed) { code = 409; body = "{\"ok\":false,\"error\":\"no overlay\"}"; }
+                        else
+                        {
+                            string[] p = q["sel"].Split(',');
+                            int sx, sy, sw, sh;
+                            if (p.Length != 4 || !int.TryParse(p[0], out sx) || !int.TryParse(p[1], out sy) || !int.TryParse(p[2], out sw) || !int.TryParse(p[3], out sh))
+                            { code = 400; body = "{\"ok\":false,\"error\":\"sel=x,y,w,h\"}"; }
+                            else body = ov.DebugSetSel(new Rectangle(sx, sy, sw, sh));
+                        }
+                    }
+                    else if (q.ContainsKey("key"))
+                    {
+                        if (ov == null || ov.IsDisposed) { code = 409; body = "{\"ok\":false,\"error\":\"no overlay\"}"; }
+                        else body = ov.DebugKey(q["key"], q.ContainsKey("mod") ? q["mod"] : "none");
+                    }
+                    else if (q.ContainsKey("addannot"))
+                    {
+                        if (ov == null || ov.IsDisposed) { code = 409; body = "{\"ok\":false,\"error\":\"no overlay\"}"; }
+                        else body = ov.DebugAddAnnot(q["addannot"], q.ContainsKey("data") ? q["data"] : "0,0,10,10");
+                    }
+                    else if (q.ContainsKey("click"))
+                    {
+                        if (ov == null || ov.IsDisposed) { code = 409; body = "{\"ok\":false,\"error\":\"no overlay\"}"; }
+                        else
+                        {
+                            int cx, cy;
+                            string[] cp = q["click"].Split(',');
+                            if (cp.Length == 2 && int.TryParse(cp[0], out cx) && int.TryParse(cp[1], out cy)) body = ov.DebugClick(cx, cy);
+                            else { code = 400; body = "{\"ok\":false,\"error\":\"click=x,y\"}"; }
+                        }
+                    }
+                    else if (q.ContainsKey("drag"))
+                    {
+                        if (ov == null || ov.IsDisposed) { code = 409; body = "{\"ok\":false,\"error\":\"no overlay\"}"; }
+                        else
+                        {
+                            int dx2, dy2;
+                            string[] dp = q["drag"].Split(',');
+                            if (dp.Length == 2 && int.TryParse(dp[0], out dx2) && int.TryParse(dp[1], out dy2)) body = ov.DebugDrag(dx2, dy2);
+                            else { code = 400; body = "{\"ok\":false,\"error\":\"drag=x,y\"}"; }
+                        }
+                    }
+                    else if (q.ContainsKey("enddrag")) { if (ov != null) body = ov.DebugEndDrag(); else body = "{\"ok\":false}"; }
+                    else if (q.ContainsKey("delsel")) { if (ov != null) body = ov.DebugDelSel(); else body = "{\"ok\":false}"; }
+                    else if (q.ContainsKey("settool")) { if (ov != null) body = ov.DebugSetTool(q["settool"]); else body = "{\"ok\":false}"; }
+                    else if (q.ContainsKey("close"))
+                    {
+                        if (ov != null && !ov.IsDisposed) { try { ov.Close(); } catch { } }
+                        body = "{\"ok\":true,\"closed\":true}";
+                    }
+                    else
+                    {
+                        ShowCaptureOverlay(); // 内部走 BeginInvoke, 立即返回
+                        body = "{\"ok\":true,\"started\":true}";
+                    }
+                    Log("[capture] " + target);
                 }
                 else if (path == "/guide")
                 {
