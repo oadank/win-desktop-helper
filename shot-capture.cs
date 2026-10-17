@@ -4553,6 +4553,28 @@ partial class ShotService
             catch (Exception ex) { Log("capture beginui err: " + ex.Message); return false; }
         }
 
+        // 同步封送到 UI 线程并等它做完 (自测口专用).
+        // 🔴 为什么必须有这个: HTTP 请求线程是 MTA, 而 Clipboard 是 OLE 的东西, 只能在 STA 线程碰。
+        //    直接在被测函数里调 Clipboard 会抛「在可以调用 OLE 之前, 必须将当前线程设置为单线程单元(STA)模式」。
+        //    真实按键/鼠标走 UI 线程 (STA), 所以用户按键从来没这问题 —— 这个 helper 只为让自测口等价于真实按键。
+        void RunOnUiSync(Action a)
+        {
+            if (!IsHandleCreated || IsDisposed) { a(); return; }   // 没句柄可封送时直接跑 (总比静默不做好)
+            // 用「创建窗体句柄的线程 ID」判断, 不用 InvokeRequired (句柄未建时它恒返回 false, 会误判成"已在 UI 线程")
+            uint uiTid = 0;
+            try { uint pidTmp; uiTid = GetWindowThreadProcessId(Handle, out pidTmp); } catch { }
+            if (uiTid != 0 && uiTid == GetCurrentThreadId()) { a(); return; }  // 已经在 UI 线程上
+            try
+            {
+                using (System.Threading.ManualResetEvent done = new System.Threading.ManualResetEvent(false))
+                {
+                    BeginInvoke(new MethodInvoker(delegate { try { a(); } catch (Exception ex) { Log("capture uisync err: " + ex.Message); } finally { done.Set(); } }));
+                    done.WaitOne(3000);   // 最多等 3 秒, 防自测口把 HTTP 线程卡死
+                }
+            }
+            catch (Exception ex) { Log("capture uisync err: " + ex.Message); }
+        }
+
         // 遮罩已关后的结果兜底: 直接进剪贴板 + 托盘气泡 (ResultForm 需要活的消息循环, 遮罩没了就不弹窗)
         static void StructuredFallback(string title, string got, string e2)
         {
@@ -4677,12 +4699,26 @@ partial class ShotService
         public string DebugKey(string key, string mod)
         {
             // copy = 直接走键盘处理里那条「确认/复制」路径 (验鼠标涂色/全屏裁剪有没有内存不足)
-            if (key == "copy") { ActCopy(); return "{\"ok\":true,\"copied\":true}"; }
-            // colorcopy = 走 C 取色同一条函数 (验 Shift 决定格式、提示条弹出)
+            // 🔴 必须封送到 UI 线程: HTTP 处理线程是 MTA, 剪贴板(Clipboard.SetImage) 只能 STA 调, 否则报
+            //    「在可以调用 OLE 之前, 必须将当前线程设置为单线程单元(STA)模式」。真实按键走 UI 线程, 本来就没这问题。
+            if (key == "copy")
+            {
+                string err = null;
+                RunOnUiSync(delegate { try { ActCopy(); } catch (Exception ex) { err = ex.Message; } });
+                if (err != null) return "{\"ok\":false,\"error\":\"" + JsonEscape(err) + "\"}";
+                return "{\"ok\":true,\"copied\":true}";
+            }
+            // colorcopy = 走 C 取色同一条函数 (验 Shift 决定格式、提示条弹出) —— 同样要封送到 UI 线程
             if (key == "colorcopy")
             {
-                bool done = ActCopyColor();
-                return "{\"ok\":true,\"handled\":" + (done ? "true" : "false") + ",\"toast\":\"" + (magToast == null ? "" : magToast) + "\"}";
+                bool done = false; string err2 = null; string toast = null;
+                RunOnUiSync(delegate
+                {
+                    try { done = ActCopyColor(); toast = magToast; }
+                    catch (Exception ex) { err2 = ex.Message; }
+                });
+                if (err2 != null) return "{\"ok\":false,\"error\":\"" + JsonEscape(err2) + "\"}";
+                return "{\"ok\":true,\"handled\":" + (done ? "true" : "false") + ",\"toast\":\"" + JsonEscape(toast == null ? "" : toast) + "\"}";
             }
             Keys k = Keys.None;
             if (key == "left") k = Keys.Left;
