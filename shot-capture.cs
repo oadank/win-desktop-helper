@@ -521,11 +521,22 @@ partial class ShotService
             return f == "I" ? "I.II.III" : f == "a" ? "a.b.c" : f == "A" ? "A.B.C" : "1.2.3";
         }
         static int NearestIdx(int[] arr, int v) { int bi = 0, bd = int.MaxValue; for (int i = 0; i < arr.Length; i++) { int d = Math.Abs(arr[i] - v); if (d < bd) { bd = d; bi = i; } } return bi; }
+        // 折叠槽 (PixPin 同款): 箭头/折线/曲线共用按钮位, 谁最后用谁占槽, 落盘 mark.foldArrow
+        internal static string foldArrowTool = "arrow";
+        ToolbarPanel.Btn foldArrowBtn;
+        static string FoldArrowTip()
+        {
+            if (foldArrowTool == "poly") return "折线标注 (单击加点, 双击或回车收尾) · 右下角小三角展开换箭头/曲线";
+            if (foldArrowTool == "curve") return "曲线标注 (单击加点, 双击或回车收尾) · 右下角小三角展开换箭头/折线";
+            return "箭头标注 · 右下角小三角展开换折线/曲线";
+        }
         static CaptureOverlay()
         {
             try
             {
                 markLoaded = true;
+                string fa = Cfg("mark.foldArrow", "");
+                if (fa == "poly" || fa == "curve" || fa == "arrow") foldArrowTool = fa;
                 int ms2; if (int.TryParse(Cfg("mark.mosaicStrength", ""), out ms2) && ms2 >= 2 && ms2 <= 40) markMosaicStrength0 = ms2;
                 int ha2; if (int.TryParse(Cfg("mark.hlAlpha", ""), out ha2) && ha2 >= 0 && ha2 <= 255) markHlAlpha0 = HlAlphaNearest(ha2);
                 int mm2; if (int.TryParse(Cfg("mark.mosaicMode", ""), out mm2) && (mm2 == 0 || mm2 == 1)) markMosaicMode0 = mm2;
@@ -2400,9 +2411,30 @@ partial class ShotService
             // [标注组]
             bar.Add("rect", "矩形标注", delegate { PickTool("rect"); }, true).ToolKey = "rect";
             bar.Add("ellipse", "椭圆标注", delegate { PickTool("ellipse"); }, true).ToolKey = "ellipse";
-            bar.Add("arrow", "箭头标注", delegate { PickTool("arrow"); }, true).ToolKey = "arrow";
-            bar.Add("poly", "折线标注 (单击加点, 双击或回车收尾)", delegate { PickTool("poly"); }, true).ToolKey = "poly";
-            bar.Add("curve", "曲线标注 (单击加点, 双击或回车收尾)", delegate { PickTool("curve"); }, true).ToolKey = "curve";
+            // 折叠槽 (PixPin 同款): 箭头/折线/曲线共用一个按钮位 —— 点按钮用当前成员, 点右下角小三角展开换邻居工具
+            foldArrowBtn = bar.Add(foldArrowTool, FoldArrowTip(), delegate { PickTool(foldArrowTool); }, true);
+            foldArrowBtn.ToolKey = "arrowfold"; // 槽位键 ≠ 成员键 (PickTool 高亮按 Fold 成员匹配)
+            foldArrowBtn.Fold = new string[] { "arrow", "poly", "curve" };
+            foldArrowBtn.OnFold = delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                string[][] members = { new string[] { "arrow", "箭头标注" }, new string[] { "poly", "折线 (单击加点, 双击或回车收尾)" }, new string[] { "curve", "曲线 (单击加点, 双击或回车收尾)" } };
+                foreach (string[] mem in members)
+                {
+                    string key = mem[0], label = mem[1];
+                    ToolStripItem it = m.Items.Add(label, MakeIcon(key, 18), delegate
+                    {
+                        foldArrowTool = key;
+                        foldArrowBtn.Icon = key;          // 槽位图标/提示换成新成员 (PixPin 同款: 谁最后用谁占槽)
+                        foldArrowBtn.Tip = FoldArrowTip();
+                        bar.Invalidate();
+                        PickTool(key);
+                        SaveMarkNow();
+                    });
+                    if (key == foldArrowTool) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(bar, foldArrowBtn.Rect.X, foldArrowBtn.Rect.Bottom + 2);
+            };
             bar.Add("pen", "自由画笔", delegate { PickTool("pen"); }, true).ToolKey = "pen";
             bar.Add("highlight", "荧光笔 (拖动高亮文字/区域)", delegate { PickTool("highlight"); }, true).ToolKey = "highlight";
             bar.Add("mosaic", "马赛克 (拖动打码)", delegate { PickTool("mosaic"); }, true).ToolKey = "mosaic";
@@ -2439,7 +2471,7 @@ partial class ShotService
             CommitTextInput();
             tool = (tool == id) ? null : id;
             foreach (var b in bar.Btns)
-                if (b.IsToggle) b.On = (b.ToolKey == tool);
+                if (b.IsToggle) b.On = (b.ToolKey == tool) || (b.Fold != null && System.Array.IndexOf(b.Fold, tool) >= 0); // 折叠槽: 任一成员激活都亮
             bar.Invalidate();
             ShowPropBar();
             Log("capture: tool=" + (tool ?? "(none)"));
@@ -3567,6 +3599,8 @@ partial class ShotService
             public Action OnClick;
             public Action<bool> OnSpin;        // 一体化微调框: true=上三角(+1) false=下三角(-1)
             public Action<bool> OnWheel;       // 悬停滚轮调值 (PixPin 同款): true=上滚(+档) false=下滚(-档); null=不响应
+            public string[] Fold;              // 折叠组 (PixPin 同款): 非空 = 右下角画折叠三角, 点角落弹组菜单换成员工具
+            public Action OnFold;              // 点折叠角落的回调 (弹组菜单)
             public bool IsToggle, On, Enabled = true;
             public bool IsSpinner;             // PixPin 同款: 左半当前值文字 + 右半上▲下▼三角
             public Image Preview;              // 下拉按钮的当前预览图 (非空: 画图+右侧▾)
@@ -4143,6 +4177,12 @@ partial class ShotService
                     else
                         g.DrawImage(ic, b.Rect.X + 8, b.Rect.Y + 8, 24, 24);
                 }
+                if (b.Fold != null)
+                {
+                    // 折叠组标记: 右下角小实心三角 (PixPin 同款), 提示此槽位可展开换邻居工具
+                    using (SolidBrush fb = new SolidBrush(Color.FromArgb(190, 205, 212)))
+                        g.FillPolygon(fb, new Point[] { new Point(b.Rect.Right - 10, b.Rect.Bottom - 5), new Point(b.Rect.Right - 4, b.Rect.Bottom - 5), new Point(b.Rect.Right - 4, b.Rect.Bottom - 11) });
+                }
             }
         }
 
@@ -4204,7 +4244,11 @@ partial class ShotService
             if (e.Button == MouseButtons.Left && h >= 0 && h == hoverIdx)
             {
                 Btn b = Btns[h];
-                if (b.Enabled && b.GridKind == 1 && b.OnPick != null)
+                if (b.Enabled && b.Fold != null && b.OnFold != null && e.X >= b.Rect.Right - 15 && e.Y >= b.Rect.Bottom - 13)
+                {
+                    b.OnFold(); Log("fold menu open " + string.Join("/", b.Fold)); // 点折叠三角 = 展开组菜单
+                }
+                else if (b.Enabled && b.GridKind == 1 && b.OnPick != null)
                 {
                     int col = (e.X - b.Rect.X) / 40, row = (e.Y - b.Rect.Y) / 40, gi = row * 5 + col;
                     if (gi >= 0 && gi < b.Values.Length) { b.OnPick(b.Values[gi]); Log("style pick " + b.Values[gi]); }
