@@ -1114,6 +1114,26 @@ partial class ShotService
         {
             base.OnShown(e);
             Activate(); // 拿焦点: Esc 才可达
+            // 🔴 2026-10-17 补 (自测口拉遮罩被 Chrome 抢回前台的坑):
+            //    Activate() 只是"请求"激活, 当前台属于别的程序时 Windows 会拒绝, 前台仍留在原来那个窗口,
+            //    遮罩随即触发 OnDeactivate 的"失焦自动关闭"保护 → 存活 36ms 就没了。
+            //    用户按热键截图不会有这个问题 (热键本身就在他手上, 前台自然切过来), 但 HTTP 自测口拉起时会被拒。
+            //    这里补一次 AttachThreadInput + SetForegroundWindow, 让自测口等价于"用户按了热键"。
+            try
+            {
+                IntPtr fg = GetForegroundWindow();
+                uint pidFg;
+                uint tidFg = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId(fg, out pidFg);
+                uint tidSelf = GetCurrentThreadId();
+                if (fg != Handle && tidFg != 0 && tidFg != tidSelf)
+                {
+                    bool attached = AttachThreadInput(tidSelf, tidFg, true);  // 绕过前台锁
+                    try { SetForegroundWindow(Handle); BringToFront(); }
+                    finally { if (attached) AttachThreadInput(tidSelf, tidFg, false); }
+                    Log("capture: forced foreground (prev fg tid=" + tidFg + ")");
+                }
+            }
+            catch (Exception ex) { Log("capture: foreground err: " + ex.Message); }
             // 开罩即高亮光标下窗口 (PixPin 同款: 不必先动鼠标); sp 直接就是屏幕坐标
             try { POINT cp; GetCursorPos(out cp); UpdateHoverDetect(new Point(cp.x, cp.y)); } catch { }
             StartHoverLoop(); // 后台持续检测 (HWND 下钻 + UIA 元素级)
