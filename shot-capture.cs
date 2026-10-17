@@ -313,6 +313,10 @@ partial class ShotService
         public List<Point> Pts;     // 画笔折线 (屏坐标)
         public string Text;         // 文字内容
         public int No;              // 序号数字
+        // 橡皮擦软删除标记 (2026-10-17): true = 已被橡皮擦掉, 绘制/命中/导出全部跳过, 但仍留在 annots 里
+        // 这样 Ctrl+Z 只需把它清回 false —— 撤销栈是"删最后一个"的 LIFO 模型, 橡皮擦一次可能抹掉中间几条,
+        // 真从 List 里 RemoveAt 会让撤销顺序错乱 (撤回来的不是刚擦的那条)。
+        public bool Erased = false;
         public Color Color = Color.FromArgb(242, 80, 59); // PixPin 默认红
     }
 
@@ -914,11 +918,16 @@ partial class ShotService
         Rectangle resizeOrig;    // 拖拽开始时的选区 (固定对边法)
         readonly List<Annot> annots = new List<Annot>(); // 已提交标注 (屏坐标)
         readonly List<Annot> redoStack = new List<Annot>(); // 撤销弹出的标注 (重做用, 新笔画清空)
+        // 橡皮擦撤销栈 (2026-10-17): 一笔擦掉 N 条 = 撤销一步全恢复。
+        // 🔴 不并进 redoStack: 那个栈是「弹出一个 Annot 再塞回 annots」的模型, 塞不下整批;
+        //    而且橡皮擦用的是软删除 (Annot.Erased), 撤销只需把标记清回 false, 不涉及 List 增删。
+        readonly List<List<Annot>> eraseUndoStack = new List<List<Annot>>();
         Annot cur;               // 正在绘制的标注
         string tool = null;      // 当前标注工具: rect/ellipse/arrow/pen/text/seq; null=未选
         // ---- 标注参数持久化 (PixPin MarkBar 同款): 首次截图前从 shot-service.json mark 节恢复 ----
         static bool markLoaded = false;
         static float markWidth0 = 3f;
+        internal static float markEraserW0 = 22f;   // 橡皮擦直径 (PixPin Mark.Eraser.PenWidth; shot-config 落盘要读)
         static int markArrowStyle0 = Annot.S_ARROW;
         static Color markColor0 = Color.FromArgb(242, 80, 59);
         static int markFontPt0 = 14;
@@ -985,6 +994,8 @@ partial class ShotService
                 bool co2; if (bool.TryParse(Cfg("mark.callout", ""), out co2)) markCallout0 = co2;
                 bool fl2; if (bool.TryParse(Cfg("mark.fill", ""), out fl2)) markFill0 = fl2;
                 int shp2; if (int.TryParse(Cfg("mark.shape", ""), out shp2) && (shp2 == 0 || shp2 == 4 || shp2 == 5)) markShape0 = shp2;
+                // 橡皮擦粗细 (PixPin 同款键名: Mark.Eraser.PenWidth)
+                float ewp; if (float.TryParse(Cfg("mark.eraserWidth", "22"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out ewp) && ewp >= ERASER_MIN_W && ewp <= ERASER_MAX_W) markEraserW0 = ewp;
                 // 放大镜信息条尺寸: 高度按下方三行 (坐标 / 颜色 / 提示) 实测, 不写死 (写死必留残影 — 10-17 踩过)
                 try
                 {
@@ -1062,6 +1073,20 @@ partial class ShotService
         Panel editPanel;             // 透明容器: 只含四角按钮+确认/取消
         int hoverTextIdx = -1;       // 文字工具悬停的已提交文字标注 (显示可编辑提示框; 其他工具不检测=文字当背景)
         int textEditIdx = -1;        // 正在重编辑的 annots 下标 (-1 = 新建文字)
+        // ---- 橡皮擦 (PixPin Mark.EditItemOrder 第七组 Eraser) ----
+        // 证据: PixPin.exe 明文键 Mark.Eraser.PenWidth / Mark.Eraser.PathMode / Mark.Eraser.RectRoundRadius,
+        //       类名 AVMarkEraserConfig / AVEditItemRectEraser / AVEditItemEraserCustom;
+        //       文案「Eraser enables secondary editing」+ 配置键 eraserReEditing
+        // 🔴 语义 (照 PixPin): 擦的是「标注对象」, 不是背景像素。划过哪条标注就整条删掉, 底图不受影响。
+        //    抹像素会把截图原内容一起擦坏, 而且撤销不回来。
+        const float ERASER_MIN_W = 10f;   // 橡皮最小直径 (太小了点不准)
+        const float ERASER_MAX_W = 60f;
+        float curEraserW = markEraserW0;           // 当前橡皮直径 (属性栏/滚轮可调, 落盘 mark.eraserWidth)
+        bool erasing = false;             // 正在擦 (鼠标按下且拖动)
+        Point eraseLast;                  // 上一采样点 (轨迹线段用)
+        Rectangle eraseDirty;             // 本笔擦掉的全部区域 (松手时统一刷)
+        int eraseCount = 0;               // 本笔删了几条 (>=1 才入撤销栈)
+        List<Annot> eraseUndo = null;     // 本笔删掉的标注快照 (松手一次性入 undoStack)
         // 自动窗口检测 (PixPin 同款): 未按下时高亮光标下的窗口, 单击即选中; 拖动则转手动框选
         Rectangle hoverWin = Rectangle.Empty;
         bool pendingDown = false;
@@ -1179,6 +1204,20 @@ partial class ShotService
             // 滚轮调粗细 (PixPin 官方: 画笔/荧光笔滚轮调粗细): 已框选+选了画笔类工具+未落笔
             if (hasSel && cur == null && !textMode && tool != null)
             {
+                if (tool == "eraser")
+                {
+                    // 橡皮擦粗细也用滚轮 (PixPin Mark.Eraser.PenWidth 同源): 档位 10~60
+                    float ew = curEraserW + (e.Delta > 0 ? 2f : -2f);
+                    if (ew < ERASER_MIN_W) ew = ERASER_MIN_W;
+                    if (ew > ERASER_MAX_W) ew = ERASER_MAX_W;
+                    if (ew != curEraserW)
+                    {
+                        curEraserW = ew;
+                        MarkProp();
+                        Log("capture: wheel eraser width=" + curEraserW);
+                    }
+                    return;
+                }
                 bool wl = tool == "pen" || tool == "highlight" || tool == "mosaic" || tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "poly" || tool == "curve";
                 if (wl)
                 {
@@ -1373,6 +1412,19 @@ partial class ShotService
                     OpenTextInput(sp);
                     return;
                 }
+                if (tool == "eraser")
+                {
+                    // 橡皮擦 (PixPin Mark.EditItemOrder 第七组 Eraser): 按下开始擦, 拖动沿途扫过的标注整条删除
+                    // 🔴 只擦标注对象, 不动底图像素 (抹像素等于改用户截图内容, 而且撤不回来)
+                    erasing = true;
+                    eraseLast = sp;
+                    eraseDirty = Rectangle.Empty;
+                    eraseCount = 0;
+                    eraseUndo = new List<Annot>();
+                    // 单击不拖也要能擦掉笔尖下那一条 (按下即判一次)
+                    EraseAt(sp, sp);
+                    return;
+                }
                 if (tool == "poly" || tool == "curve")
                 {
                     // 折线/曲线 (PixPin BrokenLine 输入模式): 单击加点, 双击/回车收尾; 端点创建期钳制不出框
@@ -1515,6 +1567,11 @@ partial class ShotService
                 sel = Normalize(start, sp);
                 hasSel = sel.Width > 2 && sel.Height > 2;
                 InvalidateSelArea(old);
+            }
+            else if (erasing)
+            {
+                // 橡皮擦轨迹: 上一采样点 -> 当前点 连一段, 沿途扫到的标注整条软删除
+                if (sp != eraseLast) { EraseAt(eraseLast, sp); eraseLast = sp; }
             }
             else if (cur != null)
             {
@@ -2389,6 +2446,20 @@ partial class ShotService
                 if (hasSel) { ShowBar(); InvalidateSelArea(sel); } // 补一次重绘: 手柄在"松开"状态才画 (拖拽中 skip)
                 return;
             }
+            // 橡皮擦松手: 本笔擦掉的标注一次性入撤销栈 (undo 是 LIFO, 一整笔算一步)
+            if (erasing && e.Button == MouseButtons.Left)
+            {
+                erasing = false;
+                if (eraseDirty != Rectangle.Empty) InvalidateAnnot(eraseDirty);
+                if (eraseCount > 0 && eraseUndo != null && eraseUndo.Count > 0)
+                {
+                    redoStack.Clear();
+                    eraseUndoStack.Add(eraseUndo); // 一整笔 = 撤销一步
+                    Log("capture: eraser removed " + eraseCount + " annot(s)");
+                }
+                eraseUndo = null; eraseCount = 0; eraseDirty = Rectangle.Empty;
+                return;
+            }
             if (cur != null)
             {
                 if (cur.Kind == Annot.K_POLY)
@@ -2606,6 +2677,7 @@ partial class ShotService
             for (int i = annots.Count - 1; i >= 0; i--)
             {
                 Annot a = annots[i];
+                if (a.Erased) continue;   // 橡皮擦掉的看不见, 也不该能被点中
                 if (!ToolOwns(a)) continue;
                 if (HitGrip(a, sp) >= 0 || HitAnnotBody(a, sp))
                 {
@@ -2815,7 +2887,11 @@ partial class ShotService
         {
             // PixPin 同款: 标注端点创建时即钳进选区 (出不界), 故此处无需裁剪
             DrawOne(g, cur, offset, true, frozen); // 正在绘制的画在最上层 (inProgress=true: 填充模式也先画线框)
-            for (int i = 0; i < annots.Count; i++) DrawOne(g, annots[i], offset, false, frozen);
+            for (int i = 0; i < annots.Count; i++)
+            {
+                if (annots[i].Erased) continue; // 橡皮擦软删除的跳过 (还留在 List 里供撤销)
+                DrawOne(g, annots[i], offset, false, frozen);
+            }
             // 折线/曲线绘制中: 橡皮筋 (最后一点→鼠标) + 已加点顶点 dot (PixPin 同款反馈)
             if (cur != null && cur.Kind == Annot.K_POLY && polyHoverOk && cur.Pts != null && cur.Pts.Count >= 1)
             {
@@ -3376,6 +3452,7 @@ partial class ShotService
             for (int i = annots.Count - 1; i >= 0; i--)
             {
                 Annot a = annots[i];
+                if (a.Erased) continue;   // 擦掉的不参与命中
                 if (a.Kind != Annot.K_TEXT) continue;
                 Size ts = TextRenderer.MeasureText(a.Text.Length > 0 ? a.Text : "测", GetAnnotFont(a.FontFamily, a.FontPt));
                 double ang = -a.Angle * Math.PI / 180.0;
@@ -3568,6 +3645,8 @@ partial class ShotService
             bar.Add("pen", "自由画笔", delegate { PickTool("pen"); }, true).ToolKey = "pen";
             bar.Add("highlight", "荧光笔 (拖动高亮文字/区域)", delegate { PickTool("highlight"); }, true).ToolKey = "highlight";
             bar.Add("mosaic", "马赛克 (拖动打码)", delegate { PickTool("mosaic"); }, true).ToolKey = "mosaic";
+            // 橡皮擦 (PixPin Mark.EditItemOrder 第七组 Eraser): 划过标注 = 整条删除该标注, 不抹背景像素
+            bar.Add("eraser", "橡皮擦 (划过标注即删除, 可撤销)", delegate { PickTool("eraser"); }, true).ToolKey = "eraser";
             bar.Add("text", "文字标注 (点击选区内输入, 回车落字)", delegate { PickTool("text"); }, true).ToolKey = "text";
             bar.Add("seq", "序号标记 (自动递增)", delegate { PickTool("seq"); }, true).ToolKey = "seq";
             bar.AddSep();
@@ -3615,7 +3694,7 @@ partial class ShotService
         void ShowPropBar()
         {
             if (propBar == null) { BuildPropBar(); }
-            bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen" || tool == "text" || tool == "seq" || tool == "poly" || tool == "curve" || tool == "highlight" || tool == "mosaic";
+            bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen" || tool == "text" || tool == "seq" || tool == "poly" || tool == "curve" || tool == "highlight" || tool == "mosaic" || tool == "eraser";
             if (!need) { propBar.Visible = false; return; }
             // PixPin 式显隐: 只显示当前工具相关属性 (不相关按钮直接隐藏, 悬空分隔线自动收敛)
             propBar.ShowForTool(tool);
@@ -3639,6 +3718,8 @@ partial class ShotService
             string[] arrowTools = { "arrow", "poly", "curve" }; // 头型/双向/虚线: 折线曲线也有 (PixPin BrokenLine 同款配置)
             string[] polyTools = { "poly", "curve" };           // 闭合填充: 仅折线/曲线
             string[] seqOnly = { "seq" };
+            string[] eraserOnly = { "eraser" };   // 橡皮擦专属: 只有粗细档, 没有颜色 (擦了就是删, 没颜色概念)
+            string[] noEraserTools = { "rect", "ellipse", "arrow", "pen", "highlight", "mosaic", "text", "seq", "poly", "curve" }; // 色板: 除橡皮擦外全可见
             // ---- 箭头头型下拉 (照 PixPin populateArrowTypes 11 项 + 标注线特例, 竖向菜单+长预览) ----
             // 头型枚举对应 PixPinArrowGeom.BuildArrowHeadPath: 0无 12五角 1开口 2实心(大) 3实心(小) 4实心圆 5空心圆 6实心菱形 7空心菱形 8刻度 9十字 ; 99=标注线
             int[] styleOrder = { 0, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 99 };
@@ -3721,6 +3802,39 @@ partial class ShotService
                 MarkProp();
             }, polyTools).ToolKey = "fill";
             propBar.AddSep(lineTools);
+            // ---- 橡皮擦粗细 (eraserOnly, PixPin Mark.Eraser.PenWidth): 细/中/粗三档, 落盘 mark.eraserWidth ----
+            ToolbarPanel.Btn erasBtn = null;
+            float[] erasVals = { 14f, 22f, 36f };
+            string[] erasNames = { "细橡皮", "中橡皮", "粗橡皮" };
+            erasBtn = propBar.AddText(erasNameOf(curEraserW) + " ▾", "橡皮擦粗细 (滚轮也可调)", delegate
+            {
+                ContextMenuStrip m = DarkMenu();
+                foreach (float ev in erasVals)
+                {
+                    float cap = ev;
+                    ToolStripItem it = m.Items.Add(erasNameOf(ev), null, delegate
+                    {
+                        curEraserW = cap;
+                        if (erasBtn != null) { erasBtn.DrawStr = erasNameOf(cap) + " ▾"; propBar.RelayoutNow(); }
+                        SaveMarkNow();
+                        Log("capture: eraser width=" + cap);
+                    });
+                    if (Math.Abs(ev - curEraserW) < 0.5f) it.Font = new Font(it.Font, FontStyle.Bold);
+                }
+                m.Show(propBar, erasBtn.Rect.X, erasBtn.Rect.Bottom + 2);
+            }, eraserOnly);
+            erasBtn.ToolKey = "erasw";
+            erasBtn.OnWheel = delegate(bool up)
+            {
+                int i = curEraserW < 18f ? 0 : (curEraserW < 29f ? 1 : 2);
+                int n = Math.Max(0, Math.Min(erasVals.Length - 1, i + (up ? 1 : -1)));
+                if (n != i)
+                {
+                    curEraserW = erasVals[n];
+                    if (erasBtn != null) erasBtn.DrawStr = erasNameOf(curEraserW) + " ▾";
+                    MarkProp();
+                }
+            };
             // ---- 粗细下拉 (竖排菜单: 每项一条按实际粗细的长预览线) ----
             float[] widthVals = { 2f, 3.5f, 6f };
             string[] widthNames = { "细线", "中线", "粗线" };
@@ -3895,7 +4009,8 @@ partial class ShotService
             for (int i = 0; i < cols.Length; i++)
             {
                 Color c = cols[i];
-                propBar.AddColor(c, cnames[i], delegate { curColor = c; MarkProp(); }).ToolKey = "col" + i;
+                // 🔴 橡皮擦没有颜色概念 (擦=删), 色板对它隐藏; 其余工具 (含文字/序号) 保持可见
+                propBar.AddColor(c, cnames[i], delegate { curColor = c; MarkProp(); }, noEraserTools).ToolKey = "col" + i;
             }
             Controls.Add(propBar);
             propBar.Visible = false;
@@ -3927,7 +4042,7 @@ partial class ShotService
         // 标注参数落盘 (shot-service.json mark 节)
         void SaveMarkNow()
         {
-            try { SaveMarkCfg(curWidth, curStartType, curEndType, curSmooth, curDash, curCallout, curShape, curFill, curColor, curFontPt, curFontFamily, curSeqFmt, curMosaicStrength, curMosaicMode, curHlAlpha); } catch { }
+            try { markEraserW0 = curEraserW; SaveMarkCfg(curWidth, curStartType, curEndType, curSmooth, curDash, curCallout, curShape, curFill, curColor, curFontPt, curFontFamily, curSeqFmt, curMosaicStrength, curMosaicMode, curHlAlpha); } catch { }
         }
 
         void PlacePropBar()
@@ -3947,6 +4062,14 @@ partial class ShotService
         }
 
         ToolbarPanel.Btn fontBtn, familyBtn;
+        // 橡皮擦档位名 (属性栏按钮/菜单共用同一套判断, 避免两处漂移)
+        static string erasNameOf(float w)
+        {
+            if (w < 18f) return "细橡皮";
+            if (w < 29f) return "中橡皮";
+            return "粗橡皮";
+        }
+
         static string FamilyShort(string fam)
         {
             if (fam == "Microsoft YaHei UI") return "雅黑";
@@ -4120,12 +4243,129 @@ partial class ShotService
             Log("capture: annot push kind=" + a.Kind + extra);
         }
 
+        // ---- 橡皮擦核心: 一段轨迹扫过的标注全部软删除 ----
+        // 判定 = 橡皮圆 (直径 curEraserW, 沿轨迹线段扫) 与标注的真实几何相交。
+        // 🔴 只动标注, 不碰 frozen 底图 (那是用户截图内容, 抹了就回不来)。
+        void EraseAt(Point a, Point b)
+        {
+            float r = curEraserW / 2f;
+            Rectangle sweep = Normalize(a, b);
+            sweep.Inflate((int)r + 2, (int)r + 2);
+            // 脏区累积: 松手时统一刷一次 (拖动中每步都刷全屏会卡)
+            eraseDirty = eraseDirty == Rectangle.Empty ? sweep : Rectangle.Union(eraseDirty, sweep);
+            for (int i = 0; i < annots.Count; i++)
+            {
+                Annot an = annots[i];
+                if (an.Erased) continue;
+                if (an == selAnnot) continue; // 二次编辑中的那条不擦 (拖控制点时会误伤)
+                if (!HitAnnotWithSegment(an, a, b, r)) continue;
+                an.Erased = true;
+                eraseCount++;
+                if (eraseUndo == null) eraseUndo = new List<Annot>();
+                eraseUndo.Add(an);
+                eraseDirty = Rectangle.Union(eraseDirty, BoundsOf(an));
+                if (an.Kind == Annot.K_SEQ) { /* 序号不回收: PixPin 序号也保持递增 */ }
+            }
+            InvalidateAnnot(eraseDirty);
+        }
+
+        // 线段 [a,b] 按半径 r 加粗后, 是否碰到这条标注
+        // 分两类: 图形 (矩形/椭圆/箭头/序号/马赛克/文字) 走包围盒; 线迹 (画笔/荧光/折线/曲线) 走折线段距离
+        static bool HitAnnotWithSegment(Annot an, Point a, Point b, float r)
+        {
+            Rectangle bb = BoundsOf(an);
+            if (bb == Rectangle.Empty) return false;
+            Rectangle sweep = Normalize(a, b);
+            sweep.Inflate((int)r + 2, (int)r + 2);
+            // 包围盒都不碰 = 一定没碰 (快速排除)
+            if (!sweep.IntersectsWith(bb)) return false;
+            float pad = r + Math.Max(2f, an.Width / 2f);
+            if (an.Kind == Annot.K_PEN || an.Kind == Annot.K_HIGHLIGHT || an.Kind == Annot.K_POLY)
+            {
+                if (an.Pts == null || an.Pts.Count == 0) return false;
+                if (an.Pts.Count == 1) return DistSegToPt(a, b, an.Pts[0]) <= pad;
+                for (int i = 1; i < an.Pts.Count; i++)
+                    if (SegSegDist(a, b, an.Pts[i - 1], an.Pts[i]) <= pad) return true;
+                return false;
+            }
+            if (an.Kind == Annot.K_ARROW)
+            {
+                if (an.Pts != null && an.Pts.Count >= 2)
+                    return SegSegDist(a, b, an.Pts[0], an.Pts[1]) <= pad;
+                return true; // 包围盒已相交, 箭头没点就当矩形处理
+            }
+            // 矩形/椭圆/序号/马赛克/文字: 包围盒相交已够 (椭圆/空心形状略宽松, 但橡皮本来就是粗笔刷)
+            return true;
+        }
+
+        // 点到线段距离
+        static float DistSegToPt(Point a, Point b, Point p)
+        {
+            float dx = b.X - a.X, dy = b.Y - a.Y;
+            float len2 = dx * dx + dy * dy;
+            if (len2 <= 0.0001f) return Dist(a, p);
+            float t = ((p.X - a.X) * dx + (p.Y - a.Y) * dy) / len2;
+            if (t < 0f) t = 0f; else if (t > 1f) t = 1f;
+            return Dist(new PointF(a.X + t * dx, a.Y + t * dy), p);
+        }
+
+        static float Dist(PointF a, Point p) { return Dist(a, new PointF(p.X, p.Y)); }
+        static float Dist(PointF a, PointF b)
+        {
+            float dx = a.X - b.X, dy = a.Y - b.Y;
+            return (float)Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        // 两线段最短距离 (不相交时取四个端点到对边的最近值)
+        static float SegSegDist(Point p1, Point p2, Point p3, Point p4)
+        {
+            if (SegIntersect(p1, p2, p3, p4)) return 0f;
+            float d = DistSegToPt(p1, p2, p3);
+            d = Math.Min(d, DistSegToPt(p1, p2, p4));
+            d = Math.Min(d, DistSegToPt(p3, p4, p1));
+            d = Math.Min(d, DistSegToPt(p3, p4, p2));
+            return d;
+        }
+
+        static bool SegIntersect(Point p1, Point p2, Point p3, Point p4)
+        {
+            long d1 = Cross(p3, p4, p1), d2 = Cross(p3, p4, p2);
+            long d3 = Cross(p1, p2, p3), d4 = Cross(p1, p2, p4);
+            if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+            return false;
+        }
+
+        static long Cross(Point a, Point b, Point p)
+        {
+            return (long)(b.X - a.X) * (p.Y - a.Y) - (long)(b.Y - a.Y) * (p.X - a.X);
+        }
+
         void ActUndo()
         {
             CommitTextInput();
+            // 橡皮擦批次优先: 最近一笔擦除比最近一笔标注更"新", 撤销必须先撤它 (LIFO 正确性)
+            if (eraseUndoStack.Count > 0)
+            {
+                List<Annot> batch = eraseUndoStack[eraseUndoStack.Count - 1];
+                eraseUndoStack.RemoveAt(eraseUndoStack.Count - 1);
+                foreach (Annot ea in batch)
+                {
+                    ea.Erased = false;
+                    InvalidateAnnot(ea);
+                }
+                Log("capture: undo eraser (" + batch.Count + " restored)");
+                return;
+            }
             if (annots.Count == 0) return;
             Annot a = annots[annots.Count - 1];
             annots.RemoveAt(annots.Count - 1);
+            // 被擦掉的标注本来就在 annots 里 (只是 Erased=true), 这里排除掉别误撤一条看不见的
+            while (a.Erased && annots.Count > 0)
+            {
+                a = annots[annots.Count - 1];
+                annots.RemoveAt(annots.Count - 1);
+            }
+            if (a.Erased) return;
             redoStack.Add(a);
             if (a.Kind == Annot.K_SEQ) seqNext = Math.Max(1, seqNext - 1);
             InvalidateAnnot(a);
@@ -4631,10 +4871,14 @@ partial class ShotService
                 + ",\"x\":" + selAnnot.Rect.X + ",\"y\":" + selAnnot.Rect.Y
                 + ",\"w\":" + selAnnot.Rect.Width + ",\"h\":" + selAnnot.Rect.Height
                 + ",\"pts\":" + (selAnnot.Pts == null ? 0 : selAnnot.Pts.Count) + "}";
+            int erasedN = 0;
+            for (int i = 0; i < annots.Count; i++) if (annots[i].Erased) erasedN++;
             return "{\"ok\":true,\"hasSel\":" + (hasSel ? "true" : "false")
                 + ",\"tool\":" + (tool == null ? "null" : "\"" + JsonEscape(tool) + "\"")
                 + ",\"textMode\":" + (textMode ? "true" : "false")
                 + ",\"annotCount\":" + annots.Count
+                + ",\"erasedCount\":" + erasedN
+                + ",\"eraseUndoBatches\":" + eraseUndoStack.Count
                 + ",\"selAnnot\":" + selDesc
                 + ",\"x\":" + sel.X + ",\"y\":" + sel.Y + ",\"w\":" + sel.Width + ",\"h\":" + sel.Height
                 + ",\"virtualScreen\":[" + SystemInformation.VirtualScreen.X + "," + SystemInformation.VirtualScreen.Y + "," + SystemInformation.VirtualScreen.Width + "," + SystemInformation.VirtualScreen.Height + "]}";
@@ -4670,6 +4914,13 @@ partial class ShotService
         }
 
         // 自测口: 走与真实鼠标完全相同的二次编辑路径 (点中/拖拽/删除)
+        // 自测口: 撤销/重做 (走与 Ctrl+Z/Ctrl+Y 完全相同的函数, 验橡皮擦批次撤销)
+        public string DebugUndoRedo(bool undo)
+        {
+            RunOnUiSync(delegate { try { if (undo) ActUndo(); else ActRedo(); } catch (Exception ex) { Log("debug undo err: " + ex.Message); } });
+            return "{\"ok\":true,\"state\":" + DebugJson() + "}";
+        }
+
         public string DebugClick(int x, int y)
         {
             bool took = TryBeginAnnotEdit(new Point(x, y));
@@ -4697,8 +4948,22 @@ partial class ShotService
         // 自测口: 切工具 (走真实 PickTool 路径, 含二次编辑态脱钩)
         public string DebugSetTool(string t)
         {
-            if (t == "(none)" || t == "none") { if (tool != null) PickTool(tool); }
-            else PickTool(t);
+            // 🔴 整体封送到 UI 线程: PickTool 会遍历 bar.Btns / 重排属性栏 (都是控件操作),
+            //    HTTP 线程直接跑会报「在某个线程上创建的控件不能成为在另一个线程上创建的控件的父级」。
+            //    真用户点工具按钮本来就是 UI 线程, 这里只是让自测口等价。
+            string err = null;
+            RunOnUiSync(delegate
+            {
+                try
+                {
+                    // 自测口可能还没建工具条 (DebugSetSel 只摆位置不建条) → PickTool 里 bar.Btns 空引用
+                    if (bar == null) ShowBar();
+                    if (t == "(none)" || t == "none") { if (tool != null) PickTool(tool); }
+                    else PickTool(t);
+                }
+                catch (Exception ex) { err = ex.Message; }
+            });
+            if (err != null) return "{\"ok\":false,\"error\":\"" + JsonEscape(err) + "\"}";
             return "{\"ok\":true,\"state\":" + DebugJson() + "}";
         }
 
@@ -5004,6 +5269,15 @@ partial class ShotService
                             PointF[] tip = { new PointF(2f, 12f), new PointF(5f, 15f), new PointF(16f, 4.5f), new PointF(13.5f, 2f) };
                             g.FillPolygon(hb, tip);
                         }
+                        break;
+                    case "eraser": // 橡皮擦: 斜放的方块橡皮 + 底边擦痕
+                        using (SolidBrush eb = new SolidBrush(Color.FromArgb(232, 234, 240)))
+                        {
+                            // 橡皮体 (斜 45° 的平行四边形)
+                            g.FillPolygon(eb, new PointF[] {
+                                new PointF(4f, 11f), new PointF(9.5f, 4f), new PointF(14.5f, 8f), new PointF(9f, 15f) });
+                        }
+                        g.DrawLine(w, 2.5f, 16f, 7f, 16f); // 擦掉的痕迹 (只留一小段)
                         break;
                     case "text":
                         g.DrawLine(w, 4, 4, 14, 4);

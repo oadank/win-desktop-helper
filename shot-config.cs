@@ -118,6 +118,8 @@ partial class ShotService
             d["mark.foldArrow"] = CaptureOverlay.foldArrowTool;
             d["mark.mosaicMode"] = mosaicMode.ToString();
             d["mark.hlAlpha"] = hlAlpha.ToString();
+            // 橡皮擦粗细 (PixPin 同款键名 Mark.Eraser.PenWidth)
+            d["mark.eraserWidth"] = ((double)CaptureOverlay.markEraserW0).ToString(System.Globalization.CultureInfo.InvariantCulture);
             SaveCfgDict(d);
         }
         catch (Exception ex) { Log("mark cfg save err: " + ex.Message); }

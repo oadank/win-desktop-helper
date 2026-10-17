@@ -3704,6 +3704,8 @@ public partial class ShotService
                     else if (q.ContainsKey("enddrag")) { if (ov != null) body = ov.DebugEndDrag(); else body = "{\"ok\":false}"; }
                     else if (q.ContainsKey("delsel")) { if (ov != null) body = ov.DebugDelSel(); else body = "{\"ok\":false}"; }
                     else if (q.ContainsKey("settool")) { if (ov != null) body = ov.DebugSetTool(q["settool"]); else body = "{\"ok\":false}"; }
+                    else if (q.ContainsKey("undo")) { if (ov != null) body = ov.DebugUndoRedo(true); else body = "{\"ok\":false}"; }
+                    else if (q.ContainsKey("redo")) { if (ov != null) body = ov.DebugUndoRedo(false); else body = "{\"ok\":false}"; }
                     else if (q.ContainsKey("close"))
                     {
                         if (ov != null && !ov.IsDisposed) { try { ov.Close(); } catch { } }
