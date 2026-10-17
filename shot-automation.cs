@@ -23,6 +23,7 @@ partial class ShotService
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+    [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr hWnd); // 键盘焦点 (≠前台; Esc 能否收到靠它, 2026-10-18)
 
     // 置前: Windows 前台锁会拒绝后台进程的 SetForegroundWindow —
     // 三级策略: 直接置前 -> AttachThreadInput 挂前台输入队列再置前 -> 模拟 ALT 松开解锁再置前

@@ -3706,6 +3706,8 @@ public partial class ShotService
                     else if (q.ContainsKey("settool")) { if (ov != null) body = ov.DebugSetTool(q["settool"]); else body = "{\"ok\":false}"; }
                     else if (q.ContainsKey("undo")) { if (ov != null) body = ov.DebugUndoRedo(true); else body = "{\"ok\":false}"; }
                     else if (q.ContainsKey("redo")) { if (ov != null) body = ov.DebugUndoRedo(false); else body = "{\"ok\":false}"; }
+                    else if (q.ContainsKey("wm")) { if (ov != null) body = ov.DebugWatermark(Uri.UnescapeDataString(q["wm"])); else body = "{\"ok\":false}"; }
+                    else if (q.ContainsKey("act")) { if (ov != null) body = ov.DebugAct(q["act"]); else body = "{\"ok\":false}"; } // save/copy: 走按钮同一条函数 (验水印/新标注端到端)
                     else if (q.ContainsKey("close"))
                     {
                         if (ov != null && !ov.IsDisposed) { try { ov.Close(); } catch { } }
