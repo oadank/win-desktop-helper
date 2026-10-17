@@ -397,7 +397,7 @@ partial class ShotService
             base.Show();
         }
 
-        static GraphicsPath RoundPath(int x, int y, int w, int h, int d)
+        internal static GraphicsPath RoundPath(int x, int y, int w, int h, int d)
         {
             GraphicsPath gp = new GraphicsPath();
             gp.AddArc(x, y, d, d, 180, 90);
@@ -473,6 +473,160 @@ partial class ShotService
         }
     }
 
+    // 字号弹窗: 顶部输入框直接键入数字 (回车生效, 只收数字) + 下方档位列表 (单击/上下键选)
+    // 为什么不用 ContextMenuStrip: 菜单打开时第二次点击被菜单吞掉, "双击输入"永远到不了按钮 —
+    // 改成 Form 弹层把输入框和列表放一起, 点开就能敲数字, 比双击少一步
+    class FontInputPopup : Form
+    {
+        readonly int[] stops;
+        readonly Action<int> onPick;
+        readonly TextBox input;
+        int sel;                 // 列表高亮档 (上下键/键入值同步)
+        int hover = -1;
+        readonly int RowH, Pad, InpH, Rad;
+        readonly Size designSize;
+        Point designPos;
+
+        public FontInputPopup(int[] stops, int current, Action<int> onPick, Point screenPos)
+        {
+            this.stops = stops; this.onPick = onPick;
+            float s = StylePopup.UiScale();
+            RowH = (int)Math.Round(24 * s);
+            Pad = (int)Math.Round(6 * s);
+            InpH = (int)Math.Round(28 * s);
+            Rad = (int)Math.Round(8 * s);
+            AutoScaleMode = AutoScaleMode.None;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false; TopMost = true; StartPosition = FormStartPosition.Manual;
+            BackColor = Color.FromArgb(40, 41, 46);
+            DoubleBuffered = true; KeyPreview = true;
+            designSize = new Size((int)Math.Round(132 * s), InpH + stops.Length * RowH + Pad * 3);
+            Size = designSize;
+            designPos = screenPos;
+            Location = screenPos;
+            using (GraphicsPath gp = StylePopup.RoundPath(0, 0, Width, Height, Rad)) Region = new Region(gp);
+
+            input = new TextBox();
+            input.BorderStyle = System.Windows.Forms.BorderStyle.None;
+            input.BackColor = Color.FromArgb(56, 57, 64);
+            input.ForeColor = Color.White;
+            input.Font = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
+            input.TextAlign = HorizontalAlignment.Center;
+            input.Text = current.ToString();
+            input.SetBounds(Pad + 2, Pad + 2, Width - (Pad + 2) * 2, InpH - 4);
+            Controls.Add(input);
+            input.KeyPress += delegate(object o, KeyPressEventArgs ev)
+            {
+                if (!char.IsControl(ev.KeyChar) && !char.IsDigit(ev.KeyChar)) ev.Handled = true; // 只收数字
+            };
+            input.TextChanged += delegate
+            {
+                int v;
+                if (int.TryParse(input.Text.Trim(), out v))
+                {
+                    int ns = CaptureOverlay.NearestIdx(stops, v);
+                    if (ns != sel) { sel = ns; Invalidate(); }
+                }
+            };
+            input.KeyDown += HandleKey;
+            KeyDown += HandleKey;
+            Deactivate += delegate
+            {
+                try { FontInputPopup self = this; BeginInvoke((Action)delegate { if (Form.ActiveForm != self && !self.IsDisposed) self.Close(); }); } catch { }
+            };
+        }
+
+        // Show 前重设位置 (调用方算好屏幕钳制后调用)
+        public void PlaceAt(Point p) { designPos = p; Location = p; }
+
+        int RowY(int i) { return InpH + Pad * 2 + i * RowH; }
+
+        void HandleKey(object o, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter) { e.Handled = true; e.SuppressKeyPress = true; Apply(); }
+            else if (e.KeyCode == Keys.Escape) { e.Handled = true; e.SuppressKeyPress = true; Close(); }
+            else if (e.KeyCode == Keys.Up)
+            {
+                e.Handled = true; e.SuppressKeyPress = true;
+                if (sel > 0) { sel--; input.Text = stops[sel].ToString(); input.SelectionStart = input.Text.Length; Invalidate(); }
+            }
+            else if (e.KeyCode == Keys.Down)
+            {
+                e.Handled = true; e.SuppressKeyPress = true;
+                if (sel < stops.Length - 1) { sel++; input.Text = stops[sel].ToString(); input.SelectionStart = input.Text.Length; Invalidate(); }
+            }
+        }
+
+        void Apply()
+        {
+            int v;
+            if (!int.TryParse(input.Text.Trim(), out v)) { Close(); return; }
+            v = Math.Max(4, Math.Min(300, v));
+            if (onPick != null) onPick(v);
+            Close();
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (Size != designSize) Size = designSize; // PMv2 首次 Show 会改写尺寸, 拉回 (同 StylePopup)
+            if (Location != designPos) Location = designPos;
+            using (GraphicsPath gp = StylePopup.RoundPath(0, 0, Width, Height, Rad)) Region = new Region(gp);
+            input.Focus();
+            input.SelectionStart = input.Text.Length;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int h = -1;
+            if (e.Y >= RowY(0) && e.Y < RowY(0) + stops.Length * RowH) h = (e.Y - RowY(0)) / RowH;
+            if (h != hover) { hover = h; Invalidate(); }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (hover != -1) { hover = -1; Invalidate(); }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (e.Button != MouseButtons.Left) return;
+            if (e.Y >= RowY(0) && e.Y < RowY(0) + stops.Length * RowH)
+            {
+                int i = (e.Y - RowY(0)) / RowH;
+                if (onPick != null) onPick(stops[i]);
+                Close();
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (Font f = new Font("Microsoft YaHei UI", 9f))
+            using (StringFormat sf = new StringFormat { LineAlignment = StringAlignment.Center })
+            {
+                for (int i = 0; i < stops.Length; i++)
+                {
+                    Rectangle r = new Rectangle(Pad, RowY(i), Width - Pad * 2, RowH);
+                    bool cur = i == sel;
+                    if (i == hover || cur)
+                    {
+                        using (GraphicsPath gp = StylePopup.RoundPath(r.X, r.Y, r.Width, r.Height, 5))
+                            g.FillPath(new SolidBrush(cur ? Color.FromArgb(47, 111, 228) : Color.FromArgb(58, 59, 66)), gp);
+                    }
+                    TextRenderer.DrawText(g, stops[i].ToString(), cur ? new Font(f, FontStyle.Bold) : f,
+                        new Point(r.X + 12, r.Y + r.Height / 2), cur ? Color.White : Color.FromArgb(210, 211, 216),
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                }
+            }
+        }
+    }
+
     class CaptureOverlay : Form
     {
         readonly Bitmap frozen;  // 冻结的全屏原图 (尺寸=虚拟屏)
@@ -520,7 +674,7 @@ partial class ShotService
         {
             return f == "I" ? "I.II.III" : f == "a" ? "a.b.c" : f == "A" ? "A.B.C" : "1.2.3";
         }
-        static int NearestIdx(int[] arr, int v) { int bi = 0, bd = int.MaxValue; for (int i = 0; i < arr.Length; i++) { int d = Math.Abs(arr[i] - v); if (d < bd) { bd = d; bi = i; } } return bi; }
+        internal static int NearestIdx(int[] arr, int v) { int bi = 0, bd = int.MaxValue; for (int i = 0; i < arr.Length; i++) { int d = Math.Abs(arr[i] - v); if (d < bd) { bd = d; bi = i; } } return bi; }
         // 折叠槽 (PixPin 同款): 箭头/折线/曲线共用按钮位, 谁最后用谁占槽, 落盘 mark.foldArrow
         internal static string foldArrowTool = "arrow";
         ToolbarPanel.Btn foldArrowBtn;
@@ -1147,7 +1301,7 @@ partial class ShotService
                     if (chNow.Length > 0 && hoverLevel >= 0 && hoverLevel < chNow.Length && chNow[hoverLevel].Contains(sp))
                     {
                         ApplyHover(chNow[hoverLevel]);
-                        System.Threading.Thread.Sleep(60);
+                        System.Threading.Thread.Sleep(25);
                         continue;
                     }
                     if (uiDetect == 2) // 不检测: 纯手动框选
@@ -1155,7 +1309,7 @@ partial class ShotService
                         if (hoverChain.Length > 0) { hoverChain = new Rectangle[0]; hoverLevel = -1; }
                         ApplyHover(Rectangle.Empty);
                         lastHwnd = IntPtr.Zero;
-                        System.Threading.Thread.Sleep(60);
+                        System.Threading.Thread.Sleep(25);
                         continue;
                     }
 
@@ -1237,7 +1391,7 @@ partial class ShotService
                     ApplyHover(fin); // 带滑动过渡动画
                 }
                 catch { }
-                System.Threading.Thread.Sleep(60);
+                System.Threading.Thread.Sleep(25); // 采样 25ms (原 60ms 用户反馈"动画延迟了一点": 高亮框跟手慢半拍)
             }
         }
 
@@ -1410,7 +1564,7 @@ partial class ShotService
         }
 
         // 检测结果回 UI 线程: 换框 + 联合区域重绘 (选区已有时只更新字段不重绘, OnPaint 本来就不画 hover)
-        // ---- 橙框滑动过渡 (PixPin 同款): 从当前框平滑滑到新框, ~130ms smoothstep ----
+        // ---- 橙框滑动过渡: 从当前框平滑滑到新框, ~90ms smoothstep ----
         Rectangle animFrom = Rectangle.Empty, animTgt = Rectangle.Empty;
         DateTime animT0;
         Timer animTimer; // UI 线程创建 (ApplyHover 经 BeginInvoke, 天然在 UI 线程)
@@ -1444,7 +1598,7 @@ partial class ShotService
                                 try
                                 {
                                     if (IsDisposed) { StopAnim(); return; }
-                                    double t = (DateTime.Now - animT0).TotalMilliseconds / 130.0;
+                                    double t = (DateTime.Now - animT0).TotalMilliseconds / 90.0; // 90ms (原 130ms 提速: 老大反馈反应再快点)
                                     if (t >= 1.0)
                                     {
                                         StopAnim();
@@ -2824,20 +2978,32 @@ partial class ShotService
 
         void ShowFontMenu()
         {
-            ContextMenuStrip m = DarkMenu();
-            foreach (int pt in FontPtStops)
+            // 字号弹窗: 顶部输入框直接键入 (回车生效) + 16 档列表 (单击/上下键) — 一层弹层两用,
+            // 不用双击: ContextMenuStrip 打开时第二次点击被菜单吞掉, "双击输入"到不了按钮
+            Point anchor = new Point(fontBtn.Rect.X, fontBtn.Rect.Bottom + 2);
+            Point sp = propBar.PointToScreen(anchor);
+            FontInputPopup p = new FontInputPopup(FontPtStops, curFontPt, delegate(int v)
             {
-                int captured = pt;
-                ToolStripItem it = m.Items.Add(pt.ToString(), null, delegate
+                curFontPt = v;
+                if (fontBtn != null) { fontBtn.DrawStr = v.ToString(); propBar.RelayoutNow(); }
+                SaveMarkNow();
+                Log("capture: font pt=" + v);
+            }, sp);
+            try
+            {
+                Rectangle wa = Screen.FromPoint(sp).WorkingArea;
+                if (sp.Y + p.Height > wa.Bottom) // 底部放不下: 翻到按钮上方
                 {
-                    curFontPt = captured;
-                    if (fontBtn != null) { fontBtn.DrawStr = captured.ToString(); propBar.RelayoutNow(); }
-                    SaveMarkNow();
-                    Log("capture: font pt=" + captured);
-                });
-                if (pt == curFontPt) it.Font = new Font(it.Font, FontStyle.Bold);
+                    Point tp = propBar.PointToScreen(new Point(fontBtn.Rect.X, fontBtn.Rect.Top));
+                    sp.Y = tp.Y - p.Height - 2;
+                    if (sp.Y < wa.Top) sp.Y = wa.Top;
+                }
+                if (sp.X + p.Width > wa.Right) sp.X = wa.Right - p.Width;
+                if (sp.X < wa.Left) sp.X = wa.Left;
+                p.PlaceAt(sp);
             }
-            m.Show(propBar, fontBtn.Rect.X, fontBtn.Rect.Bottom + 2);
+            catch { }
+            p.Show();
         }
 
         void ShowFamilyMenu()
