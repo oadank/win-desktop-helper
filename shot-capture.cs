@@ -506,6 +506,8 @@ partial class ShotService
         static int markMosaicMode0 = 0;     // 马赛克模式 (PixPin MarkBar.Mosaic.MosaicMode: 0=马赛克 1=模糊)
         // 荧光笔透明度合法档位: 配置值吸附到最近档, 保证菜单选中态判定用 == 即可
         static int[] HlAlphaStops = { 51, 102, 153, 204, 255 };
+        // 字号全量档 (经典 Office/Qt 字号表; PixPin 官方文档只说"可直接设置/滚轮调", 未公布清单, 用业界通用全量)
+        static readonly int[] FontPtStops = { 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72 };
         static int HlAlphaNearest(int v)
         {
             int best = HlAlphaStops[0], bd = int.MaxValue;
@@ -2704,10 +2706,9 @@ partial class ShotService
             fontBtn.ToolKey = "f_size";
             fontBtn.OnWheel = delegate(bool up)
             {
-                int[] pts = { 11, 14, 18, 22, 26 };
-                int i = NearestIdx(pts, curFontPt);
-                int ni = Math.Max(0, Math.Min(pts.Length - 1, i + (up ? 1 : -1)));
-                if (ni != i) { curFontPt = pts[ni]; MarkProp(); Log("capture: wheel fontpt=" + curFontPt); }
+                int i = NearestIdx(FontPtStops, curFontPt);
+                int ni = Math.Max(0, Math.Min(FontPtStops.Length - 1, i + (up ? 1 : -1)));
+                if (ni != i) { curFontPt = FontPtStops[ni]; MarkProp(); Log("capture: wheel fontpt=" + curFontPt); }
             };
             propBar.AddSep();
             // ---- 色板 (图2 右下: 黑红橙黄绿蓝紫灰白) ----
@@ -2792,7 +2793,7 @@ partial class ShotService
         void ShowFontMenu()
         {
             ContextMenuStrip m = DarkMenu();
-            foreach (int pt in new int[] { 11, 14, 18, 22, 26 })
+            foreach (int pt in FontPtStops)
             {
                 int captured = pt;
                 ToolStripItem it = m.Items.Add(pt.ToString(), null, delegate
