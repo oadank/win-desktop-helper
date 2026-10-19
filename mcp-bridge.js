@@ -598,11 +598,17 @@ const TOOL_TIMEOUT = {
   clipboard: 20000, record: 30000, app: 45000, desk_skill: 20000,
   wait_for: 65000, pick_config: 15000, taskbar_volume: 15000,
 };
+// 🔴 HTTP token 鉴权 (2026-10-19 上线前全检): 桥所有请求带 X-WDH-Token (服务端对回环来源非豁免端点强制校验)。
+// token 文件 %LOCALAPPDATA%\win-desktop-helper\http-token (服务端首次启动生成, 当前用户 ACL)。
+// 读不到不硬崩 (旧版服务端无鉴权时照样工作), 只是服务端校验时若它已强制则会回 403 提示。
+let WDH_TOKEN = '';
+try { WDH_TOKEN = require('fs').readFileSync(process.env.LOCALAPPDATA + '\\win-desktop-helper\\http-token', 'utf8').trim(); } catch {}
+const WDH_HDRS = WDH_TOKEN ? { 'X-WDH-Token': WDH_TOKEN } : {};
 function httpGet(url, timeoutMs) {
   const tmo = timeoutMs || DEFAULT_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const http = require('http');
-    const req = http.get(url, (res) => {
+    const req = http.get(url, { headers: WDH_HDRS }, (res) => {
       let data = '';
       res.on('data', (c) => { data += c; });
       res.on('end', () => {

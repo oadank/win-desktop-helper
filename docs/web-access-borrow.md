@@ -12,7 +12,7 @@
 | 项 | 事实 |
 |---|---|
 | 规模 | C# 主源 ≈11,600 行（shot-service 3498 / shot-capture 3078 / shot-automation 1589 / shot-pick 1407 / shot-longshot 756 / shot-config 484 / shot-ocr 412）+ `mcp-bridge.js` 812 行手写 stdio JSON-RPC，零依赖 |
-| 形态 | .NET 4.8 WinForms 常驻托盘，`TcpListener` 只绑 127.0.0.1，**每请求新建线程、无池化无排队上限**（`shot-service.cs:2942-2963`）；计划任务 `WinDesktopHelper` 提权自启，**不是 nssm 服务** |
+| 形态 | .NET 4.8 WinForms 常驻托盘，`TcpListener` 绑 **0.0.0.0:18800**（跨机 peers 同步刚需，2026-10-19 老大确认；旧文写"只绑 127.0.0.1"是错的），**每请求新建线程、无池化无排队上限**（`shot-service.cs:2942-2963`）；计划任务 `WinDesktopHelper` 提权自启，**不是 nssm 服务** |
 | 工具面 | bridge 注册 **40 个**；HTTP 侧另有 9 个未暴露（`/find_text` `/diag/threads` `/win/snapfill` `/check-update` `/update` `/app/exit` 等） |
 | 手册 | SKILL.md **42,852 字符 / 774 行**（工具描述写"约 3K 字"，**是假的**）+ SKILL-HISTORY 23,415 字符 |
 | 已有的强项 | `WalkLimited` 计数即停防挂死、`HitGuard` 落点归属校验、三级置前策略、长截图三带 SSD + 静止门 + 内缩避遮罩、UIPI 预检不假报 ok、`ui_set` 写后读回比对 —— **工程密度不比对方低，缺的是几处结构性的收口** |
@@ -117,7 +117,7 @@
 ### P2
 | 项 | 动作 |
 |---|---|
-| 本地端口鉴权（**自己的洞**） | 仅绑 127.0.0.1 **零鉴权**：任意本机进程可写剪贴板、注入键鼠、`/app/run` 起程序。junction/硬链接/413 都已修（R8/R9 在案），缺的是调用方身份。方案：启动生成随机 token 写到 `%LOCALAPPDATA%` 下 ACL 仅当前用户的文件，bridge 读它带 `X-WDH-Token`；非回环一律拒 |
+| 本地端口鉴权（**自己的洞**） | 绑 **0.0.0.0:18800**（peers 跨机刚需，不能改回回环）**且全程零鉴权**：同网段任意设备可写剪贴板、注入键鼠、`/app/run` 以管理员起程序、`/update` 触发自动更新。防火墙规则（WDH-18800）对域/专用/公用全放行。方案（2026-10-19 全检立案）：① 防火墙规则收窄到 Tailscale 网段 100.64.0.0/10 + 去掉"公用"配置文件；② 启动生成随机 token 写 `%LOCALAPPDATA%` 下 ACL 仅当前用户的文件，bridge/peers 读它带 `X-WDH-Token`，服务端校验 |
 | **配置文件明文 key** | `shot-service.json` 明文存 OCR / 百度 / litellm key（打包已知的泄密源，走 `_pkg` 隔离只是绕过、没根治）→ 改走 Windows 凭据管理器或环境变量注入 |
 | 危险动作闸门（抄 D1） | `ui_click`/`mouse_click` 命中"发送/删除/提交/支付"类控件名且本轮未确认 → 服务端拦，返回要转述给用户的大白话原话 + 2~3 个选项 |
 | 观测性 | 结构化 log（当前 1.6MB 纯文本行）+ 按工具耗时/成功率统计 + `/diag` 扩充；`/health` 加 `logPath` |

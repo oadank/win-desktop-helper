@@ -42,7 +42,7 @@ using System.Windows.Forms;
 public partial class ShotService
 {
     const int PORT = 18800;
-    const string APP_VERSION = "0.0.25";
+    const string APP_VERSION = "0.0.26";
     const string REPO_URL = "https://github.com/oadank/win-desktop-helper";
     // 最新版本检查: 走 releases/latest 的 302 重定向读 Location 尾部 tag — 零 GitHub API 调用零限流(60次/小时)
     const string LATEST_URL = REPO_URL + "/releases/latest";
@@ -238,7 +238,32 @@ public partial class ShotService
         public uint time; public IntPtr dwExtraInfo;
     }
 
-    static void Log(string msg) { try { File.AppendAllText(LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + "\r\n"); } catch { } }
+    // 日志轮转 (2026-10-19 卡顿治理): 超 2MB → 旧内容转 .1 备份后截断。以前从不轮转, 22 万行/17MB,
+    // 每帧 IO 越来越慢 (拉手柄卡顿的帮凶)。每天检一次, 不在热路径做 stat。
+    static DateTime logRotateCheck = DateTime.MinValue;
+    static void Log(string msg)
+    {
+        try
+        {
+            if ((DateTime.Now - logRotateCheck).TotalMinutes > 30)
+            {
+                logRotateCheck = DateTime.Now;
+                try
+                {
+                    FileInfo fi = new FileInfo(LogPath);
+                    if (fi.Exists && fi.Length > 2L * 1024 * 1024)
+                    {
+                        string bak = LogPath + ".1";
+                        try { if (File.Exists(bak)) File.Delete(bak); } catch { }
+                        File.Move(LogPath, bak);
+                    }
+                }
+                catch { }
+            }
+            File.AppendAllText(LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + "\r\n");
+        }
+        catch { }
+    }
 
     // 构建指纹: 本进程 exe 的修改时间+大小 (= csc 写出 exe 的时刻)。日志/托盘/气泡/health 都带它,
     // 用户肉眼比对"编译时间 vs 运行时间"即可确认跑的是不是刚编的
@@ -3393,6 +3418,34 @@ public partial class ShotService
             }
 
             bool headerOverflow = got >= buf.Length && req.IndexOf("\r\n\r\n") < 0; // R8-2: 16KB 截断不再静默假成功
+            // ---- 🔴 token 鉴权 (2026-10-19 上线前全检立案): 回环来源的非豁免端点必须带正确 token ----
+            // 防浏览器恶意网页 JS 对 127.0.0.1:18800 的 CSRF 式调用 (网页 JS 读不到本机 token 文件);
+            // Tailscale 来源放行 (防火墙已收窄 100.64.0.0/10 + Tailscale WireGuard 认证; peers 跨机推送免改造);
+            // 豁免: /health (agent 首探无敏感) / /img/* (DSH markdown <img> 标签带不了自定义头) / /pick-* (Edge 扩展读不了文件)
+            bool exemptAuth = path == "/health" || path.StartsWith("/img/") || path.StartsWith("/pick-");
+            bool loopbackSrc = false;
+            try { loopbackSrc = System.Net.IPAddress.IsLoopback(((System.Net.IPEndPoint)client.Client.RemoteEndPoint).Address); } catch { }
+            if (!exemptAuth && !headerOverflow)
+            {
+                string gotTok = q.ContainsKey("token") ? q["token"] : "";
+                if (gotTok.Length == 0)
+                {
+                    foreach (string ln in lines)
+                        if (ln.StartsWith("X-WDH-Token:", StringComparison.OrdinalIgnoreCase))
+                        { gotTok = ln.Substring("X-WDH-Token:".Length).Trim(); break; }
+                }
+                if (HttpToken.Length == 0 || gotTok != HttpToken) // 🔴 空 token = 加载失败 → fail closed 全拒, 不许空==空放行
+                {
+                    byte[] r403 = Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"unauthorized: need X-WDH-Token header or ?token= (token file: %LOCALAPPDATA%\\\\win-desktop-helper\\\\http-token)\"}");
+                    string h403 = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + r403.Length + "\r\nConnection: close\r\n\r\n";
+                    byte[] hb403 = Encoding.ASCII.GetBytes(h403);
+                    ns.Write(hb403, 0, hb403.Length);
+                    ns.Write(r403, 0, r403.Length);
+                    ns.Flush();
+                    Log("auth fail " + path + " from " + client.Client.RemoteEndPoint);
+                    return;
+                }
+            }
             bool needUserSession = path.StartsWith("/mouse") || path.StartsWith("/keyboard") || path == "/shot" || path.StartsWith("/app") || path == "/open-repo" || path.StartsWith("/record") || path.StartsWith("/ui") || path.StartsWith("/win") || path == "/longshot";
             bool control = path.StartsWith("/mouse") || path.StartsWith("/keyboard");
             int code = 200;
@@ -3597,7 +3650,21 @@ public partial class ShotService
                 }
                 else if (path == "/pin")
                 {
-                    if (!q.ContainsKey("path")) { code = 400; body = "{\"ok\":false,\"error\":\"need path\"}"; }
+                    if (q.ContainsKey("close"))
+                    {
+                        // 自测收尾: 关掉所有 pin 窗口, 不留测试贴图糊屏 (老大铁律)
+                        int closedN = 0;
+                        List<IntPtr> handles;
+                        lock (PinForm.Ledger) handles = new List<IntPtr>(PinForm.Ledger.Keys);
+                        foreach (IntPtr h in handles)
+                        {
+                            try { PinForm pf = Control.FromHandle(h) as PinForm; if (pf != null) { pf.Close(); closedN++; } } catch { }
+                            lock (PinForm.Ledger) PinForm.Ledger.Remove(h);
+                        }
+                        body = "{\"ok\":true,\"closed\":" + closedN + "}";
+                        Log("[pin] close-all via http, closed=" + closedN);
+                    }
+                    else if (!q.ContainsKey("path")) { code = 400; body = "{\"ok\":false,\"error\":\"need path\"}"; }
                     else
                     {
                         int px = -1, py = -1; TryInt(q, "x", out px); TryInt(q, "y", out py);
@@ -4575,6 +4642,7 @@ public partial class ShotService
         Log("shot-service v" + APP_VERSION + " build=" + build + " session=" + MySession + " pid=" + Process.GetCurrentProcess().Id +
             " mode=" + (watchMode ? "watch" : "service") + (allowTray ? " tray=on" : " tray=off"));
         LoadRuntimeSettings();
+        HttpToken = LoadOrCreateHttpToken();
         try { if (!Directory.Exists(ShotDir)) Directory.CreateDirectory(ShotDir); } catch { }
 
         if (watchMode) { RunWatch(); return; }    // 自愈守护 (替代 shot-watcher.exe)
@@ -4644,6 +4712,31 @@ public partial class ShotService
             Application.Run();
         }
         else { while (true) Thread.Sleep(60000); }
+    }
+
+    // 🔴 HTTP token (2026-10-19 鉴权): 回环来源非豁免端点必须带 X-WDH-Token / ?token=。
+    // 文件放 %LOCALAPPDATA%\win-desktop-helper\http-token (用户目录 NTFS ACL 天然仅当前用户可读);
+    // 首次启动生成 (32 hex), 之后复用 —— bridge / 自测 curl 读它带 token, 网页 JS 读不到 = CSRF 被挡。
+    static string HttpToken = "";
+    static string LoadOrCreateHttpToken()
+    {
+        try
+        {
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "win-desktop-helper");
+            string fp = Path.Combine(dir, "http-token");
+            if (File.Exists(fp))
+            {
+                string t = File.ReadAllText(fp).Trim();
+                if (t.Length >= 16) return t;
+            }
+            Directory.CreateDirectory(dir);
+            string nt = Guid.NewGuid().ToString("N"); // 32 hex
+            File.WriteAllText(fp, nt);
+            try { File.WriteAllText(fp + ".howto", "HTTP 鉴权 token: 请求带 X-WDH-Token 头或 ?token= (豁免: /health /img/* /pick-*)\r\n"); } catch { }
+            Log("http token generated -> " + fp);
+            return nt;
+        }
+        catch (Exception ex) { Log("token load err: " + ex.Message); return ""; } // 空 token = 校验必然失败? 不: 空串放行会让鉴权形同虚设
     }
 
     static void ServerLoop()

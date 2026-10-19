@@ -116,6 +116,18 @@ partial class ShotService
             d["mark.seqFmt"] = string.IsNullOrEmpty(seqFmt) ? "1" : seqFmt;
             d["mark.mosaicStrength"] = mosaicStrength.ToString();
             d["mark.foldArrow"] = CaptureOverlay.foldArrowTool;
+            d["mark.foldShape"] = CaptureOverlay.foldShapeTool;
+            d["mark.foldTable"] = CaptureOverlay.foldTableTool;
+            d["mark.foldWm"] = CaptureOverlay.foldWmTool;
+            // 水印属性 (PixPin WatermarkConfig 语义)
+            d["mark.wmText"] = CaptureOverlay.WmCfgText ?? ""; // 仅落盘; 新会话不自动铺 (老大 2026-10-18)
+            d["mark.wmTile"] = CaptureOverlay.wmTile ? "1" : "0";
+            d["mark.wmOpacity"] = CaptureOverlay.wmOpacity.ToString();
+            d["mark.wmSize"] = CaptureOverlay.wmSize.ToString();
+            d["mark.wmSpace"] = CaptureOverlay.wmSpace.ToString();
+            d["mark.wmColor"] = CaptureOverlay.wmColor.ToArgb().ToString();
+            d["mark.wmAngle"] = CaptureOverlay.wmAngle.ToString();
+            d["mark.wmFont"] = CaptureOverlay.wmFont ?? "";
             d["mark.mosaicMode"] = mosaicMode.ToString();
             d["mark.hlAlpha"] = hlAlpha.ToString();
             // 橡皮擦粗细 (PixPin 同款键名 Mark.Eraser.PenWidth)

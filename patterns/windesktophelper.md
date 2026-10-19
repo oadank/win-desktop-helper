@@ -38,3 +38,9 @@ XDN 上 `/Run` 返回 SUCCESS 后立刻查：任务 Status=Ready、`tasklist` �
 - **LeCoo（本机）+ XDN 均已 0.0.24**，`/health` 实测 `version=0.0.24` / `session=1` / `elevated=true`；XDN 旧任务 `dsh-shot-helper` 已删
 - **shlc 未升级**（那台本来 OCR 就坏：没装 Ollama，用的是百度/远程 API）
 
+
+## HTTP API 鉴权：直调 18800 必须带 token（health/img/pick 除外）
+
+_记录日期: 2026-10-19 · 应用: win-desktop-helper_
+
+2026-10-19 起服务端强制鉴权（上线前全检立项）：回环来源的非豁免端点必须带 X-WDH-Token 头或 ?token= 参数，否则 403。token 文件 %LOCALAPPDATA%\win-desktop-helper\http-token（首次访问服务后生成，32hex）。豁免端点：/health、/img/*、/pick-*（旧脚本里裸 curl http://127.0.0.1:18800/mouse/* /keyboard/* /capture 等会 403，改成 ?token=$(cat %LOCALAPPDATA%/win-desktop-helper/http-token) 或加 header 即可）。Tailscale 来源（100.64.0.0/10）放行不用 token——防火墙 WDH-18800 规则同日已收窄到该网段，物理局域网/公网进不来。mcp-bridge.js 已自动带 token，走 bridge 的 agent 无感。

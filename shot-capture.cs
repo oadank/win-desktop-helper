@@ -306,6 +306,8 @@ partial class ShotService
         public bool Fill = false;    // 折线闭合填充 (PixPin MarkBar.BrokenLine.Fill: 首尾闭合成多边形纯色填满, 无头型/虚线)
         public int MosaicStrength = 8; // 马赛克块强度 (PixPin MarkBar.Mosaic.MosaicStrength; 越大块越粗)
         public int MosaicMode = 0;     // 马赛克模式 (PixPin MarkBar.Mosaic.MosaicMode: 0=马赛克 1=模糊)
+        public bool Smear = false;     // 🔴 涂抹打码 (独立工具 smear, PixPin MosaicCustom 手动涂抹同款): true=沿 Pts 轨迹糊化; false=选框矩形 (K_MOSAIC 原交互, 保留)
+        public float SmearW = 28f;     // 涂抹笔刷粗细 px (直径)
         public int HlMode = M_NORMAL; // 荧光笔混合模式 (默认半透明: 多笔重叠自然加深不互相擦; 正片叠底单笔质感好但多笔会覆盖, 待画布架构修)
         public int HlAlpha = 102;    // 荧光笔透明度 (0-255; 档位 51/102/153/204/255 = 20/40/60/80/100%, 默认 40%)
         public int MagPower = 2;     // 放大镜标注倍数 (PixPin MagnifierPower; 2/3/4)
@@ -486,61 +488,7 @@ partial class ShotService
     // 为什么不用 ContextMenuStrip: 菜单打开时第二次点击被菜单吞掉, "双击输入"永远到不了按钮 —
     // 改成 Form 弹层把输入框和列表放一起, 点开就能敲数字, 比双击少一步
     // ---- 水印输入弹窗 (PixPin AVWatermarkInputDialog 简版): 一行文字 + 确定/清除 ----
-    class WatermarkInput : Form
-    {
-        public string Result = null; // null=没点确定(直接关), ""=清除水印, 其他=新水印文字
-        readonly TextBox input;
-        public WatermarkInput(string seed)
-        {
-            AutoScaleMode = AutoScaleMode.None;
-            FormBorderStyle = FormBorderStyle.None;
-            ShowInTaskbar = false; TopMost = true; StartPosition = FormStartPosition.Manual;
-            BackColor = Color.FromArgb(40, 41, 46);
-            KeyPreview = true;
-            Size = new Size(360, 96);
-            using (GraphicsPath gp = StylePopup.RoundPath(0, 0, Width, Height, 8)) Region = new Region(gp);
-
-            Label tip = new Label();
-            tip.Text = "水印文字 (留空清除)";
-            tip.ForeColor = Color.FromArgb(150, 158, 168);
-            tip.Font = new Font("Microsoft YaHei UI", 8.5f);
-            tip.SetBounds(14, 10, 330, 18);
-            Controls.Add(tip);
-
-            input = new TextBox();
-            input.BorderStyle = System.Windows.Forms.BorderStyle.None;
-            input.BackColor = Color.FromArgb(56, 57, 64);
-            input.ForeColor = Color.White;
-            input.Font = new Font("Microsoft YaHei UI", 10.5f);
-            input.Text = seed == null ? "" : seed;
-            input.SetBounds(14, 32, 330, 26);
-            Controls.Add(input);
-
-            Button ok = new Button();
-            ok.Text = "确定";
-            ok.FlatStyle = FlatStyle.Flat; ok.FlatAppearance.BorderSize = 0;
-            ok.BackColor = Color.FromArgb(47, 156, 245); ok.ForeColor = Color.White;
-            ok.SetBounds(200, 64, 66, 24);
-            ok.Click += delegate { Result = input.Text.Trim(); Close(); };
-            Controls.Add(ok);
-
-            Button clr = new Button();
-            clr.Text = "清除";
-            clr.FlatStyle = FlatStyle.Flat; clr.FlatAppearance.BorderSize = 0;
-            clr.BackColor = Color.FromArgb(56, 57, 64); clr.ForeColor = Color.FromArgb(220, 224, 230);
-            clr.SetBounds(276, 64, 66, 24);
-            clr.Click += delegate { Result = ""; Close(); };
-            Controls.Add(clr);
-
-            KeyDown += delegate(object o, KeyEventArgs ev)
-            {
-                if (ev.KeyCode == Keys.Escape) { Result = null; Close(); }
-                else if (ev.KeyCode == Keys.Enter) { Result = input.Text.Trim(); Close(); }
-            };
-            Deactivate += delegate { try { Close(); } catch { } }; // 点外面 = 取消
-        }
-    }
-
+    // WatermarkInput 已移到 wm-input.cs (PixPin 水印属性面板复刻版, 老大 2026-10-18)
     // ---- 水印输入弹窗 占位 ----
     class FontInputPopup : Form
     {
@@ -860,6 +808,8 @@ partial class ShotService
             // 中心像素: 白底黑框小方块 (照截图)
             g.FillRectangle(Brushes.White, LX + cxOff - 1, LY + cyOff - 1, MagZoom + 2, MagZoom + 2);
             using (Pen bp = new Pen(Color.Black, 1.5f)) g.DrawRectangle(bp, LX + cxOff - 1, LY + cyOff - 1, MagZoom + 2, MagZoom + 2);
+            // 🔴 工具预览 (老大 2026-10-18): 选了工具后放大镜中央变该工具的光标样式; 未选工具保持纯像素取色
+            if (tool != null) DrawMagToolPreview(g, LX + cxOff, LY + cyOff);
             // 外框 (只框放大图本体)
             using (Pen op = new Pen(Color.FromArgb(200, 255, 255, 255), 1)) g.DrawRectangle(op, LX, LY, dst.Width - 1, imgH - 1);
 
@@ -877,14 +827,19 @@ partial class ShotService
                 // ① 坐标行 (PixPin lblPos)
                 g.DrawString(posTxt, f, Brushes.White, tx, ty);
                 ty += 19;
-                // ② 颜色行 (PixPin colorBoxContainer: 色块 + 颜色值)
-                g.FillRectangle(new SolidBrush(curPx), tx, ty + 1, 14, 14);
-                g.DrawRectangle(Pens.White, tx, ty + 1, 14, 14);
-                g.DrawString(colorTxt, f, Brushes.White, tx + 19, ty);
+                // ② 颜色行 (未选工具=取色模式, PixPin colorBoxContainer: 色块+颜色值) / 选了工具=工具信息行
+                if (tool == null)
+                {
+                    g.FillRectangle(new SolidBrush(curPx), tx, ty + 1, 14, 14);
+                    g.DrawRectangle(Pens.White, tx, ty + 1, 14, 14);
+                    g.DrawString(colorTxt, f, Brushes.White, tx + 19, ty);
+                }
+                else g.DrawString(MagToolInfoText(), f, Brushes.White, tx, ty);
                 ty += 20;
-                // ③ 快捷键提示行 (PixPin lblTips, 小字灰白)
-                using (SolidBrush tb = new SolidBrush(Color.FromArgb(215, 235, 235, 235)))
-                    g.DrawString("Shift:切换 C:复制", fs, tb, tx, ty);
+                // ③ 快捷键提示行 (PixPin lblTips, 小字灰白) — 取色模式才显示
+                if (tool == null)
+                    using (SolidBrush tb = new SolidBrush(Color.FromArgb(215, 235, 235, 235)))
+                        g.DrawString("Shift:切换 C:复制", fs, tb, tx, ty);
             }
             // 外框包整体 (放大图 + 信息条) — 出界文字会在框外留残影, 必须框住
             using (Pen op3 = new Pen(Color.FromArgb(200, 255, 255, 255), 1))
@@ -893,11 +848,98 @@ partial class ShotService
             return mr;
         }
 
+        // 放大镜中央的工具光标预览 (老大 2026-10-18: 橡皮=方位圈 / 笔=当前粗细颜色笔头 / 序号=下一个徽章 / 文字=光标 / 形状=十字)
+        void DrawMagToolPreview(Graphics g, int cx, int cy)
+        {
+            try
+            {
+                switch (tool)
+                {
+                    case "eraser":
+                    {
+                        int d = Math.Max(6, (int)curEraserW);
+                        using (Pen p = new Pen(Color.White, 1.5f)) g.DrawEllipse(p, cx - d / 2, cy - d / 2, d, d);
+                        using (Pen p2 = new Pen(Color.Black, 1f)) g.DrawEllipse(p2, cx - d / 2 - 1, cy - d / 2 - 1, d + 2, d + 2);
+                        break;
+                    }
+                    case "pen":
+                    case "highlight":
+                    {
+                        int d = Math.Max(3, (int)Math.Round(curWidth));
+                        Color c = tool == "highlight" ? Color.FromArgb(curHlAlpha, curColor) : curColor;
+                        using (SolidBrush b = new SolidBrush(c)) g.FillEllipse(b, cx - d / 2, cy - d / 2, d, d);
+                        using (Pen p = new Pen(Color.White, 1f)) g.DrawEllipse(p, cx - d / 2 - 1, cy - d / 2 - 1, d + 2, d + 2);
+                        break;
+                    }
+                    case "seq":
+                    {
+                        // 下一个序号徽章 (与正式绘制同款正圆: SeqBadgeRect 复刻 PixPin)
+                        int d = Math.Max(18, curFontPt * 2);
+                        using (SolidBrush b = new SolidBrush(curColor)) g.FillEllipse(b, cx - d / 2, cy - d / 2, d, d);
+                        using (StringFormat sf = new StringFormat())
+                        {
+                            sf.Alignment = StringAlignment.Center; sf.LineAlignment = StringAlignment.Center; sf.FormatFlags = StringFormatFlags.NoWrap;
+                            // 🔴 禁止 using 包缓存字体: GetAnnotFont 返回的是 fontCache 共享实例,
+                            //    Dispose 后所有后续序号绘制 DrawString 直接抛「参数无效」(老大 2026-10-18 实锤崩溃)
+                            Font f = GetAnnotFont(curFontFamily, Math.Max(8, curFontPt));
+                                g.DrawString(SeqText(seqNext, curSeqFmt), f, Brushes.White, new RectangleF(cx - d, cy - d / 2 - 4, d * 2, d + 8), sf);
+                        }
+                        break;
+                    }
+                    case "text":
+                    {
+                        // I-beam 文本光标
+                        using (Pen p = new Pen(Color.White, 1.5f))
+                        {
+                            g.DrawLine(p, cx, cy - 9, cx, cy + 9);
+                            g.DrawLine(p, cx - 4, cy - 9, cx + 4, cy - 9);
+                            g.DrawLine(p, cx - 4, cy - 6, cx, cy - 9);
+                            g.DrawLine(p, cx + 4, cy - 6, cx, cy - 9);
+                            g.DrawLine(p, cx - 4, cy + 9, cx + 4, cy + 9);
+                            g.DrawLine(p, cx - 4, cy + 6, cx, cy + 9);
+                            g.DrawLine(p, cx + 4, cy + 6, cx, cy + 9);
+                        }
+                        break;
+                    }
+                    default:
+                    {
+                        // 形状/箭头/折线/马赛克/放大镜标注: 十字准星
+                        using (Pen p = new Pen(Color.White, 1.5f))
+                        {
+                            g.DrawLine(p, cx - 10, cy, cx - 4, cy); g.DrawLine(p, cx + 4, cy, cx + 10, cy);
+                            g.DrawLine(p, cx, cy - 10, cx, cy - 4); g.DrawLine(p, cx, cy + 4, cx, cy + 10);
+                        }
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // 信息条第二行: 工具态显示工具名+当前参数 (取代取色值)
+        string MagToolInfoText()
+        {
+            switch (tool)
+            {
+                case "eraser": return "橡皮擦 " + (int)curEraserW + "px";
+                case "pen": return "画笔 " + curWidth.ToString("0.#") + "px";
+                case "highlight": return "荧光笔 " + curWidth.ToString("0.#") + "px " + HlAlphaLabel(curHlAlpha);
+                case "seq": return "序号 " + SeqText(seqNext, curSeqFmt) + " (" + SeqFmtLabel(curSeqFmt) + ")";
+                case "text": return "文字 " + curFontPt + "pt";
+                case "mosaic": return "马赛克 " + curMosaicStrength;
+                case "smear": return "涂抹 " + curSmearW;
+                default: return "";
+            }
+        }
+
         // ---- 放大镜小窗同步 (每帧/每次状态变化调一次) ----
         // 位置变了 → 挪窗; 像素/坐标/格式变了 → 重画离屏画布; 都变了才 Invalidate。
         void SyncMagForm()
         {
             if (IsDisposed || Disposing) return;
+            // 🔴 老大 2026-10-18: 一旦选了任何工具(或进入文字输入/标注二次编辑态)就不再显示像素放大提取,
+            //    只按工具显示对应鼠标样式; 像素放大小窗只在「刚框选完、没选工具」时出现。
+            if (tool != null || textMode || selAnnot != null) { HideMagForm(); return; }
             if (!MagOn() || frozen == null || !lastMouseOk || recMode)
             {
                 HideMagForm();
@@ -921,7 +963,9 @@ partial class ShotService
             if (!magForm.Visible) { magForm.Show(); }
             // 遮罩一旦不是活动窗 (点了工具条/属性栏), 放大镜窗会飘到上面 → 顶回来保持层级
             if (magForm.TopMost) RaiseMagNoActivate(magForm);
-            string sig = m.X + "," + m.Y + "," + ShiftDown() + "," + (magToast == null ? "" : magToast);
+            string sig = m.X + "," + m.Y + "," + ShiftDown() + "," + (magToast == null ? "" : magToast)
+                + "," + tool + "," + curWidth + "," + curEraserW + "," + curColor + "," + seqNext
+                + "," + curFontPt + "," + curSeqFmt + "," + curHlAlpha + "," + curMosaicStrength;
             if (sig != magSig)
             {
                 magSig = sig;
@@ -1034,6 +1078,85 @@ partial class ShotService
             if (foldArrowTool == "curve") return "曲线标注 (单击加点, 双击或回车收尾) · 右下角小三角展开换箭头/折线";
             return "箭头标注 · 右下角小三角展开换折线/曲线";
         }
+        // 画笔/荧光笔折叠槽 (老大 2026-10-18: 收一个按钮; 马克笔去掉 — 与荧光笔肉眼无区别)
+        internal static string foldPenTool = "pen";
+        ToolbarPanel.Btn foldPenBtn;
+        // 打码折叠槽 (老大 2026-10-19 定): 马赛克(选框)/涂抹 二合一按钮, 右下角小三角切换
+        internal static string foldMosaicTool = "mosaic";
+        ToolbarPanel.Btn foldMosaicBtn;
+        int curSmearW = 28; // 涂抹笔刷粗细 px (直径; 滚轮可调 8~80, 老大要求独立于马赛克强度)
+        ContextMenuStrip foldPenMenu;
+        System.Collections.Generic.List<ToolStripItem> foldPenMenuItems;
+        ContextMenuStrip foldMosaicMenu;
+        System.Collections.Generic.List<ToolStripItem> foldMosaicMenuItems;
+        static string FoldPenTip()
+        {
+            if (foldPenTool == "highlight") return "荧光笔 (拖动高亮文字/区域, 正片叠底) · 右下角小三角展开换自由画笔";
+            return "自由画笔 · 右下角小三角展开换荧光笔";
+        }
+        static string FoldMosaicTip()
+        {
+            if (foldMosaicTool == "smear") return "涂抹打码 (按住涂, 涂哪糊哪; 滚轮调粗细) · 小三角展开换选框马赛克";
+            return "马赛克 (拖动打码) · 右下角小三角展开换涂抹打码";
+        }
+        static string FoldShapeTip()
+        {
+            if (foldShapeTool == "ellipse") return "椭圆标注 · 右下角小三角展开换矩形";
+            return "矩形标注 · 右下角小三角展开换椭圆";
+        }
+        static string FoldTableTip()
+        {
+            if (foldTableTool == "latex") return "公式识别 (出 LaTeX) · 右下角小三角展开换表格识别";
+            return "表格识别 (出 Markdown, 可贴 Excel) · 右下角小三角展开换公式识别";
+        }
+        string FoldWmTip()
+        {
+            if (foldWmTool == "wm")
+                return wmText.Length > 0 ? ("水印: " + wmText + " (点击修改/清除) · 右下角小三角展开换文字标注") : "水印 (点击输入, 复制/保存时叠加) · 右下角小三角展开换文字标注";
+            return "文字标注 (点击选区内输入, 回车落字) · 右下角小三角展开换水印";
+        }
+        // 通用折叠槽菜单 (foldArrow/foldPen 手写两遍后抽的通用版; 老大 2026-10-18 新增 形状/表格公式/文字水印 三个槽)
+        // 菜单建一次复用 (每次 new 会卡, 2026-10-17 实测), 弹出前刷新当前项加粗。
+        ContextMenuStrip BuildFoldSlot(out System.Collections.Generic.List<ToolStripItem> items,
+            string[][] members, Func<string> getTool, Action<string> apply)
+        {
+            items = new System.Collections.Generic.List<ToolStripItem>();
+            System.Collections.Generic.List<ToolStripItem> lst = items;
+            ContextMenuStrip m = DarkMenu();
+            foreach (string[] mem in members)
+            {
+                string key = mem[0];
+                var it = new ToolStripMenuItem(mem[1], MakeIcon(key, 18), delegate { apply(key); });
+                it.Tag = key;
+                if (mem.Length > 2 && !string.IsNullOrEmpty(mem[2])) it.ShortcutKeyDisplayString = mem[2];
+                it.ForeColor = DarkUI.Text;
+                lst.Add(it);
+                m.Items.Add(it);
+            }
+            m.Opening += delegate
+            {
+                foreach (ToolStripItem it2 in lst)
+                {
+                    bool cur = (string)it2.Tag == getTool();
+                    it2.Font = new Font(m.Font, cur ? FontStyle.Bold : FontStyle.Regular);
+                }
+            };
+            return m;
+        }
+        // 形状折叠槽 / 表格公式折叠槽 / 文字水印折叠槽 (老大 2026-10-18 09:14 定的收纳布局)
+        internal static string foldShapeTool = "rect";
+        ToolbarPanel.Btn foldShapeBtn;
+        ContextMenuStrip foldShapeMenu;
+        System.Collections.Generic.List<ToolStripItem> foldShapeMenuItems;
+        internal static string foldTableTool = "table";
+        ToolbarPanel.Btn foldTableBtn;
+        ContextMenuStrip foldTableMenu;
+        System.Collections.Generic.List<ToolStripItem> foldTableMenuItems;
+        internal static string foldWmTool = "text";   // 槽位成员: text=文字标注 / wm=水印
+        ToolbarPanel.Btn foldWmBtn;
+        ToolbarPanel.Btn magBtnRef; // 放大镜倍数按钮引用, OnMouseWheel 滚轮时同步按钮文字
+        ContextMenuStrip foldWmMenu;
+        System.Collections.Generic.List<ToolStripItem> foldWmMenuItems;
         static CaptureOverlay()
         {
             try
@@ -1041,6 +1164,17 @@ partial class ShotService
                 markLoaded = true;
                 string fa = Cfg("mark.foldArrow", "");
                 if (fa == "poly" || fa == "curve" || fa == "arrow") foldArrowTool = fa;
+                string fsp = Cfg("mark.foldShape", ""); if (fsp == "rect" || fsp == "ellipse") foldShapeTool = fsp;
+                string ftb = Cfg("mark.foldTable", ""); if (ftb == "table" || ftb == "latex") foldTableTool = ftb;
+                // 🔴 老大 2026-10-18: foldWmTool 不恢复 — 新截图会话工具默认"文字", 不能残留"水印"
+                // 🔴 老大 2026-10-18: wmText 不恢复 — PixPin 新会话不自动铺上次的水印文字 (属性值仍恢复)
+                wmTile = Cfg("mark.wmTile", "1") == "1";
+                int wop; if (int.TryParse(Cfg("mark.wmOpacity", ""), out wop) && wop >= 1 && wop <= 100) wmOpacity = wop;
+                int wsz; if (int.TryParse(Cfg("mark.wmSize", ""), out wsz) && wsz >= 8 && wsz <= 72) wmSize = wsz;
+                int wsp; if (int.TryParse(Cfg("mark.wmSpace", ""), out wsp) && wsp >= 0 && wsp <= 120) wmSpace = wsp;
+                int wcl; if (int.TryParse(Cfg("mark.wmColor", ""), System.Globalization.NumberStyles.Integer, null, out wcl)) wmColor = Color.FromArgb(wcl);
+                int wag; if (int.TryParse(Cfg("mark.wmAngle", ""), out wag) && wag >= 0 && wag <= 90) wmAngle = wag; // 角度是属性, 恢复; 文字不恢复
+                string wft = Cfg("mark.wmFont", null); if (!string.IsNullOrEmpty(wft)) wmFont = wft;
                 int ms2; if (int.TryParse(Cfg("mark.mosaicStrength", ""), out ms2) && ms2 >= 2 && ms2 <= 40) markMosaicStrength0 = ms2;
                 int ha2; if (int.TryParse(Cfg("mark.hlAlpha", ""), out ha2) && ha2 >= 0 && ha2 <= 255) markHlAlpha0 = ha2;
                 int mm2; if (int.TryParse(Cfg("mark.mosaicMode", ""), out mm2) && (mm2 == 0 || mm2 == 1)) markMosaicMode0 = mm2;
@@ -1118,6 +1252,24 @@ partial class ShotService
         int curMagPower = 2;                        // 放大镜标注倍数 (2/3/4, PixPin MagnifierPower)
         // ---- 水印 (PixPin WatermarkInScreenShot): 输入文字, 复制/保存时叠加; static = 会话记忆上次输入 ----
         static string wmText = "";
+        // 水印属性 (PixPin WatermarkConfig 语义, 默认值照老大截图: 平铺/不透明度30/大小18/间距20)
+        internal static bool wmTile = true;
+        internal static int wmOpacity = 30;   // 0~100%
+        internal static int wmSize = 18;      // 字号 pt
+        internal static int wmSpace = 20;     // 平铺间距 px
+        internal static int wmAngle = 45;     // 平铺旋转角 (老大 2026-10-18: PixPin 默认 45°)
+        internal static string wmFont = "Microsoft YaHei UI"; // 水印字体 (老大 2026-10-18: 要可换字体)
+        internal static Color wmColor = Color.White;
+        // 水印实时预览回调 (WatermarkInput 面板实时写回 → 遮罩立刻重画)
+        public static void WmPreviewText(string t) { wmText = t; OverlayInv(); }
+        public static void WmPreviewTile(bool t) { wmTile = t; OverlayInv(); }
+        public static void WmPreviewOpacity(int v) { wmOpacity = v; OverlayInv(); }
+        public static void WmPreviewSize(int v) { wmSize = v; OverlayInv(); }
+        public static void WmPreviewColor(Color c) { wmColor = c; OverlayInv(); }
+        public static void WmPreviewAngle(int v) { wmAngle = v; OverlayInv(); }
+        public static void WmPreviewFont(string f) { wmFont = f; OverlayInv(); }
+        static void OverlayInv() { try { CaptureOverlay lv = live; if (lv != null && !lv.IsDisposed) lv.Invalidate(); } catch { } }
+        internal static string WmCfgText { get { return wmText; } }
         ToolbarPanel.Btn wmBtn;
         DateTime shownAt = DateTime.MinValue; // 遮罩显示时刻 (失焦守卫宽限期起点)
         // ---- Esc 保底钩子 (2026-10-18 老大报 Esc 失效, 实锤复现: 前台=遮罩, SendInput 真发 Esc 无人收) ----
@@ -1260,6 +1412,10 @@ partial class ShotService
             AutoScaleMode = AutoScaleMode.None; // 125% DPI 下 Form 的 Font 缩放会整体放大子控件坐标 → 属性栏网格/列表错位重叠; 本程序全按物理像素设计
             live = this;
             frozen = preShot;
+            // 🔴 老大 2026-10-18 二次点名: 服务进程不重启, wmText/foldWmTool 静态字段跨截图残留
+            //    (上次会话设的水印, 新截图默认就在上面 = bug)。PixPin 同款: 每次新截图重置, 文字不自动铺, 工具回默认。
+            wmText = "";
+            foldWmTool = "text";
             // 性能关键 (PixPin 同款"反向遮罩"): 背景直接用冻结原图 (框内=原亮度透出),
             // 暗层在 OnPaint 里画成「选区外的 4 块纯色矩形」— 每帧零大图 DrawImage, 只填纯色。
             // 旧做法(预合成暗化图 blit + 选区亮块 DrawImage)每帧两次大图采样, 实测拖动巨卡
@@ -1343,6 +1499,33 @@ partial class ShotService
             // 属性栏悬停滚轮调值 (PixPin 同款): 粗细/字号/编号格式等按钮上直接滚, 不用点开下拉
             // (老框架下滚轮消息进有焦点的主窗 —— 截图期间主窗必持焦点, 在这里转发给属性栏)
             if (propBar != null && propBar.Visible && propBar.WheelAt(propBar.PointToClient(Cursor.Position), e.Delta > 0)) return;
+            // 🔴 放大镜标注: 悬停其上(或已选中)滚轮直接调该标注倍数 2x~6x (老大 2026-10-18: 要滚轮, 不要下拉)
+            Annot magTarget = selAnnot != null && selAnnot.Kind == Annot.K_MAGNIFIER ? selAnnot : null;
+            if (magTarget == null)
+            {
+                Point wp = PointToClient(Cursor.Position);
+                for (int i = annots.Count - 1; i >= 0; i--)
+                {
+                    Annot a = annots[i];
+                    if (a.Erased || a.Kind != Annot.K_MAGNIFIER) continue;
+                    if (BoundsOf(a).Contains(wp)) { magTarget = a; break; }
+                }
+            }
+            if (magTarget != null)
+            {
+                int p = Math.Max(2, magTarget.MagPower) + (e.Delta > 0 ? 1 : -1);
+                if (p > 6) p = 6;
+                if (p < 2) p = 2;
+                if (p != magTarget.MagPower)
+                {
+                    magTarget.MagPower = p;
+                    curMagPower = p;      // 下一个新标注跟随
+                    InvalidateAnnot(magTarget);
+                    if (magBtnRef != null) { magBtnRef.SVal = p; propBar.Invalidate(true); } // 滑块按钮: 同步圆钮位置
+                    Log("capture: sel mag power=" + p);
+                }
+                return;
+            }
             if (!hasSel && hoverChain.Length > 0 && tool == null && !textMode)
             {
                 int lv = hoverLevel < 0 ? hoverChain.Length - 1 : hoverLevel;
@@ -1371,6 +1554,14 @@ partial class ShotService
                         MarkProp();
                         Log("capture: wheel eraser width=" + curEraserW);
                     }
+                    return;
+                }
+                if (tool == "smear")
+                {
+                    // 涂抹粗细: 滚轮 ±2, 8~80 (老大要求独立粗细属性, 画笔同款交互)
+                    curSmearW = Math.Max(8, Math.Min(80, curSmearW + (e.Delta > 0 ? 2 : -2)));
+                    MarkProp();
+                    Log("capture: wheel smearW=" + curSmearW);
                     return;
                 }
                 bool wl = tool == "pen" || tool == "highlight" || tool == "marker" || tool == "mosaic" || tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "poly" || tool == "curve";
@@ -1451,11 +1642,9 @@ partial class ShotService
 
         void DrawSelHandles(Graphics g)
         {
-            if (!hasSel || textMode || dragging || resizeHandle >= 0)
-            {
-                Log("handles skip: hasSel=" + hasSel + " textMode=" + textMode + " dragging=" + dragging + " rh=" + resizeHandle);
-                return;
-            }
+            // 🔴 2026-10-19 卡顿实锤: 这里原来每次重绘都 Log 一行, 拉手柄时每帧写文件 IO 阻塞 UI 线程
+            //    (日志已 22 万行/17MB) → 老大实测"拉边上的点非常不跟手"。日志删除, 此分支是正常路径不是异常。
+            if (!hasSel || textMode || dragging || resizeHandle >= 0) return;
             // 🔴 外观照 2026-10-17 老大提供的 PixPin 截图实测:
             //   圆形(不是方块) · 天蓝 #2F9CF5 · 直径约 9px · 白色描边约 2px · 8 个点(四角+四边中点)
             //   (旧版是白底方块+蓝色方框, 手搓的, 已按实测替换)
@@ -1612,6 +1801,7 @@ partial class ShotService
                            tool == "mosaic" ? Annot.K_MOSAIC : tool == "highlight" ? Annot.K_HIGHLIGHT :
                            tool == "marker" ? Annot.K_MARKER : tool == "magnifier" ? Annot.K_MAGNIFIER : Annot.K_PEN;
                 cur.MosaicStrength = curMosaicStrength; cur.MosaicMode = curMosaicMode; cur.HlMode = curHlMode; cur.HlAlpha = curHlAlpha;
+                if (tool == "smear") { cur.Kind = Annot.K_MOSAIC; cur.Smear = true; cur.SmearW = curSmearW; } // 🔴 涂抹打码: 独立工具, 复用 K_MOSAIC 的强度/模式/渲染, 交互走路径
                 if (cur.Kind == Annot.K_MAGNIFIER) cur.MagPower = curMagPower;
                 cur.Width = curWidth; cur.Color = curColor; cur.FontPt = curFontPt; cur.FontFamily = curFontFamily;
                 cur.StartType = curStartType; cur.EndType = curEndType; cur.Smooth = curSmooth; cur.Dash = curDash;
@@ -1638,7 +1828,8 @@ partial class ShotService
                     }
                     cur = null; // 序号一笔即成
                 }
-                else if (cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT || cur.Kind == Annot.K_MARKER)
+                else if (cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT || cur.Kind == Annot.K_MARKER
+                    || (cur.Kind == Annot.K_MOSAIC && cur.Smear)) // 🔴 涂抹打码 (独立工具 smear): 按住涂, 轨迹存 Pts; K_MOSAIC 选框式保持原样
                 {
                     cur.Pts = new List<Point> { sp };
                     // 铅笔 Shift 直线状态复位 (本次笔画从头判)
@@ -1711,7 +1902,9 @@ partial class ShotService
                 int hh = HitHandle(e.Location);
                 if (hh >= 0) Cursor = HandleCursors[hh];
                 else if (tool == null && selAnnot == null && sel.Contains(sp)) Cursor = Cursors.SizeAll;
-                else Cursor = Cursors.Cross;
+                // 🔴 老大 2026-10-18: 选区外=默认箭头 (十字没法点工具条三角); 选区内保持十字 (取色/画标注)
+                else if (sel.Contains(sp)) Cursor = Cursors.Cross;
+                else Cursor = Cursors.Default;
             }
             if (pendingDown && !dragging)
             {
@@ -1753,7 +1946,8 @@ partial class ShotService
                         InvalidateAnnot(Rectangle.Union(oldB, new Rectangle(polyHover, Size.Empty)));
                     }
                 }
-                else if (cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT || cur.Kind == Annot.K_MARKER)
+                else if (cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT || cur.Kind == Annot.K_MARKER
+                    || (cur.Kind == Annot.K_MOSAIC && cur.Smear)) // 🔴 涂抹打码: 沿轨迹加点 (渲染时沿粗线糊化)
                 {
                     bool shift = (Control.ModifierKeys & Keys.Shift) != 0;
                     bool firstShift = false;
@@ -1918,8 +2112,14 @@ partial class ShotService
         volatile bool hoverStop = false;
         volatile int uiaDisabled = 0;
         static volatile int uiaFailStreak = 0; // 连续慢/异常计数; 首查可能因 Chromium 惰性建树很慢, 连 5 次才停用
-        // 慢窗冷却 (2026-10-18): 单窗查一次 >800ms → 60s 内跳过 UIA 细化投递, 只出粗框 (防"不跟手")
+        // 慢窗冷却 (2026-10-19 改判据, 老大实测铁证):
+        //   原规则"窗口查询 >800ms → 冷却 60s"会把天生慢的窗口一刀切关死 1 分钟。
+        //   日志实锤: 1280x1380 那窗 4 次查询 1782/1672/2004/1897ms 从没热过, 每次一慢就进冷却,
+        //   老大测试全程在冷却期内 → 只出粗框。PixPin 没这根保险丝, 宁可慢也出细框。
+        //   新规则: 同一窗口前 3 次慢只记日志不冷却 (慢≠坏, 让它查, 结果照样入库);
+        //   第 4 次起才记冷却, 且 60s → 10s (防的是真卡死, 不是天生慢)。
         static readonly Dictionary<IntPtr, DateTime> uiaSlowHwnd = new Dictionary<IntPtr, DateTime>();
+        static readonly Dictionary<IntPtr, int> uiaSlowHits = new Dictionary<IntPtr, int>();
         static readonly object uiaSlowLock = new object();
         static bool UiaSlowCooldown(IntPtr h)
         {
@@ -1927,7 +2127,7 @@ partial class ShotService
             {
                 DateTime t;
                 if (!uiaSlowHwnd.TryGetValue(h, out t)) return false;
-                if ((DateTime.Now - t).TotalSeconds > 60) { uiaSlowHwnd.Remove(h); return false; }
+                if ((DateTime.Now - t).TotalSeconds > 10) { uiaSlowHwnd.Remove(h); uiaSlowHits.Remove(h); return false; }
                 return true;
             }
         }
@@ -1984,7 +2184,7 @@ partial class ShotService
                             fin = new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
                             // 🔴 先查 UIA 缓存 (照 PixPin SnapshotAllWinRect: 查点走内存, 不问系统)
                             //    命中 = 鼠标上次已探索过的元素内 → 立刻出细框, 不等任何跨进程查询。
-                            Rectangle cached = HitUiaCache(h, sp);
+                            Rectangle cached = HitUiaCache(h, sp, fin);
                             bool cacheHit = cached != Rectangle.Empty && fin.Contains(cached);
                             if (cacheHit)
                             {
@@ -2065,6 +2265,8 @@ partial class ShotService
                     }
                     lastHwnd = h;
                     ApplyHover(fin, chainFresh); // 换窗=短滑(110ms), 同窗微调=滑动过渡(90ms)
+                    // 进程级缓存清理: 每 ~1.8s 扫一遍死窗口/动过的窗口 (关掉的窗不删会白涨且可能误命中)
+                    if (++uiaCacheGcTick >= 150) { uiaCacheGcTick = 0; try { UiaCacheGc(); } catch { } }
                 }
                 catch { }
                 System.Threading.Thread.Sleep(12); // 采样 12ms (原 25ms: 跨控件停留多久才出框, 老大实测"比 PixPin 慢半拍")
@@ -2072,7 +2274,7 @@ partial class ShotService
         }
 
         // UIA 细化专用线程: 慢查询全在这里跑, 悬停循环只投请求/收结果 → 换窗/移动永远跟手
-        readonly object uiaLock = new object();
+        // (uiaLock 已提到缓存区定义成 static, 与进程级缓存同生命周期)
         IntPtr reqHwnd = IntPtr.Zero; Point reqPt;
         int reqSeq = 0;  // 请求代际: 悬停循环每投一次新请求 +1; 细化线程做完发现代际已变 = 结果过时, 直接丢
         Rectangle uiaResult = Rectangle.Empty; IntPtr uiaResultHwnd = IntPtr.Zero;
@@ -2080,6 +2282,7 @@ partial class ShotService
         System.Threading.AutoResetEvent uiaKick = new System.Threading.AutoResetEvent(false);
         System.Threading.Thread refinerThread;
         Rectangle lastUiaLogged = Rectangle.Empty; // 诊断: 上次已记日志的细化结果 (变化才记, 不刷屏)
+        static int smearDbgN = 0; // 涂抹马赛克渲染诊断: 只打第一次 (DrawAnnots 是静态方法)
 
         void StartRefiner()
         {
@@ -2115,10 +2318,13 @@ partial class ShotService
                     // 无论是否过期都入库 (整链所有层都可用, 点落在哪层就用哪层)
                     if (ch.Length > 0 && uiaCacheList.Count < 4000)
                     {
+                        // 窗口矩形指纹 (防 HWND 被别的窗口复用后张冠李戴)
+                        Rectangle winRectFp = Rectangle.Empty;
+                        try { RECT wf; if (GetWindowRect(h, out wf)) winRectFp = Rectangle.FromLTRB(wf.Left, wf.Top, wf.Right, wf.Bottom); } catch { }
                         for (int i = 0; i < ch.Length; i++)
                         {
                             if (ch[i].Width < 4 || ch[i].Height < 4) continue;
-                            uiaCacheList.Add(new UiaCacheEntry { Hwnd = h, Rect = ch[i] });
+                            uiaCacheList.Add(new UiaCacheEntry { Hwnd = h, Rect = ch[i], WinRect = winRectFp });
                         }
                     }
                 }
@@ -2135,22 +2341,65 @@ partial class ShotService
         // ---- UIA 结果缓存 (照 PixPin UiRegionDetector 的 SnapshotAllWinRect + checkWinRectAlive 思路) ----
         // PixPin 不是每次悬停都去问系统: 它把窗口矩形快照下来, 查点走内存; UIA 只在必要时补一层。
         // 这里同理: UIA 查到的每一层都入库, 鼠标进到某个已知最内层矩形 = 立刻出框, 零等待。
-        struct UiaCacheEntry { public IntPtr Hwnd; public Rectangle Rect; }
-        readonly List<UiaCacheEntry> uiaCacheList = new List<UiaCacheEntry>();
+        // 🔴 static 进程级 (2026-10-19 老大追问"为什么小框识别不到"后定):
+        //    缓存原来是遮罩实例字段 → 每次 new CaptureOverlay() 清零 → 每开一次截图都要重付一遍
+        //    2s 级慢查询 (Chromium 大对话树), 然后撞 60s 冷却 → 整轮截图全是粗框。
+        //    日志铁证: 1280x1380 那个窗 4 次查询 1782/1672/2004/1897ms, 从没热过。
+        //    提升到进程级后: 开机第一次截图付一次, 之后全部内存命中 (PixPin 快照也是进程级留存)。
+        //    HWND 会被复用、窗口会被拖动 → 每条带 WinRect 指纹, 查询/清理时比对, 防张冠李戴。
+        struct UiaCacheEntry { public IntPtr Hwnd; public Rectangle Rect; public Rectangle WinRect; }
+        static readonly List<UiaCacheEntry> uiaCacheList = new List<UiaCacheEntry>();
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+        static readonly object uiaLock = new object(); // 🔴 必须跟缓存同 static: 跨遮罩实例互斥
+        static int uiaCacheGcTick = 0;
 
         // 在缓存里找"包含该点、面积最小"的那层 (= 最深的已知元素)
-        Rectangle HitUiaCache(IntPtr hwnd, Point pt)
+        // winRect = 目标窗口当前矩形 (指纹): 窗口被复用/移动过的条目一律不认
+        Rectangle HitUiaCache(IntPtr hwnd, Point pt, Rectangle winRect)
         {
             Rectangle best = Rectangle.Empty; long bestArea = long.MaxValue;
-            for (int i = 0; i < uiaCacheList.Count; i++)
+            lock (uiaLock)
             {
-                UiaCacheEntry e = uiaCacheList[i];
-                if (e.Hwnd != hwnd) continue;
-                if (!e.Rect.Contains(pt)) continue;
-                long a = (long)e.Rect.Width * e.Rect.Height;
-                if (a < bestArea) { bestArea = a; best = e.Rect; }
+                for (int i = 0; i < uiaCacheList.Count; i++)
+                {
+                    UiaCacheEntry e = uiaCacheList[i];
+                    if (e.Hwnd != hwnd) continue;
+                    if (e.WinRect != winRect) continue; // 窗口动过/句柄被复用 → 这条作废
+                    if (!e.Rect.Contains(pt)) continue;
+                    long a = (long)e.Rect.Width * e.Rect.Height;
+                    if (a < bestArea) { bestArea = a; best = e.Rect; }
+                }
             }
             return best;
+        }
+
+        // 清理: 窗口已关 + 窗口矩形变过的条目 (PixPin checkWinRectAlive 同思路)
+        void UiaCacheGc()
+        {
+            lock (uiaLock)
+            {
+                for (int i = uiaCacheList.Count - 1; i >= 0; i--)
+                {
+                    UiaCacheEntry e = uiaCacheList[i];
+                    bool dead = !IsWindow(e.Hwnd);
+                    if (!dead)
+                    {
+                        try
+                        {
+                            RECT w;
+                            if (!GetWindowRect(e.Hwnd, out w)) dead = true;
+                            else
+                            {
+                                var cur = Rectangle.FromLTRB(w.Left, w.Top, w.Right, w.Bottom);
+                                if (cur != e.WinRect) dead = true; // 窗口移动/缩放 → 旧坐标作废
+                            }
+                        }
+                        catch { dead = true; }
+                    }
+                    if (dead) uiaCacheList.RemoveAt(i);
+                }
+            }
         }
 
         void ClearUiaCache() { lock (uiaLock) { uiaCacheList.Clear(); } }
@@ -2427,8 +2676,22 @@ partial class ShotService
             // 慢只记日志不禁用: 首查慢是 Chromium 惰性建树 (实测 1761ms), 第二笔就走缓存 — 以前"慢5次全局禁UIA"把精度砍没了
             if (sw.ElapsedMilliseconds > 800)
             {
-                Log("hover uia slow: " + sw.ElapsedMilliseconds + "ms depth=" + chain.Count + " (记入冷却 60s, 粗框照常)");
-                lock (uiaSlowLock) { uiaSlowHwnd[hwnd] = DateTime.Now; } // 🔴 慢窗冷却
+                // 🔴 前 3 次慢只放过不冷却 (2026-10-19): 窗口天生慢 ≠ 卡死, 让它查完照样入库
+                int hits;
+                lock (uiaSlowLock)
+                {
+                    uiaSlowHits.TryGetValue(hwnd, out hits);
+                    uiaSlowHits[hwnd] = hits + 1;
+                }
+                if (hits >= 3)
+                {
+                    Log("hover uia slow: " + sw.ElapsedMilliseconds + "ms depth=" + chain.Count + " (第" + (hits + 1) + "次慢, 记入冷却 10s, 粗框照常)");
+                    lock (uiaSlowLock) { uiaSlowHwnd[hwnd] = DateTime.Now; }
+                }
+                else
+                {
+                    Log("hover uia slow: " + sw.ElapsedMilliseconds + "ms depth=" + chain.Count + " (第" + (hits + 1) + "次, 天生慢窗口放过不冷却)");
+                }
             }
             else uiaFailStreak = 0;
             return chain.ToArray();
@@ -2659,7 +2922,8 @@ partial class ShotService
                 }
                 else
                 {
-                    if (cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT || cur.Kind == Annot.K_MARKER) { if (cur.Pts.Count > 1) PushAnnot(cur); }
+                    if ((cur.Kind == Annot.K_PEN || cur.Kind == Annot.K_HIGHLIGHT || cur.Kind == Annot.K_MARKER
+                        || (cur.Kind == Annot.K_MOSAIC && cur.Smear)) && cur.Pts != null && cur.Pts.Count > 1) PushAnnot(cur); // 🔴 涂抹打码一笔提交
                     else if (cur.Kind == Annot.K_ARROW) { if (cur.Pts.Count >= 2 && cur.Pts[0] != cur.Pts[1]) PushAnnot(cur); }
                     else if (cur.Rect.Width > 2 && cur.Rect.Height > 2) PushAnnot(cur);
                     cur = null;
@@ -2715,7 +2979,8 @@ partial class ShotService
 
         static Rectangle BoundsOf(Annot a)
         {
-            if (a.Kind == Annot.K_PEN || a.Kind == Annot.K_POLY || a.Kind == Annot.K_HIGHLIGHT || a.Kind == Annot.K_MARKER)
+            if ((a.Kind == Annot.K_PEN || a.Kind == Annot.K_POLY || a.Kind == Annot.K_HIGHLIGHT || a.Kind == Annot.K_MARKER)
+                || (a.Kind == Annot.K_MOSAIC && a.Smear && a.Pts != null && a.Pts.Count > 0)) // 🔴 涂抹打码: 按路径算包围盒
             {
                 // 🔴 K_HIGHLIGHT 必须在这: 荧光笔的 Rect 是空的, 落到默认分支 = 失效区域为空 = 画完不重绘看不见,
                 // 直到下一笔(马赛克)的大区域重绘顺带把它带出来 (用户实测"画了没效果, 用马赛克后它出现了")
@@ -2723,6 +2988,7 @@ partial class ShotService
                 Rectangle r = new Rectangle(a.Pts[0], Size.Empty);
                 foreach (Point p in a.Pts) r = Rectangle.Union(r, new Rectangle(p, Size.Empty));
                 if (a.Kind == Annot.K_HIGHLIGHT || a.Kind == Annot.K_MARKER) r.Inflate((int)a.Width + 2, (int)a.Width + 2); // 荧光笔/马克笔是粗线, 包住线宽
+                if (a.Kind == Annot.K_MOSAIC && a.Smear) { int rad = Math.Max(4, (int)a.SmearW / 2); r.Inflate(rad, rad); } // 涂抹笔刷半径 (SmearW 直径一半)
                 return r;
             }
             if (a.Kind == Annot.K_TEXT)
@@ -2752,8 +3018,10 @@ partial class ShotService
         {
             if (a == null) return false;
             // 铅笔 / 橡皮擦 / 荧光笔 / 马赛克: PixPin 明确排除 (画布型标注没有"节点"可拖)
+            // 🔴 K_MAGNIFIER 加进来 (老大 2026-10-18: 放大镜标注无法选中拖动)
             return a.Kind == Annot.K_RECT || a.Kind == Annot.K_ELLIPSE || a.Kind == Annot.K_ARROW
-                || a.Kind == Annot.K_POLY || a.Kind == Annot.K_TEXT || a.Kind == Annot.K_SEQ;
+                || a.Kind == Annot.K_POLY || a.Kind == Annot.K_TEXT || a.Kind == Annot.K_SEQ
+                || a.Kind == Annot.K_MAGNIFIER;
         }
 
         // 当前工具"接管"哪些标注类型 —— 与 PixPin 的 switchMarkEditTypeTo 一一对应
@@ -2767,6 +3035,7 @@ partial class ShotService
                 case "arrow": return a.Kind == Annot.K_ARROW;
                 case "poly": case "curve": return a.Kind == Annot.K_POLY;
                 case "seq": return a.Kind == Annot.K_SEQ;
+                case "magnifier": return a.Kind == Annot.K_MAGNIFIER; // 🔴 老大 2026-10-18: 放大镜标注要能二次编辑 (选中拖动)
                 default: return false;
             }
         }
@@ -2804,7 +3073,8 @@ partial class ShotService
                     if (DistToSegment(sp, a.Pts[i], a.Pts[i + 1]) <= tol) return true;
                 return false;
             }
-            if (a.Kind == Annot.K_RECT || a.Kind == Annot.K_ELLIPSE || a.Kind == Annot.K_TEXT || a.Kind == Annot.K_SEQ)
+            if (a.Kind == Annot.K_RECT || a.Kind == Annot.K_ELLIPSE || a.Kind == Annot.K_TEXT || a.Kind == Annot.K_SEQ
+                || a.Kind == Annot.K_MAGNIFIER) // 🔴 老大 2026-10-18: 放大镜标注点不中 = 这里漏了, 默认分支直接 return false
             {
                 Rectangle r = BoundsOf(a); r.Inflate(tol, tol);
                 return r.Contains(sp);
@@ -2957,6 +3227,9 @@ partial class ShotService
             return true;
         }
 
+        // 选区尺寸标签字体 (缓存; 🔴 禁 Dispose —— 2026-10-18 序号崩溃同款教训)
+        static readonly Font SizeLabelFont = new Font("Consolas", 11);
+
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
@@ -3002,7 +3275,7 @@ partial class ShotService
                 g.FillRectangle(dim, 0, d.Top, Math.Max(0, d.Left), d.Height);                  // 左
                 g.FillRectangle(dim, d.Right, d.Top, Math.Max(0, W - d.Right), d.Height);       // 右
             }
-            DrawAnnots(g, Point.Empty);
+            // 标注在 textMode 之后统一画 (3200 行那次), 这里删掉重复的一次 —— 🔴 2026-10-19 卡顿修复: 拉手柄每帧画两遍全部标注
             if (textMode)
             {
                 // 编辑中文字: 自绘在截图上 (真透明), 支持旋转角
@@ -3025,6 +3298,15 @@ partial class ShotService
                     g.DrawPolygon(bp, RotatedTextCorners());
             }
             DrawAnnots(g, Point.Empty); // 选区内标注 (客户区即冻结图坐标, 偏移0)
+            // 水印实时预览 (老大 2026-10-18: 设置完立刻看到, 不是导出才叠加) — 与 CropTaken 导出同一套 DrawWatermark
+            if (!string.IsNullOrEmpty(wmText) && d.Width > 4 && d.Height > 4)
+            {
+                var wst = g.Save();
+                g.SetClip(d);
+                g.TranslateTransform(d.X, d.Y);
+                DrawWatermark(g, new Size(sel.Width, sel.Height));
+                g.Restore(wst);
+            }
             // 文字工具悬停已提交文字: 蓝框提示可点击重编辑 (随文字旋转; 其他工具不出现)
             if (tool == "text" && !textMode && hoverTextIdx >= 0 && hoverTextIdx < annots.Count
                 && annots[hoverTextIdx].Kind == Annot.K_TEXT)
@@ -3056,19 +3338,20 @@ partial class ShotService
                 DrawAnnotEditOverlay(g, Point.Empty); // 标注二次编辑: 虚线框 + 控制点
                 // 放大镜 (MagForm 顶层小窗) 不在此绘制, 见 SyncMagForm
             }
-            using (Font f = new Font("Consolas", 11))
+            // 🔴 禁 using 包 SizeLabelFont —— 2026-10-19 JIT 崩溃实锤 (MeasureString 参数无效):
+            //    静态缓存字体被 using Dispose, 第二帧 OnPaint 再用即崩 (同 10-18 序号崩溃教训, 我又踩一次)
             using (Brush b = new SolidBrush(Color.Yellow))
             using (Brush bg = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
             {
                 string size = sel.Width + " x " + sel.Height;
-                SizeF ts = g.MeasureString(size, f);
+                SizeF ts = g.MeasureString(size, SizeLabelFont);
                 float tx = d.X + d.Width / 2f - ts.Width / 2f; // 选区上方居中 (PixPin 同款)
                 float ty = d.Top - ts.Height - 6;
                 if (ty < 2) { ty = d.Bottom + 4; } // 出顶界翻到下方
                 if (tx < 2) tx = 2;
                 if (tx + ts.Width > ClientSize.Width - 2) tx = ClientSize.Width - ts.Width - 2;
                 g.FillRectangle(bg, tx - 3, ty - 1, ts.Width + 6, ts.Height + 2);
-                g.DrawString(size, f, b, tx, ty);
+                g.DrawString(size, SizeLabelFont, b, tx, ty);
             }
         }
 
@@ -3076,11 +3359,13 @@ partial class ShotService
         void DrawAnnots(Graphics g, Point offset)
         {
             // PixPin 同款: 标注端点创建时即钳进选区 (出不界), 故此处无需裁剪
-            DrawOne(g, cur, offset, true, frozen); // 正在绘制的画在最上层 (inProgress=true: 填充模式也先画线框)
+            // 🔴 每笔标注绘制包 try-catch (2026-10-19 老大实测 TextureBrush OOM 弹 JIT 框糊屏):
+            //    标注渲染出错绝不能崩 OnPaint —— 弹窗会盖住整个屏幕, 且遮罩进入"每帧弹一次"的死循环
+            try { DrawOne(g, cur, offset, true, frozen); } catch (Exception ex0) { Log("drawone cur err: " + ex0.Message); } // 正在绘制的画在最上层 (inProgress=true: 填充模式也先画线框)
             for (int i = 0; i < annots.Count; i++)
             {
                 if (annots[i].Erased) continue; // 橡皮擦软删除的跳过 (还留在 List 里供撤销)
-                DrawOne(g, annots[i], offset, false, frozen);
+                try { DrawOne(g, annots[i], offset, false, frozen); } catch (Exception ex1) { Log("drawone[" + i + "] kind=" + annots[i].Kind + " err: " + ex1.Message); }
             }
             // 折线/曲线绘制中: 橡皮筋 (最后一点→鼠标) + 已加点顶点 dot (PixPin 同款反馈)
             if (cur != null && cur.Kind == Annot.K_POLY && polyHoverOk && cur.Pts != null && cur.Pts.Count >= 1)
@@ -3211,6 +3496,87 @@ partial class ShotService
                     {
                         // 马赛克 (PixPin EditItemCustom/MarkBar.Mosaic.MosaicStrength): 原图块降采样再放大
                         // MosaicMode 0=马赛克(最近邻放大=方块) 1=模糊(双三次放大=平滑糊化), 强度=缩放比
+                        // 🔴 Smear=true = 涂抹打码 (独立工具 smear): 沿 Pts 轨迹糊化; Smear=false = 选框矩形 (原交互)
+                        if (src != null && a.Smear && a.Pts != null && a.Pts.Count > 1)
+                        {
+                            if (smearDbgN++ == 0)
+                                Log("smear render: pts=" + a.Pts.Count + " strength=" + a.MosaicStrength + " mode=" + a.MosaicMode
+                                    + " bounds=" + BoundsOf(a) + " src=" + src.Width + "x" + src.Height + " off=" + offset);
+                            int rad = Math.Max(4, (int)a.SmearW / 2); // 涂抹笔刷半径 (SmearW 直径的一半; 滚轮可调)
+                            Rectangle mr = BoundsOf(a); mr.Offset(-offset.X, -offset.Y);
+                            mr.Intersect(new Rectangle(0, 0, src.Width, src.Height));
+                            if (mr.Width > 2 && mr.Height > 2)
+                            {
+                                int block = Math.Max(2, a.MosaicStrength);
+                                int sw = Math.Max(1, mr.Width / block), sh = Math.Max(1, mr.Height / block);
+                                using (Bitmap small = new Bitmap(sw, sh))
+                                using (Graphics gs = Graphics.FromImage(small))
+                                {
+                                    gs.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                                    gs.PixelOffsetMode = PixelOffsetMode.Half;
+                                    gs.DrawImage(src, new Rectangle(0, 0, sw, sh), mr, GraphicsUnit.Pixel);
+                                    Bitmap blur = small; Bitmap small2 = null;
+                                    if (a.MosaicMode == 1)
+                                    {
+                                        // 模糊: 双三次插值放大 (无块感, 平滑糊化); 再过一遍小图强化糊度
+                                        small2 = new Bitmap(Math.Max(1, sw * 2), Math.Max(1, sh * 2));
+                                        using (Graphics gs2 = Graphics.FromImage(small2))
+                                        {
+                                            gs2.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                                            gs2.DrawImage(small, new Rectangle(0, 0, small2.Width, small2.Height));
+                                        }
+                                        blur = small2;
+                                    }
+                                    // 🔴 渲染方案 (2026-10-19 11:40 定): 糊图放大到 mr 等大 → TextureBrush 纹理颜料 + 粗圆头笔刷沿轨迹涂。
+                                    //    🔴 TextureBrush(image, dstRect) 的 dstRect 是「图内取样区」(必须小于图像), 传屏幕坐标区域 =
+                                    //    GDI+ 内部越界 = OutOfMemoryException (11:37 实测 JIT 弹窗), 禁用该重载。
+                                    //    现在糊图先放大到 mr 等大, 纹理 TranslateTransform(mr 原点) 对齐, Clamp 不平铺。
+                                    Bitmap full = null;
+                                    try
+                                    {
+                                        if (blur.Width != mr.Width || blur.Height != mr.Height)
+                                        {
+                                            full = new Bitmap(mr.Width, mr.Height);
+                                            using (Graphics fg = Graphics.FromImage(full))
+                                            {
+                                                fg.InterpolationMode = a.MosaicMode == 1 ? InterpolationMode.HighQualityBicubic : InterpolationMode.NearestNeighbor;
+                                                fg.PixelOffsetMode = PixelOffsetMode.Half;
+                                                fg.DrawImage(blur, 0, 0, mr.Width, mr.Height);
+                                            }
+                                            blur = full;
+                                        }
+                                        using (var tb = new TextureBrush(blur))
+                                        {
+                                            tb.WrapMode = System.Drawing.Drawing2D.WrapMode.Clamp;
+                                            tb.TranslateTransform(mr.X, mr.Y); // 纹理原点钉到 mr, 画线取样 1:1 对齐画布
+                                            using (Pen tp = new Pen(tb, a.SmearW))
+                                            {
+                                                tp.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                                                tp.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                                                tp.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+                                                if (a.MosaicMode != 1) { g.InterpolationMode = InterpolationMode.NearestNeighbor; g.PixelOffsetMode = PixelOffsetMode.Half; }
+                                                Point[] mpts = new Point[a.Pts.Count];
+                                                for (int i = 0; i < a.Pts.Count; i++)
+                                                    mpts[i] = new Point(a.Pts[i].X - offset.X, a.Pts[i].Y - offset.Y);
+                                                if (mpts.Length == 2 && mpts[0] == mpts[1])
+                                                    g.FillEllipse(tb, mpts[0].X - a.SmearW / 2f, mpts[0].Y - a.SmearW / 2f, a.SmearW, a.SmearW);
+                                                else
+                                                    g.DrawLines(tp, mpts);
+                                            }
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Log("smear paint err: " + ex.Message);
+                                        try { g.DrawImage(blur, mr); } catch { } // 回落: 整块糊 (可见性保底, 不崩)
+                                    }
+                                    finally { if (full != null) full.Dispose(); }
+                                    g.InterpolationMode = InterpolationMode.Bilinear;
+                                    g.PixelOffsetMode = PixelOffsetMode.Default;
+                                }
+                            }
+                            break;
+                        }
                         if (src != null)
                         {
                             Rectangle mr = a.Rect; mr.Offset(-offset.X, -offset.Y);
@@ -3459,32 +3825,68 @@ partial class ShotService
         void ShowWatermarkInput()
         {
             CommitTextInput();
-            // 弹在选区中心 (居中好看); 关掉输入焦点回遮罩, Esc 热键继续可用
-            using (WatermarkInput wi = new WatermarkInput(wmText))
+            // 🔴 老大 2026-10-18 定级最严重 bug: 原来 ShowDialog 模态把整个遮罩锁死 (确认/×/切工具全点不了, 只有 Esc)。
+            //    改非模态 Show: 面板开着也能点工具条/确认/×, 属性全部实时预览, 本来就不需要"确定"。
+            // 🔴 单实例: 已开着就聚焦, 不重复弹。
+            if (wmPanel != null && !wmPanel.IsDisposed && wmPanel.Visible) { wmPanel.Focus(); return; }
+            // 吸附工具条正下方 (🔴 不弹选区中间, 竖版被否); 下方放不下 → 翻到工具条上方, 绝不重叠
+            WatermarkInput wi = new WatermarkInput(wmText);
+            wmPanel = wi;
+            Point sp = bar.PointToScreen(new Point(4, bar.Height + 2));
+            Rectangle wa = Screen.FromPoint(sp).WorkingArea;
+            if (sp.Y + wi.Height > wa.Bottom)
             {
-                wi.Location = new Point(sel.X + (sel.Width - wi.Width) / 2, sel.Y + (sel.Height - wi.Height) / 2);
-                wi.ShowDialog(this);
-                if (wi.Result != null) wmText = wi.Result;
+                Point above = bar.PointToScreen(new Point(4, 0));
+                sp.Y = above.Y - wi.Height - 2;
             }
-            if (wmBtn != null) { wmBtn.Tip = wmText.Length > 0 ? ("水印: " + wmText + " (点击修改/清除)") : "水印 (点击输入, 复制/保存时叠加)"; bar.Invalidate(); }
-            Log("capture: watermark set to \"" + wmText + "\"");
+            if (sp.Y < wa.Top) sp.Y = wa.Top;
+            if (sp.X + wi.Width > wa.Right) sp.X = wa.Right - wi.Width;
+            if (sp.X < wa.Left) sp.X = wa.Left;
+            wi.Location = sp;
+            wi.FormClosed += delegate { if (wmPanel == wi) wmPanel = null; if (wmBtn != null) { wmBtn.Tip = FoldWmTip(); bar.Invalidate(); } Log("capture: watermark = \"" + wmText + "\""); };
+            wi.Show(this);
+            if (wmBtn != null) { wmBtn.Tip = FoldWmTip(); bar.Invalidate(); }
         }
+        WatermarkInput wmPanel; // 水印面板单实例 (非模态)
 
-        // 水印叠加 (右下角, 半透明白字+深色描边: 深浅底都可见)
+        // 水印叠加 (PixPin WatermarkConfig: 平铺/不透明度/大小/间距/颜色; 老大 2026-10-18: 实时预览+导出同一套)
         void DrawWatermark(Graphics g, Size sz)
         {
             if (string.IsNullOrEmpty(wmText)) return;
             try
             {
-                using (Font f = new Font("Microsoft YaHei UI", Math.Max(12f, sz.Height / 28f), FontStyle.Bold))
+                int a = Math.Max(1, Math.Min(255, wmOpacity * 255 / 100));
+                using (Font f = new Font(wmFont, Math.Max(8, wmSize), FontStyle.Bold))
                 {
                     SizeF ts = g.MeasureString(wmText, f);
-                    float x = sz.Width - ts.Width - 18f, y = sz.Height - ts.Height - 12f;
                     using (GraphicsPath gp = new GraphicsPath())
                     {
-                        gp.AddString(wmText, f.FontFamily, (int)f.Style, f.Size, new PointF(x, y), StringFormat.GenericDefault);
-                        using (Pen sp = new Pen(Color.FromArgb(90, 0, 0, 0), 3f)) { sp.LineJoin = LineJoin.Round; g.DrawPath(sp, gp); }
-                        using (SolidBrush sb = new SolidBrush(Color.FromArgb(120, 255, 255, 255))) g.FillPath(sb, gp);
+                        System.Drawing.Drawing2D.GraphicsState rot = null; // 平铺 45° 旋转态 (DrawPath 在变换下进行, 填完后 Restore)
+                        if (wmTile)
+                        {
+                            // 🔴 老大 2026-10-18: PixPin 平铺默认 45° 倾斜 (wmAngle 可调, 0=水平)
+                            rot = g.Save();                            g.TranslateTransform(sz.Width / 2f, sz.Height / 2f);
+                            if (wmAngle != 0) g.RotateTransform(-wmAngle);
+                            float diag = (float)Math.Sqrt(sz.Width * (double)sz.Width + sz.Height * (double)sz.Height);
+                            float stepX = ts.Width + wmSpace, stepY = ts.Height + wmSpace;
+                            if (stepX < 8) stepX = 8;
+                            if (stepY < 8) stepY = 8;
+                            int row = 0;
+                            for (float y = -diag / 2; y < diag / 2; y += stepY, row++)
+                            {
+                                float x0 = (row % 2 == 0) ? -diag / 2 : -diag / 2 - stepX / 2; // 隔行错半格 (砖墙排布)
+                                for (float x = x0; x < diag / 2; x += stepX)
+                                    gp.AddString(wmText, f.FontFamily, (int)f.Style, f.Size, new PointF(x, y), StringFormat.GenericDefault);
+                            }
+                        }
+                        else
+                        {
+                            float x = sz.Width - ts.Width - 18f, y = sz.Height - ts.Height - 12f;
+                            gp.AddString(wmText, f.FontFamily, (int)f.Style, f.Size, new PointF(x, y), StringFormat.GenericDefault);
+                        }
+                        using (Pen sp = new Pen(Color.FromArgb(a / 2, 0, 0, 0), 2.5f)) { sp.LineJoin = LineJoin.Round; g.DrawPath(sp, gp); }
+                        using (SolidBrush sb = new SolidBrush(Color.FromArgb(a, wmColor))) g.FillPath(sb, gp);
+                        if (rot != null) g.Restore(rot);
                     }
                 }
             }
@@ -3851,8 +4253,28 @@ partial class ShotService
             if (bar != null) { PlaceBar(); bar.Visible = true; bar.Invalidate(true); bar.Update(); return; }
             bar = new ToolbarPanel();
             // [标注组]
-            bar.Add("rect", "矩形标注", delegate { PickTool("rect"); }, true).ToolKey = "rect";
-            bar.Add("ellipse", "椭圆标注", delegate { PickTool("ellipse"); }, true).ToolKey = "ellipse";
+            // 形状折叠槽 (老大 2026-10-18 定): 矩形/椭圆收一个按钮
+            foldShapeBtn = bar.Add(foldShapeTool, FoldShapeTip(), delegate { PickTool(foldShapeTool); }, true);
+            foldShapeBtn.ToolKey = "shapefold";
+            foldShapeBtn.Fold = new string[] { "rect", "ellipse" };
+            foldShapeBtn.OnFold = delegate
+            {
+                if (foldShapeMenu == null)
+                    foldShapeMenu = BuildFoldSlot(out foldShapeMenuItems, new string[][] {
+                        new string[] { "rect", "矩形" },
+                        new string[] { "ellipse", "椭圆" }
+                    }, delegate { return foldShapeTool; }, delegate (string key)
+                    {
+                        foldShapeTool = key;
+                        foldShapeBtn.Icon = key;
+                        foldShapeBtn.Tip = FoldShapeTip();
+                        bar.Invalidate();
+                        PickTool(key);
+                        SaveMarkNow();
+                    });
+                if (foldShapeMenu != null && foldShapeMenu.Visible) { foldShapeMenu.Close(); return; } // 再点一次=收起 (老大 2026-10-18)
+                foldShapeMenu.Show(bar, foldShapeBtn.Rect.X, foldShapeBtn.Rect.Bottom + 2);
+            };
             // 折叠槽 (PixPin 同款): 箭头/折线/曲线共用一个按钮位 —— 点按钮用当前成员, 点右下角小三角展开换邻居工具
             foldArrowBtn = bar.Add(foldArrowTool, FoldArrowTip(), delegate { PickTool(foldArrowTool); }, true);
             foldArrowBtn.ToolKey = "arrowfold"; // 槽位键 ≠ 成员键 (PickTool 高亮按 Fold 成员匹配)
@@ -3900,31 +4322,155 @@ partial class ShotService
                     };
                     foldArrowMenu = m;
                 }
+                if (foldArrowMenu != null && foldArrowMenu.Visible) { foldArrowMenu.Close(); return; } // 再点一次=收起
                 foldArrowMenu.Show(bar, foldArrowBtn.Rect.X, foldArrowBtn.Rect.Bottom + 2);
             };
-            bar.Add("pen", "自由画笔", delegate { PickTool("pen"); }, true).ToolKey = "pen";
-            bar.Add("highlight", "荧光笔 (拖动高亮文字/区域)", delegate { PickTool("highlight"); }, true).ToolKey = "highlight";
-            // 马克笔 (PixPin AVEditItemMarker + MarkerBlendMode): 半透明记号笔, 笔迹重叠自然加深
-            bar.Add("marker", "马克笔 (半透明记号笔)", delegate { PickTool("marker"); }, true).ToolKey = "marker";
-            bar.Add("mosaic", "马赛克 (拖动打码)", delegate { PickTool("mosaic"); }, true).ToolKey = "mosaic";
+            // 画笔/荧光笔折叠槽 (老大 2026-10-18 定): 收一个按钮; 马克笔删掉 (与荧光笔肉眼无区别)
+            foldPenBtn = bar.Add(foldPenTool, FoldPenTip(), delegate { PickTool(foldPenTool); }, true);
+            foldPenBtn.ToolKey = "penfold"; // 槽位键 ≠ 成员键 (PickTool 高亮按 Fold 成员匹配)
+            foldPenBtn.Fold = new string[] { "pen", "highlight" };
+            foldPenBtn.OnFold = delegate
+            {
+                if (foldPenMenu == null)
+                {
+                    ContextMenuStrip m = DarkMenu();
+                    string[][] members = {
+                        new string[] { "pen", "自由画笔", "Shift+4" },
+                        new string[] { "highlight", "荧光笔", "Shift+5" }
+                    };
+                    foldPenMenuItems = new System.Collections.Generic.List<ToolStripItem>();
+                    foreach (string[] mem in members)
+                    {
+                        string key = mem[0];
+                        var it = new ToolStripMenuItem(mem[1], MakeIcon(key, 18), delegate
+                        {
+                            foldPenTool = key;
+                            foldPenBtn.Icon = key;
+                            foldPenBtn.Tip = FoldPenTip();
+                            bar.Invalidate();
+                            PickTool(key);
+                            SaveMarkNow();
+                        });
+                        it.Tag = key;
+                        it.ShortcutKeyDisplayString = mem[2];
+                        it.ForeColor = DarkUI.Text;
+                        foldPenMenuItems.Add(it);
+                        m.Items.Add(it);
+                    }
+                    m.Opening += delegate
+                    {
+                        foreach (ToolStripItem it2 in foldPenMenuItems)
+                        {
+                            bool cur = (string)it2.Tag == foldPenTool;
+                            it2.Font = new Font(m.Font, cur ? FontStyle.Bold : FontStyle.Regular);
+                        }
+                    };
+                    foldPenMenu = m;
+                }
+                if (foldPenMenu != null && foldPenMenu.Visible) { foldPenMenu.Close(); return; } // 再点一次=收起
+                foldPenMenu.Show(bar, foldPenBtn.Rect.X, foldPenBtn.Rect.Bottom + 2);
+            };
+            // 打码折叠槽 (老大 2026-10-19 定): 马赛克/涂抹二合一按钮 + 右下角小三角切换; 属性面板(模式/强度)共用
+            foldMosaicBtn = bar.Add(foldMosaicTool, FoldMosaicTip(), delegate { PickTool(foldMosaicTool); }, true);
+            foldMosaicBtn.ToolKey = "mosaicfold"; // 槽位键 ≠ 成员键 (PickTool 高亮按 Fold 成员匹配)
+            foldMosaicBtn.Fold = new string[] { "mosaic", "smear" };
+            foldMosaicBtn.OnFold = delegate
+            {
+                if (foldMosaicMenu == null)
+                {
+                    ContextMenuStrip m = DarkMenu();
+                    string[][] members = {
+                        new string[] { "mosaic", "马赛克 (选框打码)" },
+                        new string[] { "smear",  "涂抹打码 (按住涂)" }
+                    };
+                    foldMosaicMenuItems = new System.Collections.Generic.List<ToolStripItem>();
+                    foreach (string[] mem in members)
+                    {
+                        string key = mem[0];
+                        var it = new ToolStripMenuItem(mem[1], MakeIcon(key, 18), delegate
+                        {
+                            foldMosaicTool = key;
+                            foldMosaicBtn.Icon = key;
+                            foldMosaicBtn.Tip = FoldMosaicTip();
+                            bar.Invalidate();
+                            PickTool(key);
+                            SaveMarkNow();
+                        });
+                        it.Tag = key;
+                        it.ForeColor = DarkUI.Text;
+                        foldMosaicMenuItems.Add(it);
+                        m.Items.Add(it);
+                    }
+                    m.Opening += delegate
+                    {
+                        foreach (ToolStripItem it2 in foldMosaicMenuItems)
+                        {
+                            bool cur = (string)it2.Tag == foldMosaicTool;
+                            it2.Font = new Font(m.Font, cur ? FontStyle.Bold : FontStyle.Regular);
+                        }
+                    };
+                    foldMosaicMenu = m;
+                }
+                if (foldMosaicMenu != null && foldMosaicMenu.Visible) { foldMosaicMenu.Close(); return; }
+                foldMosaicMenu.Show(bar, foldMosaicBtn.Rect.X, foldMosaicBtn.Rect.Bottom + 2);
+            };
             // 放大镜标注 (PixPin AVEditItemMagnifier + MagnifierPower): 拖一块, 区域内显示放大 N 倍的原图
             bar.Add("magnifier", "放大镜标注 (拖一块放大显示)", delegate { PickTool("magnifier"); }, true).ToolKey = "magnifier";
             // 橡皮擦 (PixPin Mark.EditItemOrder 第七组 Eraser): 划过标注 = 整条删除该标注, 不抹背景像素
             bar.Add("eraser", "橡皮擦 (划过标注即删除, 可撤销)", delegate { PickTool("eraser"); }, true).ToolKey = "eraser";
-            bar.Add("text", "文字标注 (点击选区内输入, 回车落字)", delegate { PickTool("text"); }, true).ToolKey = "text";
+            // 文字/水印折叠槽 (老大 2026-10-18 定): 水印和文本输入收一个按钮 — 点主体按当前成员走
+            foldWmBtn = bar.Add(foldWmTool, FoldWmTip(), delegate { if (foldWmTool == "wm") ShowWatermarkInput(); else PickTool("text"); }, true);
+            foldWmBtn.ToolKey = "wmfold";
+            foldWmBtn.Fold = new string[] { "text", "wm" };
+            foldWmBtn.OnFold = delegate
+            {
+                if (foldWmMenu == null)
+                    foldWmMenu = BuildFoldSlot(out foldWmMenuItems, new string[][] {
+                        new string[] { "text", "文字" },
+                        new string[] { "wm", "水印" }
+                    }, delegate { return foldWmTool; },                     delegate (string key)
+                    {
+                        foldWmTool = key;
+                        foldWmBtn.Icon = key;
+                        foldWmBtn.Tip = FoldWmTip();
+                        bar.Invalidate();
+                        if (key == "text") PickTool("text");
+                        SaveMarkNow();
+                        // 🔴 老大 2026-10-18: 下拉切到水印 = 自动弹属性面板, 不用再点一下
+                        if (key == "wm") BeginInvoke((Action)delegate { try { ShowWatermarkInput(); } catch { } });
+                    });
+                if (foldWmMenu != null && foldWmMenu.Visible) { foldWmMenu.Close(); return; } // 再点一次=收起
+                foldWmMenu.Show(bar, foldWmBtn.Rect.X, foldWmBtn.Rect.Bottom + 2);
+            };
+            wmBtn = foldWmBtn; // 水印输入完刷新按钮提示走折叠槽的 Tip
             bar.Add("seq", "序号标记 (自动递增)", delegate { PickTool("seq"); }, true).ToolKey = "seq";
             bar.AddSep();
             // [编辑组]
             bar.Add("undo", "撤销 (Ctrl+Z)", delegate { ActUndo(); });
             bar.Add("redo", "重做 (Ctrl+Y)", delegate { ActRedo(); });
-            // 水印 (PixPin WatermarkInScreenShot + AVWatermarkInputDialog): 输入文字, 复制/保存时叠加
-            bar.Add("wm", wmText.Length > 0 ? ("水印: " + wmText + " (点击修改/清除)") : "水印 (点击输入, 复制/保存时叠加)", delegate { ShowWatermarkInput(); });
-            wmBtn = bar.Btns[bar.Btns.Count - 1]; // 记引用: 输入完刷新按钮文字
             bar.AddSep();
-            // [功能组]
+            // [功能组] (老大 2026-10-18 定: OCR/翻译/录屏/长截图 不折叠; 表格/公式收一个折叠槽)
             bar.Add("ocr", "OCR 文字识别", delegate { ActOcr(); });
-            bar.Add("table", "表格识别 (出 Markdown, 可贴 Excel)", delegate { ActTable(); });
-            bar.Add("latex", "公式识别 (出 LaTeX)", delegate { ActLatex(); });
+            foldTableBtn = bar.Add(foldTableTool, FoldTableTip(), delegate { if (foldTableTool == "latex") ActLatex(); else ActTable(); }, true);
+            foldTableBtn.ToolKey = "tablefold";
+            foldTableBtn.Fold = new string[] { "table", "latex" };
+            foldTableBtn.OnFold = delegate
+            {
+                if (foldTableMenu == null)
+                    foldTableMenu = BuildFoldSlot(out foldTableMenuItems, new string[][] {
+                        new string[] { "table", "表格" },
+                        new string[] { "latex", "公式" }
+                    }, delegate { return foldTableTool; }, delegate (string key)
+                    {
+                        foldTableTool = key;
+                        foldTableBtn.Icon = key;
+                        foldTableBtn.Tip = FoldTableTip();
+                        bar.Invalidate();
+                        SaveMarkNow();
+                    });
+                if (foldTableMenu != null && foldTableMenu.Visible) { foldTableMenu.Close(); return; } // 再点一次=收起
+                foldTableMenu.Show(bar, foldTableBtn.Rect.X, foldTableBtn.Rect.Bottom + 2);
+            };
             bar.Add("translate", "翻译", delegate { ActTranslate(); });
             bar.Add("pin", "贴图 (钉到桌面)", delegate { ActPin(); });
             bar.Add("rec", "录屏 (延迟可选)", delegate { ShowRecMenu(); });
@@ -3961,7 +4507,7 @@ partial class ShotService
         void ShowPropBar()
         {
             if (propBar == null) { BuildPropBar(); }
-            bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen" || tool == "text" || tool == "seq" || tool == "poly" || tool == "curve" || tool == "highlight" || tool == "mosaic" || tool == "eraser" || tool == "marker" || tool == "magnifier";
+            bool need = tool == "arrow" || tool == "rect" || tool == "ellipse" || tool == "pen" || tool == "text" || tool == "seq" || tool == "poly" || tool == "curve" || tool == "highlight" || tool == "mosaic" || tool == "eraser" || tool == "marker" || tool == "magnifier" || tool == "smear";
             if (!need) { propBar.Visible = false; return; }
             // PixPin 式显隐: 只显示当前工具相关属性 (不相关按钮直接隐藏, 悬空分隔线自动收敛)
             propBar.ShowForTool(tool);
@@ -3977,17 +4523,17 @@ partial class ShotService
         {
             // 终版 PixPin: 箭头样式=6 图标条(图1); 序号=[N⇅][格式▾][大小][字号]+色板(图2); 文字=[字体▾][大小][字号]+色板(图3); 只显当前工具相关
             propBar = new ToolbarPanel();
-            string[] lineTools = { "rect", "ellipse", "arrow", "pen", "highlight", "marker", "mosaic" }; // 颜色/粗细组 (荧光笔要高亮色; 马克笔同色板; 马赛克用色块边距弱相关但保留一致)
+            string[] lineTools = { "rect", "ellipse", "arrow", "pen", "highlight", "marker", "mosaic", "smear" }; // 颜色/粗细组 (荧光笔要高亮色; 马克笔同色板; 马赛克/涂抹共用同一套面板 — 老大 2026-10-19: 属性面板必须同样的一套)
             string[] hlOnly = { "highlight", "marker" }; // 荧光笔/马克笔专属: 透明度 (共用 HlAlpha 档)
             string[] magnifierOnly = { "magnifier" }; // 放大镜标注专属: 倍数
-            string[] mosaicOnly = { "mosaic" }; // 马赛克专属: 模式/强度
+            string[] mosaicOnly = { "mosaic", "smear" }; // 马赛克专属: 模式/强度 (涂抹打码共用)
             string[] textTools = { "text", "seq" };
             string[] arrowOnly = { "arrow" };
             string[] arrowTools = { "arrow", "poly", "curve" }; // 头型/双向/虚线: 折线曲线也有 (PixPin BrokenLine 同款配置)
             string[] polyTools = { "poly", "curve" };           // 闭合填充: 仅折线/曲线
             string[] seqOnly = { "seq" };
             string[] eraserOnly = { "eraser" };   // 橡皮擦专属: 只有粗细档, 没有颜色 (擦了就是删, 没颜色概念)
-            string[] noEraserTools = { "rect", "ellipse", "arrow", "pen", "highlight", "mosaic", "text", "seq", "poly", "curve" }; // 色板: 除橡皮擦外全可见
+            string[] noEraserTools = { "rect", "ellipse", "arrow", "pen", "highlight", "text", "seq", "poly", "curve" }; // 色板: 除橡皮擦外全可见; 🔴 马赛克/涂抹不放 (2026-10-19 老大定: 打糊用不上颜色, 选了也没效果)
             // ---- 箭头头型下拉 (照 PixPin populateArrowTypes 11 项 + 标注线特例, 竖向菜单+长预览) ----
             // 头型枚举对应 PixPinArrowGeom.BuildArrowHeadPath: 0无 12五角 1开口 2实心(大) 3实心(小) 4实心圆 5空心圆 6实心菱形 7空心菱形 8刻度 9十字 ; 99=标注线
             int[] styleOrder = { 0, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 99 };
@@ -4070,69 +4616,33 @@ partial class ShotService
                 MarkProp();
             }, polyTools).ToolKey = "fill";
             propBar.AddSep(lineTools);
-            // ---- 放大镜标注倍数 (magnifierOnly, PixPin MagnifierPower): 2x/3x/4x ----
+            // ---- 放大镜标注倍数 (magnifierOnly, PixPin MagnifierPower): 内嵌滑块 2x~6x ----
+            // 🔴 老大 2026-10-19: 之前"2x ▾ 点开弹层滑条"不算滑块, 直接嵌在属性栏里 (水印面板同款)
             ToolbarPanel.Btn magBtn = null;
-            int[] magPowers = { 2, 3, 4 };
-            magBtn = propBar.AddText(curMagPower + "x ▾", "放大倍数", delegate
+            magBtn = propBar.AddSlider("倍数", 2, 6, curMagPower, "x", "放大倍数 (拖动/滚轮调节)", delegate(int v)
             {
-                ContextMenuStrip m = DarkMenu();
-                foreach (int mp in magPowers)
-                {
-                    int cap = mp;
-                    ToolStripItem it = m.Items.Add(cap + "x", null, delegate
-                    {
-                        curMagPower = cap;
-                        if (magBtn != null) { magBtn.DrawStr = cap + "x ▾"; propBar.RelayoutNow(); }
-                        SaveMarkNow();
-                        Log("capture: mag power=" + cap);
-                    });
-                    if (mp == curMagPower) it.Font = new Font(it.Font, FontStyle.Bold);
-                }
-                m.Show(propBar, magBtn.Rect.X, magBtn.Rect.Bottom + 2);
+                curMagPower = v;
+                // 选中放大镜标注时直接改选中那个, 不只改下一个
+                if (selAnnot != null && selAnnot.Kind == Annot.K_MAGNIFIER)
+                { selAnnot.MagPower = v; InvalidateAnnot(selAnnot); }
+                MarkProp();
             }, magnifierOnly);
+            magBtnRef = magBtn;
             magBtn.ToolKey = "magpow";
-            magBtn.OnWheel = delegate(bool up)
-            {
-                int i = System.Array.IndexOf(magPowers, curMagPower); if (i < 0) i = 0;
-                int n = Math.Max(0, Math.Min(magPowers.Length - 1, i + (up ? 1 : -1)));
-                if (n != i) { curMagPower = magPowers[n]; magBtn.DrawStr = curMagPower + "x ▾"; MarkProp(); }
-            };
-            // ---- 橡皮擦粗细 (eraserOnly, PixPin Mark.Eraser.PenWidth): 细/中/粗三档, 落盘 mark.eraserWidth ----
+            // ---- 橡皮擦粗细 (eraserOnly, PixPin Mark.Eraser.PenWidth): 内嵌滑块 8~60, 落盘 mark.eraserWidth ----
             ToolbarPanel.Btn erasBtn = null;
-            float[] erasVals = { 14f, 22f, 36f };
-            string[] erasNames = { "细橡皮", "中橡皮", "粗橡皮" };
-            erasBtn = propBar.AddText(erasNameOf(curEraserW) + " ▾", "橡皮擦粗细 (滚轮也可调)", delegate
+            erasBtn = propBar.AddSlider("粗细", 8, 60, (int)curEraserW, "", "橡皮擦粗细 (拖动/滚轮调节)", delegate(int v)
             {
-                ContextMenuStrip m = DarkMenu();
-                foreach (float ev in erasVals)
-                {
-                    float cap = ev;
-                    ToolStripItem it = m.Items.Add(erasNameOf(ev), null, delegate
-                    {
-                        curEraserW = cap;
-                        if (erasBtn != null) { erasBtn.DrawStr = erasNameOf(cap) + " ▾"; propBar.RelayoutNow(); }
-                        SaveMarkNow();
-                        Log("capture: eraser width=" + cap);
-                    });
-                    if (Math.Abs(ev - curEraserW) < 0.5f) it.Font = new Font(it.Font, FontStyle.Bold);
-                }
-                m.Show(propBar, erasBtn.Rect.X, erasBtn.Rect.Bottom + 2);
+                curEraserW = v;
+                MarkProp();
+                Log("capture: eraser width=" + v);
             }, eraserOnly);
             erasBtn.ToolKey = "erasw";
-            erasBtn.OnWheel = delegate(bool up)
-            {
-                int i = curEraserW < 18f ? 0 : (curEraserW < 29f ? 1 : 2);
-                int n = Math.Max(0, Math.Min(erasVals.Length - 1, i + (up ? 1 : -1)));
-                if (n != i)
-                {
-                    curEraserW = erasVals[n];
-                    if (erasBtn != null) erasBtn.DrawStr = erasNameOf(curEraserW) + " ▾";
-                    MarkProp();
-                }
-            };
-            // ---- 粗细下拉 (竖排菜单: 每项一条按实际粗细的长预览线) ----
+            // ---- 粗细下拉 (竖排菜单: 每项一条按实际粗细的长预览线; PixPin 本尊同款, 不换滑块) ----
+            // 🔴 老大 2026-10-19: 涂抹粗细独立成滑块 (smearOnly), 本下拉只服务线条类工具 + 选框马赛克
             float[] widthVals = { 2f, 3.5f, 6f };
             string[] widthNames = { "细线", "中线", "粗线" };
+            string[] widthDdTools = { "rect", "ellipse", "arrow", "pen", "highlight", "marker", "mosaic" }; // 线条粗细下拉可见工具 (不含 smear)
             ToolbarPanel.Btn wdBtn = null;
             wdBtn = propBar.AddPreviewDropdown("线条粗细", delegate
             {
@@ -4153,7 +4663,7 @@ partial class ShotService
                 Point pos = propBar.PointToScreen(new Point(wdBtn.Rect.X, wdBtn.Rect.Bottom + 4));
                 sp.Location = pos;
                 sp.Show();
-            }, lineTools);
+            }, widthDdTools);
             wdBtn.ToolKey = "wd";
             wdBtn.OnWheel = delegate(bool up) // 悬停滚轮换档 (PixPin 同款)
             {
@@ -4161,10 +4671,16 @@ partial class ShotService
                 int nw = Math.Max(0, Math.Min(widthVals.Length - 1, wi + (up ? 1 : -1)));
                 if (nw != wi) { curWidth = widthVals[nw]; MarkProp(); Log("capture: wheel wd=" + curWidth); }
             };
-            // ---- 荧光笔透明度 (hlOnly): "40% ▾" 可输入弹窗 (老大 2026-10-18: 不能只有档位, 要能直接键入数字) ----
-            // 复用 FontInputPopup (顶部输入框回车生效 + 档位列表), 档位/输入一律按百分比 1~100, 回调里换算成 0~255 alpha
+            // ---- 荧光笔透明度 (hlOnly): 内嵌滑块 1~100% (拖动/滚轮实时); 点右侧数值弹输入框 (保留键入, 老大 2026-10-18 要求) ----
             ToolbarPanel.Btn hlAlphaBtn = null;
-            hlAlphaBtn = propBar.AddText(HlAlphaLabel(curHlAlpha) + " ▾", "荧光笔透明度 (点击后可直接输入 1~100)", delegate
+            hlAlphaBtn = propBar.AddSlider("不透明", 1, 100, (int)Math.Round(curHlAlpha * 100.0 / 255.0), "%", "荧光笔透明度 (拖动/滚轮调节; 点数值可直接键入)", delegate(int v)
+            {
+                curHlAlpha = (int)Math.Round(v * 255.0 / 100.0);      // % → alpha 0~255
+                MarkProp();
+                Log("capture: hl alpha=" + curHlAlpha + " (" + v + "%)");
+            }, hlOnly);
+            hlAlphaBtn.ToolKey = "hlalpha";
+            hlAlphaBtn.OnNumClick = delegate // 点数值区 = 弹键入框 (档位+顶部输入, 与字号弹窗同构)
             {
                 int pct = (int)Math.Round(curHlAlpha * 100.0 / 255.0);
                 Point anchor = new Point(hlAlphaBtn.Rect.X, hlAlphaBtn.Rect.Bottom + 2);
@@ -4173,8 +4689,7 @@ partial class ShotService
                 {
                     int nv = Math.Max(1, Math.Min(100, v));               // 百分比钳 1~100
                     curHlAlpha = (int)Math.Round(nv * 255.0 / 100.0);     // % → alpha 0~255
-                    if (hlAlphaBtn != null) { hlAlphaBtn.DrawStr = HlAlphaLabel(curHlAlpha) + " ▾"; propBar.RelayoutNow(); }
-                    SaveMarkNow(); MarkProp();
+                    MarkProp();
                     Log("capture: hl alpha=" + curHlAlpha + " (" + nv + "%)");
                 }, sp);
                 try
@@ -4192,16 +4707,8 @@ partial class ShotService
                 }
                 catch { }
                 p.Show();
-            }, hlOnly);
-            hlAlphaBtn.ToolKey = "hlalpha";
-            hlAlphaBtn.OnWheel = delegate(bool up)
-            {
-                int i = System.Array.IndexOf(HlAlphaStops, HlAlphaNearest(curHlAlpha));
-                if (i < 0) i = 0;
-                int ni = Math.Max(0, Math.Min(HlAlphaStops.Length - 1, i + (up ? 1 : -1)));
-                if (ni != i) { curHlAlpha = HlAlphaStops[ni]; MarkProp(); Log("capture: wheel hlalpha=" + curHlAlpha); }
             };
-            // ---- 马赛克模式/强度 (mosaicOnly): 马赛克=方块 / 模糊=糊化; 强度档位 ----
+            // ---- 马赛克模式 (mosaicOnly): 马赛克=方块 / 模糊=糊化 (二值开关, 保持按钮) ----
             ToolbarPanel.Btn mosModeBtn = null;
             mosModeBtn = propBar.AddText(curMosaicMode == 1 ? "模糊" : "马赛克", "马赛克模式", delegate
             {
@@ -4222,32 +4729,27 @@ partial class ShotService
                 m.Show(propBar, mosModeBtn.Rect.X, mosModeBtn.Rect.Bottom + 2);
             }, mosaicOnly);
             mosModeBtn.ToolKey = "mosmode";
+            // ---- 马赛克强度 (mosaicOnly): 内嵌滑块 2~40 (老大 2026-10-19: 档位菜单换水印同款滑块) ----
             ToolbarPanel.Btn mosStrBtn = null;
-            mosStrBtn = propBar.AddText(curMosaicStrength.ToString(), "马赛克强度 (块大小/模糊度)", delegate
+            mosStrBtn = propBar.AddSlider("强度", 2, 40, curMosaicStrength, "", "马赛克强度 (拖动/滚轮调节; 决定块大小/模糊度)", delegate(int v)
             {
-                ContextMenuStrip m = DarkMenu();
-                foreach (int st in new int[] { 4, 8, 12, 20, 32 })
-                {
-                    int captured = st;
-                    ToolStripItem it = m.Items.Add(st.ToString(), null, delegate
-                    {
-                        curMosaicStrength = captured;
-                        if (mosStrBtn != null) { mosStrBtn.DrawStr = captured.ToString(); propBar.RelayoutNow(); }
-                        SaveMarkNow();
-                        Log("capture: mosaic strength=" + captured);
-                    });
-                    if (st == curMosaicStrength) it.Font = new Font(it.Font, FontStyle.Bold);
-                }
-                m.Show(propBar, mosStrBtn.Rect.X, mosStrBtn.Rect.Bottom + 2);
+                curMosaicStrength = v;
+                MarkProp(); // = RelayoutNow + 落盘
+                Log("capture: mosaic strength=" + v);
             }, mosaicOnly);
             mosStrBtn.ToolKey = "mosstr";
-            mosStrBtn.OnWheel = delegate(bool up)
+            // ---- 涂抹粗细 (smearOnly): 内嵌滑块 8~80 笔刷直径 (画布上滚轮 ±2 微调仍可用) ----
+            string[] smearOnly = { "smear" };
+            ToolbarPanel.Btn smearWBtn = null;
+            smearWBtn = propBar.AddSlider("粗细", 8, 80, curSmearW, "", "涂抹粗细 (拖动/滚轮调节笔刷直径)", delegate(int v)
             {
-                int[] stops = { 4, 8, 12, 20, 32 };
-                int i = NearestIdx(stops, curMosaicStrength);
-                int ni = Math.Max(0, Math.Min(stops.Length - 1, i + (up ? 1 : -1)));
-                if (ni != i) { curMosaicStrength = stops[ni]; MarkProp(); Log("capture: wheel mosstr=" + curMosaicStrength); }
-            };
+                curSmearW = v;
+                MarkProp();
+                Log("capture: smearW=" + v);
+            }, smearOnly);
+            smearWBtn.ToolKey = "smearw";
+            // 🔴 涂抹专属粗细按钮已删 (2026-10-19): 粗细并进上方共用粗细下拉 (smear 档位走 curSmearW),
+            //    两套马赛克面板 = 同一组控件 [粗细▾][模式▾][强度][色板], 老大验收标准 "同样的一套"
             propBar.AddSep(seqOnly);
             // ---- 序号组 (图2): [N⇅] [格式▾] ----
             ToolbarPanel.Btn startBtn = null;
@@ -4335,9 +4837,12 @@ partial class ShotService
                 else if (b.ToolKey == "smooth") b.DrawStr = curSmooth ? "平滑:开" : "平滑:关";
                 else if (b.ToolKey == "dash") { var po = b.Preview; b.Preview = ToolbarPanel.MakeDashPreviewBmp(curDash, false); if (po != null) po.Dispose(); }
                 else if (b.ToolKey == "fill") b.DrawStr = curFill ? "填充:开" : "填充:关";
-                else if (b.ToolKey == "hlalpha") b.DrawStr = HlAlphaLabel(curHlAlpha) + " ▾";
+                else if (b.ToolKey == "hlalpha") b.SVal = (int)Math.Round(curHlAlpha * 100.0 / 255.0); // 滑块: 圆钮跟当前值
                 else if (b.ToolKey == "mosmode") b.DrawStr = curMosaicMode == 1 ? "模糊" : "马赛克";
-                else if (b.ToolKey == "mosstr") b.DrawStr = curMosaicStrength.ToString();
+                else if (b.ToolKey == "mosstr") b.SVal = curMosaicStrength;   // 滑块
+                else if (b.ToolKey == "smearw") b.SVal = curSmearW;           // 滑块 (涂抹笔刷直径)
+                else if (b.ToolKey == "erasw") b.SVal = (int)curEraserW;      // 滑块 (橡皮擦粗细)
+                else if (b.ToolKey == "magpow") b.SVal = curMagPower;         // 滑块 (放大镜倍数)
                 else if (b.ToolKey == "seqfmt") b.DrawStr = SeqFmtLabel(curSeqFmt) + " ▾";
                 else if (b.ToolKey == "f_size") b.DrawStr = curFontPt.ToString();
                 else if (b.ToolKey == "wd") { var po = b.Preview; b.Preview = ToolbarPanel.MakeWidthPreviewBmp(curWidth, false); if (po != null) po.Dispose(); }
@@ -5227,6 +5732,20 @@ partial class ShotService
                 Log("capture: debug annot added kind=" + a.Kind + " power=" + a.MagPower);
                 return DebugJson();
             }
+            if (kind == "smear")
+            {
+                // 马赛克涂抹注入: data=点列 x,y;x,y;... (屏坐标), 强度/模式走当前值 (自测渲染用)
+                a.Kind = Annot.K_MOSAIC; a.Smear = true; a.SmearW = curSmearW; a.MosaicStrength = curMosaicStrength; a.MosaicMode = curMosaicMode;
+                a.Pts = new List<Point>();
+                foreach (string seg in data.Split(';'))
+                {
+                    string[] xy = seg.Split(',');
+                    if (xy.Length == 2) a.Pts.Add(new Point(int.Parse(xy[0]), int.Parse(xy[1])));
+                }
+                annots.Add(a); InvalidateAnnot(a);
+                Log("capture: debug annot added kind=smear pts=" + a.Pts.Count + " strength=" + a.MosaicStrength);
+                return DebugJson();
+            }
             if (kind == "marker")
             {
                 // 马克笔: data=点列分号分隔 x,y;x,y;... 半透明粗笔
@@ -5252,6 +5771,13 @@ partial class ShotService
                 }
                 if (a.Kind == Annot.K_ARROW) a.Rect = Normalize(a.Pts[0], a.Pts[1]);
             }
+            else if (kind == "mosaic")
+            {
+                // 选框马赛克注入: data=x,y,w,h (屏坐标) (自测渲染用)
+                a.Kind = Annot.K_MOSAIC; a.MosaicStrength = curMosaicStrength; a.MosaicMode = curMosaicMode;
+                string[] v = data.Split(',');
+                a.Rect = new Rectangle(int.Parse(v[0]), int.Parse(v[1]), int.Parse(v[2]), int.Parse(v[3]));
+            }
             else
             {
                 a.Kind = kind == "ellipse" ? Annot.K_ELLIPSE : Annot.K_RECT;
@@ -5275,7 +5801,7 @@ partial class ShotService
         // 自测口: 设水印 (空串清除) — 走 ShowWatermarkInput 同一个 wmText 字段
         public string DebugWatermark(string text)
         {
-            RunOnUiSync(delegate { wmText = text == null ? "" : text; });
+            RunOnUiSync(delegate { wmText = text == null ? "" : text; Invalidate(); }); // 🔴 补 Invalidate: 自测口设水印也要立刻重绘预览
             if (wmBtn != null && bar != null && !bar.IsDisposed) bar.Invalidate();
             return "{\"ok\":true,\"wm\":\"" + JsonEscape(wmText) + "\"}";
         }
@@ -5284,7 +5810,7 @@ partial class ShotService
         public string DebugAct(string act)
         {
             string err = null;
-            RunOnUiSync(delegate { try { if (act == "save") ActSave(); else if (act == "copy") ActCopy(); else err = "act must be save|copy"; } catch (Exception ex) { err = ex.Message; } });
+            RunOnUiSync(delegate { try { if (act == "save") ActSave(); else if (act == "copy") ActCopy(); else if (act == "pin") ActPin(); else err = "act must be save|copy|pin"; } catch (Exception ex) { err = ex.Message; } });
             if (err != null) return "{\"ok\":false,\"error\":\"" + JsonEscape(err) + "\"}";
             return "{\"ok\":true,\"act\":\"" + JsonEscape(act) + "\"}";
         }
@@ -5345,7 +5871,8 @@ partial class ShotService
             {
                 sel = r; hasSel = true;
                 Invalidate();
-                try { PlaceBar(); } catch (Exception ex) { Log("debug setsel placebar err: " + ex.Message); }
+                // 🔴 2026-10-18: 这里原来只 PlaceBar 不 ShowBar → AI 自测选区后永远没工具条 (手动拖拽走 ShowBar 所以没事)
+                if (bar == null) ShowBar(); else { bar.Visible = true; bar.Invalidate(true); bar.Update(); PlaceBar(); }
             });
             Log("capture: debug sel set -> " + r.Width + "x" + r.Height + " at " + r.Location);
             return DebugJson();
@@ -5565,6 +6092,8 @@ partial class ShotService
         {
             base.OnFormClosed(e);
             DisposeMagForm();   // 🔴 必须先收小窗: 它是独立顶层窗体, 不跟着遮罩自动关, 漏了就永远糊在屏上
+            try { if (wmPanel != null && !wmPanel.IsDisposed) wmPanel.Close(); } catch { } // 水印面板 (非模态) 同样不跟遮罩自动关
+            wmPanel = null;
             if (kbHook != IntPtr.Zero) { try { UnhookWindowsHookEx(kbHook); } catch { } kbHook = IntPtr.Zero; } // Esc 保底钩子摘除
             Log("capture: overlay closed (" + annots.Count + " annots)");
             if (live == this) live = null;
@@ -5636,6 +6165,20 @@ partial class ShotService
                             for (int r0 = 0; r0 < 3; r0++)
                                 for (int c0 = 0; c0 < 3; c0++)
                                     g.FillRectangle(mb, 2.5f + c0 * 4.7f, 2.5f + r0 * 4.7f, 3.5f, 3.5f);
+                        }
+                        break;
+                    case "smear": // 涂抹打码: 斜向粗笔道 + 尾端 2x2 打码块 (区别于整块马赛克)
+                        using (SolidBrush sb2 = new SolidBrush(Color.FromArgb(232, 234, 240)))
+                        {
+                            using (Pen sp2 = new Pen(sb2, 3.5f))
+                            {
+                                sp2.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                                sp2.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                                g.DrawCurve(sp2, new PointF[] { new PointF(3f, 13.5f), new PointF(8f, 6f), new PointF(15f, 4f) });
+                            }
+                            for (int r0 = 0; r0 < 2; r0++)
+                                for (int c0 = 0; c0 < 2; c0++)
+                                    g.FillRectangle(sb2, 12.5f + c0 * 2.6f, 11.5f + r0 * 2.6f, 2.1f, 2.1f);
                         }
                         break;
                     case "highlight": // 荧光笔: 粗高亮条 + 笔尖斜角
@@ -5790,6 +6333,14 @@ partial class ShotService
             public int[] Values;               // GridKind1: 格位->style值; GridKind2: 行号->width*10
             public Func<bool> IsSelGrid;       // 第 N 格是否选中 (Func 闭包带 gi? 简化: Func<int,bool>)
             public System.Func<int, bool> SelAt; // 格位/行号 -> 是否当前选中
+            // ---- 内嵌滑块按钮 (水印面板 MiniSlider 同款: [label][灰轨道+蓝填充+白圆钮][数值+后缀]) ----
+            public bool IsSlider;              // 滑块按钮: 拖动轨道调值, 滚轮 ±1
+            public string SLabel = "";         // 左侧标签 (如 "强度"/"倍数"; 空=不画)
+            public int SMin, SMax, SVal;       // 值域与当前值
+            public string SSuffix = "";        // 数值后缀 ("x"/"%"; 空=无)
+            public Action<int> OnSlide;        // 拖动/滚轮回调 (实时)
+            public Action OnNumClick;          // 点数值区回调 (如透明度弹输入框; null=无反应)
+            public int DownVal;                // 按下时的值 (MouseUp 判"没拖动"用)
         }
 
         public Btn AddText(string str, string tipText, Action onClick, string[] forTools = null)
@@ -5856,6 +6407,52 @@ partial class ShotService
                 Invalidate();
             }
             catch { }
+        }
+
+        // 内嵌滑块 (水印面板 MiniSlider 同款, 老大 2026-10-19: "好多地方能参考这种滑块, 用这个看着舒服"):
+        // [label] 灰轨道+蓝色已填段+白色圆钮 [数值+后缀]; 拖动/滚轮实时回调; 点数值区走 OnNumClick (如键入)
+        public Btn AddSlider(string label, int min, int max, int cur, string suffix, string tipText, Action<int> onSlide, string[] forTools = null)
+        {
+            Btn b = new Btn
+            {
+                Icon = "#slider", Tip = tipText, IsSlider = true,
+                SLabel = label ?? "", SMin = min, SMax = Math.Max(min, max),
+                SVal = Math.Max(min, Math.Min(Math.Max(min, max), cur)), SSuffix = suffix ?? "",
+                OnSlide = onSlide, ForTools = forTools
+            };
+            Btns.Add(b); Relayout(); Invalidate(); return b;
+        }
+
+        // 滑块几何: 轨道 x0..x1 = Rect 内 [label 之后 .. 数值之前]; cy = 垂直中线
+        static readonly Font SliderFont = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+        void SliderGeom(Btn b, out int x0, out int x1, out int cy)
+        {
+            cy = b.Rect.Y + b.Rect.Height / 2;
+            int lblW = 0;
+            if (b.SLabel.Length > 0)
+            {
+                try { lblW = TextRenderer.MeasureText(b.SLabel, SliderFont).Width; } catch { lblW = 30; }
+            }
+            x0 = b.Rect.X + 6 + lblW + (lblW > 0 ? 6 : 0);
+            x1 = b.Rect.Right - 46; // 右侧留数值区 (数值+后缀, 最多 "100%")
+            if (x1 < x0 + 20) x1 = x0 + 20;
+        }
+
+        int SliderValFromX(Btn b, int x)
+        {
+            int x0, x1, cy; SliderGeom(b, out x0, out x1, out cy);
+            float fr = (x - x0) / (float)Math.Max(1, x1 - x0);
+            if (fr < 0) fr = 0; if (fr > 1) fr = 1;
+            return b.SMin + (int)Math.Round(fr * (b.SMax - b.SMin));
+        }
+
+        public bool SliderSetValue(Btn b, int v, bool fire)
+        {
+            v = Math.Max(b.SMin, Math.Min(b.SMax, v));
+            if (v == b.SVal) return false;
+            b.SVal = v; Invalidate(b.Rect);
+            if (fire && b.OnSlide != null) b.OnSlide(v);
+            return true;
         }
 
         // 箭头样式两行网格 (PixPin 图2): 6 格 (5+1), 选中蓝底, 格内画放大的样式预览
@@ -6151,6 +6748,18 @@ partial class ShotService
                     catch { w = 40; }
                     b.Rect = new Rectangle(x, 4, w, 40); x += w;
                 }
+                else if (b.Icon == "#slider")
+                {
+                    // 滑块按钮: label 实测 + 轨道固定 84 + 数值区固定 46 (够 "100%")
+                    int lblW2 = 0;
+                    if (tf == null) tf = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+                    if (b.SLabel.Length > 0)
+                    {
+                        try { lblW2 = TextRenderer.MeasureText(b.SLabel, tf).Width; } catch { lblW2 = 30; }
+                    }
+                    int sw3 = 6 + lblW2 + (lblW2 > 0 ? 6 : 0) + 84 + 46 + 6;
+                    b.Rect = new Rectangle(x, 4, sw3, 40); x += sw3;
+                }
                 else { b.Rect = new Rectangle(x, 4, b.Fold != null ? 58 : 40, 40); x += b.Fold != null ? 58 : 40; } // 折叠槽多留 18px 给右侧三角列 (PixPin 同款)
             }
             if (tf != null) try { tf.Dispose(); } catch { }
@@ -6257,8 +6866,19 @@ partial class ShotService
             {
                 Btn b = Btns[i];
                 if (b.Icon == "|" || !b.Visible) continue;
-                if ((i == hoverIdx || b.On) && b.GridKind == 0)
+                if ((i == hoverIdx || b.On) && b.GridKind == 0 && !b.IsSlider) // 滑块不做整块 hover 高亮 (一坨灰底难看, 圆钮/填充已是反馈)
                 {
+                    // 老大 2026-10-18: 折叠槽主体/三角分开高亮 — 不然不知道点的是矩形还是下拉
+                    bool foldSplit = b.Fold != null && !b.On && i == hoverIdx;
+                    if (foldSplit)
+                    {
+                        using (SolidBrush br = new SolidBrush(Color.FromArgb(64, 68, 80)))
+                        {
+                            if (foldHot == b) RoundFill(g, br, FoldRect(b), 8);
+                            else { Rectangle mb = b.Rect; mb.Width -= FoldRect(b).Width; RoundFill(g, br, mb, 8); }
+                        }
+                    }
+                    else
                     using (SolidBrush br = new SolidBrush(b.On ? Color.FromArgb(58, 62, 74) : (i == hoverIdx ? Color.FromArgb(64, 68, 80) : Color.Transparent)))
                         RoundFill(g, br, b.Rect, 8);
                     if (b.On && b.Swatch != Color.Empty)
@@ -6296,6 +6916,27 @@ partial class ShotService
                             g.DrawLine(lp, rowR.X + 8, rowR.Y + rh / 2f, rowR.Right - 8, rowR.Y + rh / 2f);
                         }
                     }
+                    continue;
+                }
+                if (b.IsSlider)
+                {
+                    // 滑块 (水印面板 MiniSlider 同款配色): 灰轨道 2px / 蓝色已填段 / 白圆钮+蓝边; 左标签右数值
+                    int x0, x1, cy; SliderGeom(b, out x0, out x1, out cy);
+                    if (b.SLabel.Length > 0)
+                        TextRenderer.DrawText(g, b.SLabel, SliderFont, new Rectangle(b.Rect.X + 4, b.Rect.Y, x0 - b.Rect.X - 8, b.Rect.Height),
+                                              Color.FromArgb(200, 204, 212), TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                    using (Pen trk = new Pen(Color.FromArgb(86, 88, 96), 2f))
+                        g.DrawLine(trk, x0, cy, x1, cy);
+                    int fillX = x0 + (int)Math.Round((x1 - x0) * (b.SMax <= b.SMin ? 0 : (b.SVal - b.SMin) / (float)(b.SMax - b.SMin)));
+                    using (Pen fl = new Pen(Color.FromArgb(47, 156, 245), 2f))
+                        g.DrawLine(fl, x0, cy, fillX, cy);
+                    using (SolidBrush kb = new SolidBrush(Color.White))
+                        g.FillEllipse(kb, fillX - 5, cy - 5, 10, 10);
+                    using (Pen kr = new Pen(Color.FromArgb(47, 156, 245), 1.6f))
+                        g.DrawEllipse(kr, fillX - 5, cy - 5, 10, 10);
+                    string vs = b.SVal.ToString() + b.SSuffix;
+                    TextRenderer.DrawText(g, vs, SliderFont, new Rectangle(b.Rect.Right - 46, b.Rect.Y, 42, b.Rect.Height),
+                                          Color.FromArgb(232, 234, 240), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                     continue;
                 }
                 if (b.Icon == "#prev")
@@ -6372,19 +7013,23 @@ partial class ShotService
         }
 
         // 折叠槽右侧三角列 (PixPin 同款): 整列可点, 不是只有那个小三角
-        static Rectangle FoldRect(Btn b) { return new Rectangle(b.Rect.Right - 18, b.Rect.Y, 18, b.Rect.Height); }
+        // 折叠三角列: 右侧 24px (老大 2026-10-18: 原先 18px 有点难点中, "要和工具一样的好点")
+        static Rectangle FoldRect(Btn b) { return new Rectangle(b.Rect.Right - 24, b.Rect.Y, 24, b.Rect.Height); }
 
-        // 悬停滚轮调值入口 (PixPin 同款): 命中按钮且挂了 OnWheel/OnSpin 才消费
+        // 悬停滚轮调值入口 (PixPin 同款): 命中按钮且挂了 OnWheel/OnSpin/IsSlider 才消费
         public bool WheelAt(Point p, bool up)
         {
             int h = Hit(p);
             if (h < 0) return false;
             Btn b = Btns[h];
             if (!b.Enabled) return false;
+            if (b.IsSlider) { SliderSetValue(b, b.SVal + (up ? 1 : -1), true); return true; }
             if (b.OnWheel != null) { b.OnWheel(up); Invalidate(); return true; }
             if (b.OnSpin != null) { b.OnSpin(up); Invalidate(); return true; } // 序号起始微调框: 滚轮复用▲▼
             return false;
         }
+
+        Btn dragSlider; // 拖动中的滑块按钮 (null=没在拖)
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
@@ -6396,6 +7041,11 @@ partial class ShotService
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (dragSlider != null && (e.Button & MouseButtons.Left) != 0)
+            {
+                SliderSetValue(dragSlider, SliderValFromX(dragSlider, e.X), true); // 拖动实时回调
+                return;
+            }
             int h = Hit(e.Location);
             // 折叠三角列悬停高亮 (PixPin 同款: 移到三角上时三角变亮, 明确告诉你这里能按)
             Btn hotNow = (h >= 0) ? Btns[h] : null;
@@ -6417,7 +7067,7 @@ partial class ShotService
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            hoverIdx = -1; shownTip = null;
+            hoverIdx = -1; shownTip = null; dragSlider = null; // 拖动中滑出也收手 (滑块值停在最后位置)
             tip.Hide(this);
             Invalidate();
         }
@@ -6425,12 +7075,35 @@ partial class ShotService
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
-            if (e.Button == MouseButtons.Left) { Focus(); hoverIdx = Hit(e.Location); Invalidate(); }
+            if (e.Button == MouseButtons.Left)
+            {
+                Focus(); hoverIdx = Hit(e.Location); Invalidate();
+                // 滑块: 按下即开始拖 (轨道区), 数值区按下不算拖 (MouseUp 时走 OnNumClick)
+                int hs2 = hoverIdx;
+                if (hs2 >= 0 && Btns[hs2].IsSlider && Btns[hs2].Enabled)
+                {
+                    Btn sb = Btns[hs2];
+                    int x0, x1, cy; SliderGeom(sb, out x0, out x1, out cy);
+                    if (e.X < sb.Rect.Right - 46) // 轨道/标签区 = 拖动
+                    {
+                        dragSlider = sb; sb.DownVal = sb.SVal;
+                        SliderSetValue(sb, SliderValFromX(sb, e.X), true);
+                    }
+                }
+            }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (e.Button == MouseButtons.Left && dragSlider != null)
+            {
+                // 数值区按下+没拖动 = 点数值 (OnNumClick, 如透明度键入); 拖过/轨道区 = 收尾不触发
+                Btn sb = dragSlider; dragSlider = null;
+                bool inNum = e.X >= sb.Rect.Right - 46;
+                if (inNum && sb.SVal == sb.DownVal && sb.OnNumClick != null && sb.Enabled) sb.OnNumClick();
+                return;
+            }
             int h = Hit(e.Location);
             Log("bar click at " + e.Location + " hit=" + h + " icon=" + (h >= 0 ? Btns[h].Icon : "-") + " barL=" + Left + " barT=" + Top);
             if (e.Button == MouseButtons.Left && h >= 0 && h == hoverIdx)
@@ -6458,19 +7131,12 @@ partial class ShotService
     }
 
     // 语言检测: 按 CJK 占比判 zh/en/mixed —— 点翻译自动反向翻译 (中文→英, 英文→中), 混合让用户选
-    // 序号徽章矩形: 宽=文字宽+边距, 上限1.25倍高(近圆); 超限长串(罗马)由绘制时水平压缩兜底
+    // 序号徽章矩形: 🔴 PixPin 复刻 (老大 2026-10-18: "我们手搓的椭圆形难看") = 正圆 w=h,
+    // 数字超宽 (罗马数字/两位数) 由绘制时的水平压缩兜底, 不再拉宽成椭圆。
     static Rectangle SeqBadgeRect(Annot a)
     {
-        string s = SeqText(a.No, a.SeqFmt);
         int h = a.Rect.Height;
-        int w = h;
-        try
-        {
-            using (Font f = new Font(a.FontFamily, a.FontPt, FontStyle.Bold))
-                w = Math.Max(h, Math.Min(h * 5 / 4, TextRenderer.MeasureText(s, f).Width + 12));
-        }
-        catch { }
-        return new Rectangle(a.Rect.X + (a.Rect.Width - w) / 2, a.Rect.Y, w, h);
+        return new Rectangle(a.Rect.X + (a.Rect.Width - h) / 2, a.Rect.Y, h, h);
     }
 
     static string SeqText(int n, string fmt)
@@ -6550,10 +7216,80 @@ partial class ShotService
         public static int ClosedCount = 0;   // 自然关闭数(用户双击/菜单关)
         public static int GcClosedCount = 0; // 被回收器关掉的数量
 
+        static void PLog(string msg)
+        {
+            try { System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Application.ExecutablePath), "shot-service.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + "\r\n"); } catch { }
+        }
+
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool ReleaseCapture();
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int idHook, PinKbdHookProc proc, IntPtr hMod, uint tid);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hh);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hh, int code, IntPtr wp, IntPtr lp);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string mn);
+        delegate IntPtr PinKbdHookProc(int code, IntPtr wp, IntPtr lp);
+        const int PIN_WH_KEYBOARD_LL = 13;
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct PinKBDLLHOOKSTRUCT { public uint vkCode, scanCode, flags, time; public System.UIntPtr dwExtraInfo; }
         readonly Bitmap img;
         readonly float ratio;
+        Timer appearTm;                      // 出现动画
+        float appearK = 0f;                  // 0→1 渐显
+
+        // ---- 贴图期 Esc 保底 (2026-10-19 老大需求: 贴图贴上后 Esc 智能退出) ----
+        // 贴图窗 TopMost 但无焦点, 窗体 OnKeyDown 收不到 Esc → 自挂 WH_KEYBOARD_LL (照抄遮罩 kbHookProc 铁律:
+        // 委托必须存静态字段, 否则 GC 回收后 native 崩; 多贴图共享一个钩子, Esc 关"最后激活"的那张)
+        static readonly PinKbdHookProc pinKbProc = new PinKbdHookProc(PinKbProcCore);
+        static IntPtr pinKbHook = IntPtr.Zero;
+        static int pinAlive = 0;
+        static PinForm lastActivePin;
+        static void PinEnsureHook(bool on)
+        {
+            try
+            {
+                if (on && pinKbHook == IntPtr.Zero)
+                {
+                    pinKbHook = SetWindowsHookEx(PIN_WH_KEYBOARD_LL, pinKbProc, GetModuleHandle(null), 0);
+                    PLog("pin: esc hook=" + pinKbHook);
+                }
+                else if (!on && pinKbHook != IntPtr.Zero && pinAlive <= 0)
+                {
+                    UnhookWindowsHookEx(pinKbHook); pinKbHook = IntPtr.Zero;
+                    PLog("pin: esc hook off");
+                }
+            }
+            catch { }
+        }
+        static IntPtr PinKbProcCore(int code, IntPtr wp, IntPtr lp)
+        {
+            try
+            {
+                if (code >= 0 && (wp == (IntPtr)0x0100 || wp == (IntPtr)0x0104) && lp != IntPtr.Zero)
+                {
+                    PinKBDLLHOOKSTRUCT k = (PinKBDLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(lp, typeof(PinKBDLLHOOKSTRUCT));
+                    if (k.vkCode == 0x1B) // VK_ESCAPE
+                    {
+                        PinForm t = lastActivePin;
+                        if (t != null && !t.IsDisposed)
+                        {
+                            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                            {
+                                try
+                                {
+                                    System.Threading.Thread.Sleep(80); // 等自家 OnKeyDown 先处理, 避免双重关闭竞态
+                                    PinForm t2 = lastActivePin;
+                                    if (t2 == null || t2.IsDisposed) return;
+                                    try { t2.BeginInvoke((Action)delegate { try { t2.Close(); } catch { } }); } catch { }
+                                }
+                                catch { }
+                            });
+                        }
+                    }
+                }
+            }
+            catch { }
+            return CallNextHookEx(pinKbHook, code, wp, lp);
+        }
 
         public PinForm(Bitmap image, Rectangle screenRect)
         {
@@ -6563,33 +7299,43 @@ partial class ShotService
             ShowInTaskbar = false;
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
-            Bounds = screenRect;
-            BackgroundImage = img;
-            BackgroundImageLayout = ImageLayout.Stretch;
+            Bounds = new Rectangle(screenRect.X, screenRect.Y, screenRect.Width, screenRect.Height);
             DoubleBuffered = true;
             KeyPreview = true;
+            BackgroundImage = img;   // 贴图=纯图片, 无阴影无圆角无边框 (2026-10-18 老大拍板砍掉美化)
+            // 出现动画 (150ms 渐显; 老大铁律: 过渡动画只能加不能删)
+            appearTm = new Timer { Interval = 15 };
+            appearTm.Tick += delegate
+            {
+                appearK += 0.15f;
+                if (appearK >= 1f) { appearK = 1f; appearTm.Stop(); appearTm.Dispose(); appearTm = null; }
+                Opacity = appearK;
+            };
+            appearTm.Start();
             // 句柄到手才入账; 关闭时销账并**主动释放位图**(BackgroundImage 不会被 WinForms 自动 Dispose, 原来会漏 GDI 句柄)
             this.HandleCreated += delegate { lock (Ledger) { Ledger[this.Handle] = DateTime.Now; } };
+            this.Activated += delegate { lastActivePin = this; };
             this.FormClosed += delegate
             {
                 lock (Ledger) { if (Ledger.Remove(this.Handle)) { } ClosedCount++; }
+                if (appearTm != null) { try { appearTm.Stop(); appearTm.Dispose(); } catch { } appearTm = null; }
                 try { BackgroundImage = null; img.Dispose(); } catch { }
+                if (lastActivePin == this) lastActivePin = null;
+                System.Threading.Interlocked.Decrement(ref pinAlive);
+                PinEnsureHook(false);
             };
+            System.Threading.Interlocked.Increment(ref pinAlive);
+            PinEnsureHook(true);
 
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.BackColor = Color.FromArgb(40, 41, 46); menu.ForeColor = DarkUI.Text;
             menu.Items.Add("放大 (+)", null, delegate { ScaleBy(1.1f); });
             menu.Items.Add("缩小 (-)", null, delegate { ScaleBy(1f / 1.1f); });
-            menu.Items.Add("实际大小 (1:1)", null, delegate { ResizeTo(img.Width, img.Height); });
+            menu.Items.Add("实际大小 (1:1)", null, delegate { ResizeTo(img.Width); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("复制图片", null, delegate { try { Clipboard.SetImage(img); } catch { } });
             menu.Items.Add("关闭 (双击/Esc)", null, delegate { Close(); });
             ContextMenuStrip = menu;
-        }
-
-        protected override CreateParams CreateParams
-        {
-            get { CreateParams cp = base.CreateParams; cp.ClassStyle |= 0x20000; return cp; } // CS_DROPSHADOW 阴影
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
@@ -6603,6 +7349,8 @@ partial class ShotService
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            // 中键 (2026-10-19 老大反馈两段式不顺手): 单击直接退出贴图
+            if (e.Button == MouseButtons.Middle) { Close(); return; }
             if (e.Button == MouseButtons.Left) { ReleaseCapture(); SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero); } // 拖动
         }
 
@@ -6616,18 +7364,18 @@ partial class ShotService
 
         void ScaleBy(float k)
         {
-            ResizeTo((int)(Width * k), (int)(Width * k * ratio));
+            int iw = Width;
+            ResizeTo((int)(iw * k));
         }
 
-        void ResizeTo(int w, int h)
+        void ResizeTo(int iw)
         {
-            if (w < 40) w = 40;
-            if (h < 30) h = 30;
-            if (w > SystemInformation.VirtualScreen.Width) w = SystemInformation.VirtualScreen.Width;
-            h = (int)(w * ratio);
-            // 中心锚
+            int ih = (int)(iw * ratio);
+            if (iw < 40) { iw = 40; ih = (int)(iw * ratio); }
+            if (iw > SystemInformation.VirtualScreen.Width) iw = SystemInformation.VirtualScreen.Width;
+            // 中心锚; 窗体 = 图片 (无阴影带)
             int cx = Left + Width / 2, cy = Top + Height / 2;
-            SetBounds(cx - w / 2, cy - h / 2, w, h);
+            SetBounds(cx - iw / 2, cy - ih / 2, iw, ih);
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
