@@ -96,6 +96,7 @@ partial class ShotService
             // 照 PixPin/ShareX: 遮罩显示前先冻结全屏(此时屏幕无任何遮罩物), 选区最终从冻结图裁剪
             Rectangle vs = SystemInformation.VirtualScreen;
             Bitmap pre = null;
+            var swF = System.Diagnostics.Stopwatch.StartNew(); // 冻结耗时日志: 弱机/播视频场景定位"截图卡"是冻结慢还是绘制慢
             try
             {
                 pre = new Bitmap(vs.Width, vs.Height, PixelFormat.Format32bppArgb);
@@ -103,6 +104,7 @@ partial class ShotService
                     g.CopyFromScreen(vs.X, vs.Y, 0, 0, vs.Size);
             }
             catch (Exception ex) { Log("capture: preshot err: " + ex.Message); }
+            Log("capture: freeze " + vs.Width + "x" + vs.Height + " took " + swF.ElapsedMilliseconds + "ms");
             if (pre == null) { captureBusy = false; return; } // 截屏失败绝不弹黑罩锁屏
 
             ov = new CaptureOverlay(pre);
@@ -759,6 +761,10 @@ partial class ShotService
         // 放大镜内容渲染 (画到 MagForm 的位图上, 客户区坐标 0,0 = 放大镜左上角)
         // 🔴 2026-10-17: 原来直接画在遮罩 OnPaint 里, 被工具条(子控件)盖住 → 改成独立顶层窗体后,
         //    画法一字未改, 只是坐标系从「屏幕客户区」变成「放大镜本地坐标」(减去 mr.Location)。
+        // 🔴 放大镜信息条字体缓存 (旧码每帧 new Font x2 = 弱机拖动卡顿热点之三; 照 SizeLabelFont 先例, 缓存字体禁 Dispose — 10-19 JIT 崩溃教训)
+        static readonly Font MagFontInfo = new Font("Consolas", 9f);
+        static readonly Font MagFontTips = new Font("Consolas", 7.5f);
+
         Rectangle DrawMagnifier(Graphics g)
         {
             if (!MagOn() || frozen == null || !lastMouseOk) { paintedMagRect = Rectangle.Empty; return Rectangle.Empty; }
@@ -775,7 +781,15 @@ partial class ShotService
             sx = Math.Max(0, Math.Min(sx, frozen.Width - MagSrcW));
             sy = Math.Max(0, Math.Min(sy, frozen.Height - MagSrcH));
             Color curPx;
-            try { curPx = frozen.GetPixel(Math.Max(0, Math.Min(m.X, frozen.Width - 1)), Math.Max(0, Math.Min(m.Y, frozen.Height - 1))); }
+            try
+            {
+                // 🔴 GetPixel 每次锁整张全屏位图 (2K/4K 单次几 ms, 弱机更狠), 放大镜每帧一查 = 拖动卡顿热点之一。
+                //    改 1x1 LockBits + Marshal 直读, 开销 O(1) (照 3446 行 LockBits 先例)
+                Rectangle pr = new Rectangle(Math.Max(0, Math.Min(m.X, frozen.Width - 1)), Math.Max(0, Math.Min(m.Y, frozen.Height - 1)), 1, 1);
+                BitmapData pd = frozen.LockBits(pr, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                try { curPx = Color.FromArgb(System.Runtime.InteropServices.Marshal.ReadInt32(pd.Scan0, 0)); }
+                finally { frozen.UnlockBits(pd); }
+            }
             catch { paintedMagRect = Rectangle.Empty; return Rectangle.Empty; }
 
             g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
@@ -786,11 +800,23 @@ partial class ShotService
             // PixPin 同款: 框选后只放大选取内的像素 — 选取外的格子涂黑 (不拾取)
             if (hasSel)
             {
+                // 🔴 旧码逐格 FillRectangle (MagSrcW*MagSrcH ≈ 576 次/帧) = 弱机拖动卡顿热点之二。
+                //    改按行合并连续段: 覆盖的格子完全不变, 调用次数 576 → 通常 <50, 视觉零变化
                 using (SolidBrush eb = new SolidBrush(Color.FromArgb(235, 18, 18, 18)))
                     for (int j = 0; j < MagSrcH; j++)
-                        for (int i = 0; i < MagSrcW; i++)
+                    {
+                        int i = 0;
+                        while (i < MagSrcW)
+                        {
                             if (!sel.Contains(sx + i, sy + j))
-                                g.FillRectangle(eb, LX + i * MagZoom, LY + j * MagZoom, MagZoom, MagZoom);
+                            {
+                                int i0 = i;
+                                while (i < MagSrcW && !sel.Contains(sx + i, sy + j)) i++;
+                                g.FillRectangle(eb, LX + i0 * MagZoom, LY + j * MagZoom, (i - i0) * MagZoom, MagZoom);
+                            }
+                            else i++;
+                        }
+                    }
             }
 
             // 行列高亮 (浅蓝贯穿, 照老大截图) + 网格淡线
@@ -820,8 +846,7 @@ partial class ShotService
             bool hex = ShiftDown();
             string colorTxt = MagColorText(curPx);
             string posTxt = "(" + (m.X + SystemInformation.VirtualScreen.X) + "," + (m.Y + SystemInformation.VirtualScreen.Y) + ")";
-            using (Font f = new Font("Consolas", 9f))
-            using (Font fs = new Font("Consolas", 7.5f))
+            Font f = MagFontInfo, fs = MagFontTips; // 缓存字体, 绝不 Dispose
             {
                 int tx = barR.X + 7, ty = barR.Y + 4;
                 // ① 坐标行 (PixPin lblPos)
@@ -830,7 +855,7 @@ partial class ShotService
                 // ② 颜色行 (未选工具=取色模式, PixPin colorBoxContainer: 色块+颜色值) / 选了工具=工具信息行
                 if (tool == null)
                 {
-                    g.FillRectangle(new SolidBrush(curPx), tx, ty + 1, 14, 14);
+                    using (SolidBrush cb = new SolidBrush(curPx)) g.FillRectangle(cb, tx, ty + 1, 14, 14); // 旧码每帧 new Brush 不释放 = 泄漏
                     g.DrawRectangle(Pens.White, tx, ty + 1, 14, 14);
                     g.DrawString(colorTxt, f, Brushes.White, tx + 19, ty);
                 }
