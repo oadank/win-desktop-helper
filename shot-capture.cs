@@ -63,7 +63,7 @@ partial class ShotService
             string fp = DoShot(VirtualScreen());
             using (Bitmap bmp = new Bitmap(fp))
             {
-                try { Clipboard.SetImage(bmp); } catch { }
+                try { ClipSetImage(bmp); } catch { }
             }
             Log("fullscreen shot: " + fp + " (image copied to clipboard)");
             ShowTrayInfo("已截全屏, 图片已复制到剪贴板: " + fp);
@@ -5475,16 +5475,25 @@ partial class ShotService
             try
             {
                 CommitTextInput();
-                using (Bitmap bmp = CropTaken())
-                {
-                    string path = SaveToShotDir(bmp);
-                    try { Clipboard.SetImage(bmp); } catch { }
-                    Log("capture saved: " + path + " (image copied to clipboard)");
-                    // 老大要求: 不用点了没反应的系统气泡, 保存后直接打开图片
-                    try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
-                    catch (Exception ox) { Log("capture open err: " + ox.Message); ShowTrayInfo("已保存: " + path); }
-                }
+                Bitmap bmp = CropTaken();
+                string path = SaveToShotDir(bmp);
+                Log("capture saved: " + path + " (clipboard -> bg thread)");
                 Close();
+                // 🔴 2026-10-20 卡顿根治: SetImage 同步写会被剪贴板监听大户(PixPin/微信/豆包/Sunshine)拖到 1 秒+
+                //    (XDN 实测双击确认 1087ms) —— 遮罩挂着不动 = "双击确认很卡"。先关遮罩(瞬时), 剪贴板后台写 (PixPin 同款手感)。
+                System.Threading.Thread t = new System.Threading.Thread(new System.Threading.ThreadStart(delegate
+                {
+                    int sw = Environment.TickCount;
+                    try { ClipSetImage(bmp); Log("capture saved image copied to clipboard (bg " + (Environment.TickCount - sw) + "ms)"); }
+                    catch (Exception ex) { Log("capture copy bg err: " + ex.Message); }
+                    finally { try { bmp.Dispose(); } catch { } }
+                }));
+                t.SetApartmentState(System.Threading.ApartmentState.STA);
+                t.IsBackground = true;
+                t.Start();
+                // 老大要求: 不用点了没反应的系统气泡, 保存后直接打开图片
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
+                catch (Exception ox) { Log("capture open err: " + ox.Message); ShowTrayInfo("已保存: " + path); }
             }
             catch (Exception ex) { Log("capture save err: " + ex.Message); ShowTrayInfo("保存失败: " + ex.Message); }
         }
@@ -5494,11 +5503,22 @@ partial class ShotService
             try
             {
                 CommitTextInput();
-                using (Bitmap bmp = CropTaken()) { try { Clipboard.SetImage(bmp); } catch { } }
-                Log("capture copied to clipboard"); // [2026-10-16 老大要求] 复制不弹气泡提醒
+                Bitmap bmp = CropTaken();
+                Close();
+                // 🔴 2026-10-20 卡顿根治 (XDN 实测双击确认 UI 线程被 SetImage 拖 1087ms):
+                //    先关遮罩(瞬时消失), 剪贴板后台 STA 线程写 —— PixPin 同款手感。
+                System.Threading.Thread t = new System.Threading.Thread(new System.Threading.ThreadStart(delegate
+                {
+                    int sw = Environment.TickCount;
+                    try { ClipSetImage(bmp); Log("capture copied to clipboard (bg " + (Environment.TickCount - sw) + "ms)"); } // [2026-10-16 老大要求] 复制不弹气泡提醒
+                    catch (Exception ex) { Log("capture copy bg err: " + ex.Message); }
+                    finally { try { bmp.Dispose(); } catch { } }
+                }));
+                t.SetApartmentState(System.Threading.ApartmentState.STA);
+                t.IsBackground = true;
+                t.Start();
             }
             catch (Exception ex) { Log("capture copy err: " + ex.Message); ShowTrayInfo("复制失败: " + ex.Message); }
-            Close();
         }
 
 
@@ -7363,7 +7383,7 @@ partial class ShotService
             menu.Items.Add("缩小 (-)", null, delegate { ScaleBy(1f / 1.1f); });
             menu.Items.Add("实际大小 (1:1)", null, delegate { ResizeTo(img.Width); });
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("复制图片", null, delegate { try { Clipboard.SetImage(img); } catch { } });
+            menu.Items.Add("复制图片", null, delegate { try { ShotService.ClipSetImage(img); } catch { } });
             menu.Items.Add("关闭 (双击/Esc)", null, delegate { Close(); });
             ContextMenuStrip = menu;
         }

@@ -1908,6 +1908,61 @@ public partial class ShotService
             if (err != null) { Log("clip " + tag + " err: " + err.Message); ClipLogHolder(tag); }
         }
     }
+    // 🔴 2026-10-20 剪贴板坏图根治: WinForms Clipboard.SetImage 写的 CF_DIB 是 32bpp BI_BITFIELDS,
+    // alpha 字节是未初始化内存(实测 130 万像素里 99.8% 的 alpha 既不是 0 也不是 255) ——
+    // GDI+ 自己读没事(按无 alpha 掩码忽略), 但尊重 alpha 的程序(微信粘贴/Qt/Sunshine 跨机同步)
+    // 读出来全是透明噪点 = 老大 XDN 实测"粘贴图片坏了"; Sunshine 更是直接不同步(实锤:
+    // PixPin 截的图 0.4s 内同步到 peer, 我们 SetImage 的图从不出现)。
+    // 正确姿势(PixPin 同款): PNG + 干净 DIB(BI_RGB 32bpp, alpha 全 255) + Bitmap 三格式齐上。
+    internal static void ClipSetImage(Bitmap bmp)
+    {
+        try
+        {
+            var dao = new System.Windows.Forms.DataObject();
+            try
+            {
+                // 🔴 不能 using/dispose: SetDataObject 是在后面才 flush 渲染, 流被提前释放会被静默丢格式 (实测踩坑)
+                var ms = new MemoryStream();
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                ms.Position = 0;
+                dao.SetData("PNG", false, ms);
+            }
+            catch (Exception px) { Log("clip png err: " + px.Message); }
+            try { dao.SetData("DeviceIndependentBitmap", DibFromBitmap(bmp)); }
+            catch (Exception dx) { Log("clip dib err: " + dx.Message); }
+            dao.SetImage(bmp); // CF_BITMAP (自家 watcher ContainsImage 依赖)
+            System.Windows.Forms.Clipboard.SetDataObject(dao, true);
+        }
+        catch (Exception ex) { Log("clip setimage err: " + ex.Message); }
+    }
+
+    // 手写 BITMAPINFOHEADER DIB: BI_RGB 32bpp, 底行在上, alpha 字节强制 255 (屏摄图全不透明)
+    static MemoryStream DibFromBitmap(Bitmap src)
+    {
+        int w = src.Width, h = src.Height, stride = w * 4;
+        byte[] data = new byte[40 + (long)stride * h];
+        Buffer.BlockCopy(BitConverter.GetBytes(40), 0, data, 0, 4);              // biSize
+        Buffer.BlockCopy(BitConverter.GetBytes(w), 0, data, 4, 4);               // biWidth
+        Buffer.BlockCopy(BitConverter.GetBytes(h), 0, data, 8, 4);               // biHeight (正=bottom-up)
+        Buffer.BlockCopy(BitConverter.GetBytes((short)1), 0, data, 12, 2);       // biPlanes
+        Buffer.BlockCopy(BitConverter.GetBytes((short)32), 0, data, 14, 2);      // biBitCount
+        Buffer.BlockCopy(BitConverter.GetBytes(0u), 0, data, 16, 4);             // biCompression=BI_RGB
+        Buffer.BlockCopy(BitConverter.GetBytes((uint)((long)stride * h)), 0, data, 20, 4); // biSizeImage
+        System.Drawing.Imaging.BitmapData bd = src.LockBits(new Rectangle(0, 0, w, h),
+            System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            for (int y = 0; y < h; y++)
+            {
+                int off = 40 + y * stride;
+                System.Runtime.InteropServices.Marshal.Copy((IntPtr)((long)bd.Scan0 + (long)(h - 1 - y) * bd.Stride), data, off, stride);
+                for (int x = 3; x < stride; x += 4) data[off + x] = 255;
+            }
+        }
+        finally { src.UnlockBits(bd); }
+        return new MemoryStream(data);
+    }
+
     // 诊断: 剪贴板被谁占着 (卡死时看日志)
     static void ClipLogHolder(string why)
     {
@@ -2614,7 +2669,7 @@ public partial class ShotService
                                 {
                                     using (var ms = new MemoryStream(bytes))
                                     using (var img = Image.FromStream(ms))
-                                        Clipboard.SetImage(new Bitmap(img));
+                                        ClipSetImage(new Bitmap(img));
                                 }, "set-image");
                                 return;
                             }
