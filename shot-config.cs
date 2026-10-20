@@ -113,7 +113,7 @@ partial class ShotService
             d["mark.color"] = color.ToArgb().ToString();
             d["mark.fontPt"] = fontPt.ToString();
             d["mark.fontFamily"] = fontFamily == null ? "" : fontFamily;
-            d["mark.seqFmt"] = string.IsNullOrEmpty(seqFmt) ? "1" : seqFmt;
+            d["mark.seqFmt"] = "1"; // 固定数字, 不记忆(2026-10-20 拍板); 顺带把旧机器已存的 A 覆盖回 1
             d["mark.mosaicStrength"] = mosaicStrength.ToString();
             d["mark.foldArrow"] = CaptureOverlay.foldArrowTool;
             d["mark.foldShape"] = CaptureOverlay.foldShapeTool;

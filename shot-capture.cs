@@ -1182,7 +1182,7 @@ partial class ShotService
                 int st; if (int.TryParse(Cfg("mark.arrowStyle", ""), out st)) markArrowStyle0 = st;
                 int ci; if (int.TryParse(Cfg("mark.color", ""), System.Globalization.NumberStyles.Integer, null, out ci)) markColor0 = Color.FromArgb(ci);
                 int fp; if (int.TryParse(Cfg("mark.fontPt", ""), out fp) && fp >= 8 && fp <= 72) markFontPt0 = fp;
-                string sf = Cfg("mark.seqFmt", "1"); if (sf.Length == 1 && "1IaA".IndexOf(sf) >= 0) markSeqFmt0 = sf;
+                markSeqFmt0 = "1"; // 序号格式固定默认数字, 不跨会话记忆(老大 2026-10-20 拍板: 永远默认 1.2.3)
                 // 新字段: 头型/平滑/虚线/标注线 (与旧 mark.arrowStyle 并存, 优先新字段)
                 int aet2; if (int.TryParse(Cfg("mark.arrowEnd", ""), out aet2)) markEndType0 = aet2;
                 int ast2; if (int.TryParse(Cfg("mark.arrowStart", ""), out ast2)) markStartType0 = ast2;
