@@ -1670,6 +1670,7 @@ public partial class ShotService
         if (all.Count == 0) return;
         if (text == null || text.Length == 0) return;
         string payload = text.Length > 200000 ? text.Substring(0, 200000) : text;
+        int[] pushFails = new int[all.Count];   // 每轮推送的连续失败计数 (日志降噪用, 轮次内有效)
         for (int i = 0; i < all.Count; i++)
         {
             string peer = all[i];
@@ -1681,6 +1682,7 @@ public partial class ShotService
             if (peerIp == ClipSelfTailIp) continue;
             string url = peer.TrimEnd('/') + "/clipboard/set?sync=1"; // sync=1: 对端收下后不得再广播
             string bodyTxt = payload;
+            int idx = i;   // for 循环变量不能直接进线程池闭包
             Interlocked.Increment(ref clipPushing);
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -1695,9 +1697,19 @@ public partial class ShotService
                     req.ContentLength = data.Length;
                     using (var s = req.GetRequestStream()) s.Write(data, 0, data.Length);
                     using (var r = (HttpWebResponse)req.GetResponse()) { }
-                    Log("clip push ok → " + url);
+                    // 🔴 2026-10-20 失败日志降噪: offline peer 反复失败会刷屏 (XDN 实测 30s 一条"无法将数据写入传输连接")。
+                    //    首次失败记一条, 之后静默重试(每 60 次提醒一次), 恢复时记一条。
+                    if (System.Threading.Interlocked.Exchange(ref pushFails[idx], 0) > 0)
+                        Log("clip push ok → " + url + " (recovered)");
+                    else
+                        Log("clip push ok → " + url);
                 }
-                catch (Exception ex) { Log("clip push fail " + url + ": " + ex.Message); }
+                catch (Exception ex)
+                {
+                    int fails = System.Threading.Interlocked.Increment(ref pushFails[idx]);
+                    if (fails == 1 || fails % 60 == 0)
+                        Log("clip push fail " + url + ": " + ex.Message + (fails > 1 ? " (x" + fails + ")" : ""));
+                }
                 finally { Interlocked.Decrement(ref clipPushing); }
             });
         }

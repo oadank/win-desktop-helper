@@ -335,6 +335,13 @@ partial class ShotService
         if (pickEnabled != 1) return;
         try
         {
+            // 🔴 2026-10-20 截图遮罩存活期间取词完全让路: 遮罩上的双击确认会被误当取词点击,
+            //    触发一轮 UIA 查询白耗 1 秒+ (XDN 实测), 且遮罩全屏盖着时卡片/取词点本来就不可交互
+            if (msg == PICK_DOWN || msg == PICK_UP)
+            {
+                CaptureOverlay ovLive = CaptureOverlay.live;
+                if (ovLive != null && !ovLive.IsDisposed && ovLive.Visible) return;
+            }
             if (msg == PICK_DOWN || msg == PICK_UP || msg == PICK_RBUTTONDOWN ||
                 msg == PICK_RBUTTONUP || msg == PICK_WHEEL || msg == PICK_MOVE)
                 pickUserAct = Environment.TickCount;
