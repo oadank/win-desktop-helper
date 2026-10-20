@@ -3682,8 +3682,8 @@ partial class ShotService
                                     // 恢复 K_MOSAIC 出口同款默认 (后续标注仍走快速路径)
                                     g.InterpolationMode = InterpolationMode.Bilinear;
                                     g.PixelOffsetMode = PixelOffsetMode.Default;
-                                    using (Pen bp = new Pen(Color.FromArgb(230, 47, 156, 245), 2f))
-                                        g.DrawRectangle(bp, dr.X + 1, dr.Y + 1, dr.Width - 3, dr.Height - 3);
+                                    // 🔴 无边框 (老大 2026-10-20: 放大镜标注不该自带选框, PixPin 同款无缝放大;
+                                    //    旧版画 2px 天蓝框长得跟选区框一样被当成 bug)。选中拖动时的虚线编辑框在 DrawAnnotEditOverlay, 不受影响
                                 }
                             }
                         }
