@@ -3163,6 +3163,11 @@ partial class ShotService
             if (selMoving)
             {
                 int dx = sp.X - selDragFrom.X, dy = sp.Y - selDragFrom.Y;
+                // 🔴 平移整体钳进选区 (老大 2026-10-20 抓包: 放大镜标注能拖出选框; PixPin 同款"拖到边撞墙")。
+                //    钳 dx/dy 本身, Pts 与 Rect 两个分支自动同受钳; 存量已越界标注最多拉回贴边, 不会再出去
+                Rectangle dragBase = selDragSnap.Rect;
+                dx = Math.Max(sel.Left - dragBase.Left, Math.Min(dx, sel.Right - dragBase.Right));
+                dy = Math.Max(sel.Top - dragBase.Top, Math.Min(dy, sel.Bottom - dragBase.Bottom));
                 if (a.Pts != null && a.Pts.Count > 0 && a.Kind != Annot.K_SEQ)
                 {
                     a.Pts.Clear();
